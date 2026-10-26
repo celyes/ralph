@@ -46,6 +46,9 @@
             "Celyes\\RalphPhp\\Tests\\": "tests/"
         }
     },
+    "bin": [
+        "bin/ralph"
+    ],
     "minimum-stability": "stable",
     "prefer-stable": true,
     "config": {

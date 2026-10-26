@@ -1,0 +1,101 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * Ralph PHP command-line entry point.
+ *
+ * This file is registered as a Composer binary, so Composer links it into the
+ * consuming project's `vendor/bin/` (or into the global bin directory). It is
+ * deliberately written in widely compatible PHP: it has to be able to report an
+ * unsupported runtime instead of failing to parse on it.
+ *
+ * Its only responsibilities are to refuse unsuitable runtimes, locate the
+ * Composer autoloader for whichever installation layout is in use, and hand
+ * over to the CLI application.
+ */
+
+// Exit codes used before the application takes over. The full, documented set
+// of exit codes belongs to the CLI application.
+define('RALPH_EXIT_SUCCESS', 0);
+define('RALPH_EXIT_ENVIRONMENT', 78);
+
+define('RALPH_MINIMUM_PHP_VERSION', '8.3.0');
+
+if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
+    fwrite(STDERR, 'ralph must be run from the command line; the current PHP SAPI is "' . PHP_SAPI . '".' . PHP_EOL);
+    exit(RALPH_EXIT_ENVIRONMENT);
+}
+
+if (version_compare(PHP_VERSION, RALPH_MINIMUM_PHP_VERSION, '<')) {
+    fwrite(STDERR, 'ralph requires PHP ' . RALPH_MINIMUM_PHP_VERSION . ' or newer; this is PHP ' . PHP_VERSION . ' (' . PHP_BINARY . ').' . PHP_EOL);
+    exit(RALPH_EXIT_ENVIRONMENT);
+}
+
+/**
+ * Locate the Composer autoloader.
+ *
+ * Covers the three supported layouts:
+ *  - the package's own checkout, where the autoloader is in its `vendor/`;
+ *  - installation as a project dependency, where this file lives in
+ *    `vendor/celyes/ralph-php/bin/` and the autoloader is three levels up;
+ *  - a global install, where Composer sets COMPOSER_VENDOR_DIR or the layout
+ *    matches the dependency case inside the global home directory.
+ *
+ * Composer's generated bin proxy resolves symlinks for us, but the plain file
+ * may also be invoked directly through a symlink, so real paths are resolved
+ * explicitly.
+ */
+$ralphAutoloaderCandidates = array();
+
+$ralphVendorDirectory = getenv('COMPOSER_VENDOR_DIR');
+if (is_string($ralphVendorDirectory) && $ralphVendorDirectory !== '') {
+    $ralphAutoloaderCandidates[] = rtrim($ralphVendorDirectory, '/\\') . '/autoload.php';
+}
+
+$ralphBinDirectory = __DIR__;
+$ralphRealBinDirectory = realpath(__DIR__);
+if (is_string($ralphRealBinDirectory) && $ralphRealBinDirectory !== '') {
+    $ralphBinDirectory = $ralphRealBinDirectory;
+}
+
+$ralphAutoloaderCandidates[] = $ralphBinDirectory . '/../vendor/autoload.php';
+$ralphAutoloaderCandidates[] = $ralphBinDirectory . '/../../../autoload.php';
+
+$ralphAutoloader = null;
+foreach ($ralphAutoloaderCandidates as $ralphAutoloaderCandidate) {
+    if (is_file($ralphAutoloaderCandidate)) {
+        $ralphAutoloader = $ralphAutoloaderCandidate;
+        break;
+    }
+}
+
+if ($ralphAutoloader === null) {
+    fwrite(STDERR, 'ralph could not find a Composer autoloader. Looked for:' . PHP_EOL);
+    foreach ($ralphAutoloaderCandidates as $ralphAutoloaderCandidate) {
+        fwrite(STDERR, '  - ' . $ralphAutoloaderCandidate . PHP_EOL);
+    }
+    fwrite(STDERR, 'Run "composer install" in the package checkout, or reinstall celyes/ralph-php.' . PHP_EOL);
+    exit(RALPH_EXIT_ENVIRONMENT);
+}
+
+require $ralphAutoloader;
+
+unset(
+    $ralphAutoloader,
+    $ralphAutoloaderCandidate,
+    $ralphAutoloaderCandidates,
+    $ralphBinDirectory,
+    $ralphRealBinDirectory,
+    $ralphVendorDirectory
+);
+
+if (!class_exists(Celyes\RalphPhp\Ralph::class)) {
+    fwrite(STDERR, 'ralph loaded a Composer autoloader that does not provide celyes/ralph-php. Reinstall the package.' . PHP_EOL);
+    exit(RALPH_EXIT_ENVIRONMENT);
+}
+
+// The CLI application — help output, version output, command dispatch and
+// exception handling — is the next checklist item and will be invoked here.
+fwrite(STDOUT, Celyes\RalphPhp\Ralph::NAME . ' ' . Celyes\RalphPhp\Ralph::VERSION . PHP_EOL);
+
+exit(RALPH_EXIT_SUCCESS);
