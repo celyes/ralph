@@ -14,9 +14,9 @@
  * over to the CLI application.
  */
 
-// Exit codes used before the application takes over. The full, documented set
-// of exit codes belongs to the CLI application.
-define('RALPH_EXIT_SUCCESS', 0);
+// Exit code used for the environment failures detected before the application
+// can be loaded. It matches Celyes\RalphPhp\Console\ExitCode::CONFIGURATION,
+// which owns the documented set of exit codes.
 define('RALPH_EXIT_ENVIRONMENT', 78);
 
 define('RALPH_MINIMUM_PHP_VERSION', '8.3.0');
@@ -94,8 +94,7 @@ if (!class_exists(Celyes\RalphPhp\Ralph::class)) {
     exit(RALPH_EXIT_ENVIRONMENT);
 }
 
-// The CLI application — help output, version output, command dispatch and
-// exception handling — is the next checklist item and will be invoked here.
-fwrite(STDOUT, Celyes\RalphPhp\Ralph::NAME . ' ' . Celyes\RalphPhp\Ralph::VERSION . PHP_EOL);
-
-exit(RALPH_EXIT_SUCCESS);
+// From here on the CLI application owns argument parsing, command dispatch,
+// error reporting, and the exit status. It is given argv explicitly and never
+// calls exit() itself, so it stays usable from tests.
+exit(Celyes\RalphPhp\Console\Application::create()->run(array_values($argv)));
