@@ -1,0 +1,16 @@
+* text=auto eol=lf
+
+/bin/*      text eol=lf
+*.php       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.sh        text eol=lf
+
+# Exclude development-only files from distribution archives.
+/.gitattributes   export-ignore
+/.gitignore       export-ignore
+/tests/           export-ignore
+/PROJECT.md       export-ignore
+/PROGRESS.md      export-ignore
+/PROMPT.md        export-ignore
+/loop.sh          export-ignore
