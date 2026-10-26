@@ -41,6 +41,18 @@ final readonly class CliResult
     }
 
     /**
+     * Both streams together, in no particular order.
+     *
+     * For assertions about a message that a foreign program emits, where which
+     * stream it chose is that program's business rather than the behaviour
+     * under test.
+     */
+    public function allOutput(): string
+    {
+        return $this->standardOutput . $this->errorOutput;
+    }
+
+    /**
      * A readable rendering of the whole invocation, used as the assertion
      * message so a failure shows what ran and what it printed.
      */

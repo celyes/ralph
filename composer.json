@@ -56,9 +56,11 @@
         "optimize-autoloader": true
     },
     "scripts": {
-        "test": "phpunit"
+        "test": "phpunit",
+        "test:installation": "phpunit --group installation"
     },
     "scripts-descriptions": {
-        "test": "Run the automated test suite."
+        "test": "Run the automated test suite.",
+        "test:installation": "Install the package as a project dependency and as a global tool, and check the installed binary."
     }
 }

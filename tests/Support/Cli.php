@@ -7,13 +7,14 @@ namespace Celyes\RalphPhp\Tests\Support;
 use RuntimeException;
 
 /**
- * Runs the `ralph` binary as a real subprocess.
+ * Runs the `ralph` binary, and other commands, as real subprocesses.
  *
  * Driving the application in-process cannot show that the entry point itself
  * works: the shebang, the runtime check, and the Composer-autoloader discovery
  * in `bin/ralph` only run when the file is actually executed. This helper
- * covers that, and later sections reuse it for runs that have to be
- * interrupted or time-limited.
+ * covers that, serves the installation tests that have to run an installed
+ * binary and Composer itself, and is reused by later sections for runs that
+ * have to be interrupted or time-limited.
  */
 final class Cli
 {
@@ -23,7 +24,7 @@ final class Cli
     private const int TIMEOUT_SECONDS = 60;
 
     /**
-     * Run `php bin/ralph <arguments>` and capture its result.
+     * Run `php bin/ralph <arguments>` from the package checkout.
      *
      * The current PHP binary is used explicitly rather than relying on the
      * shebang, so the test exercises the runtime the suite is running on.
@@ -37,8 +38,29 @@ final class Cli
         ?string $workingDirectory = null,
         array $environment = [],
     ): CliResult {
-        $command = [PHP_BINARY, Paths::inPackage('bin/ralph'), ...$arguments];
+        return self::runCommand(
+            [PHP_BINARY, Paths::inPackage('bin/ralph'), ...$arguments],
+            $workingDirectory,
+            $environment,
+        );
+    }
 
+    /**
+     * Run an arbitrary command and capture its result.
+     *
+     * Used for the binaries an installation produces, which live outside the
+     * checkout, and for Composer itself. The command is an argument array, so
+     * no part of it is interpreted by a shell.
+     *
+     * @param list<string> $command the program and its arguments
+     * @param array<string, string|false> $environment variables to add to, or
+     *        with `false`, remove from the inherited environment
+     */
+    public static function runCommand(
+        array $command,
+        ?string $workingDirectory = null,
+        array $environment = [],
+    ): CliResult {
         $descriptors = [
             0 => ['file', self::nullDevice(), 'rb'],
             1 => ['pipe', 'wb'],
@@ -86,7 +108,7 @@ final class Cli
         while ($open !== []) {
             if (microtime(true) >= $deadline) {
                 throw new RuntimeException(sprintf(
-                    'ralph did not finish within %d seconds.',
+                    'The command did not finish within %d seconds.',
                     self::TIMEOUT_SECONDS,
                 ));
             }
@@ -95,7 +117,7 @@ final class Cli
             $write = $except = [];
 
             if (stream_select($read, $write, $except, 1) === false) {
-                throw new RuntimeException('Unable to wait for output from ralph.');
+                throw new RuntimeException('Unable to wait for output from the command.');
             }
 
             foreach ($read as $stream) {
@@ -121,9 +143,10 @@ final class Cli
      *
      * The inherited environment is passed through so the suite works under the
      * developer's PHP configuration, except that COMPOSER_VENDOR_DIR is dropped
-     * unless a test sets it: `bin/ralph` prefers it when locating the
-     * autoloader, and a value left over from the surrounding shell would make
-     * these tests depend on it.
+     * unless a test sets it. `bin/ralph` consults it as a last resort when
+     * locating the autoloader, and Composer reads it when choosing where to
+     * install, so a value left over from the surrounding shell would decide
+     * what these tests measure.
      *
      * @param array<string, string|false> $overrides
      * @return array<string, string>

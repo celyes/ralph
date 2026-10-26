@@ -34,22 +34,31 @@ if (version_compare(PHP_VERSION, RALPH_MINIMUM_PHP_VERSION, '<')) {
 /**
  * Locate the Composer autoloader.
  *
- * Covers the three supported layouts:
- *  - the package's own checkout, where the autoloader is in its `vendor/`;
- *  - installation as a project dependency, where this file lives in
- *    `vendor/celyes/ralph-php/bin/` and the autoloader is three levels up;
- *  - a global install, where Composer sets COMPOSER_VENDOR_DIR or the layout
- *    matches the dependency case inside the global home directory.
+ * Candidates are ordered from most to least authoritative about *which
+ * installation this file belongs to*, because loading the autoloader of some
+ * other project would either fail outright or silently run a different copy of
+ * the package:
  *
- * Composer's generated bin proxy resolves symlinks for us, but the plain file
- * may also be invoked directly through a symlink, so real paths are resolved
- * explicitly.
+ *  - the path recorded by Composer's generated bin proxy, which names the
+ *    autoloader of the installation whose `bin/` was invoked, covering both a
+ *    project dependency and a global tool;
+ *  - the package's own checkout, where the autoloader is in its `vendor/`;
+ *  - a vendor directory three levels up, which is this file's location when the
+ *    plain binary (rather than the proxy) is executed from
+ *    `<vendor>/celyes/ralph-php/bin/`, whether that vendor directory belongs to
+ *    a project or to the global Composer home;
+ *  - COMPOSER_VENDOR_DIR, as a last resort only. It describes the vendor
+ *    directory Composer is being pointed at, which is not necessarily the
+ *    installation running here: preferring it would let a global `ralph` load
+ *    an unrelated project's autoloader.
+ *
+ * The proxy resolves symlinks for us, but the plain file may also be invoked
+ * directly through a symlink, so real paths are resolved explicitly.
  */
 $ralphAutoloaderCandidates = array();
 
-$ralphVendorDirectory = getenv('COMPOSER_VENDOR_DIR');
-if (is_string($ralphVendorDirectory) && $ralphVendorDirectory !== '') {
-    $ralphAutoloaderCandidates[] = rtrim($ralphVendorDirectory, '/\\') . '/autoload.php';
+if (isset($GLOBALS['_composer_autoload_path']) && is_string($GLOBALS['_composer_autoload_path']) && $GLOBALS['_composer_autoload_path'] !== '') {
+    $ralphAutoloaderCandidates[] = $GLOBALS['_composer_autoload_path'];
 }
 
 $ralphBinDirectory = __DIR__;
@@ -60,6 +69,11 @@ if (is_string($ralphRealBinDirectory) && $ralphRealBinDirectory !== '') {
 
 $ralphAutoloaderCandidates[] = $ralphBinDirectory . '/../vendor/autoload.php';
 $ralphAutoloaderCandidates[] = $ralphBinDirectory . '/../../../autoload.php';
+
+$ralphVendorDirectory = getenv('COMPOSER_VENDOR_DIR');
+if (is_string($ralphVendorDirectory) && $ralphVendorDirectory !== '') {
+    $ralphAutoloaderCandidates[] = rtrim($ralphVendorDirectory, '/\\') . '/autoload.php';
+}
 
 $ralphAutoloader = null;
 foreach ($ralphAutoloaderCandidates as $ralphAutoloaderCandidate) {
