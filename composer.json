@@ -2,7 +2,15 @@
     "name": "celyes/ralph-php",
     "description": "A Ralph-style development loop for PHP: reads tasks from a Markdown checklist, delegates them to a coding agent, verifies the result, and commits the work.",
     "type": "library",
-    "keywords": ["ralph", "agent", "automation", "cli", "codex", "claude", "developer-tools"],
+    "keywords": [
+        "ralph",
+        "agent",
+        "automation",
+        "cli",
+        "codex",
+        "claude",
+        "developer-tools"
+    ],
     "homepage": "https://github.com/celyes/ralph-php",
     "license": "MIT",
     "authors": [
@@ -27,6 +35,16 @@
         "phpunit/phpunit": "^11.5",
         "phpstan/phpstan": "^2.1",
         "friendsofphp/php-cs-fixer": "^3.75"
+    },
+    "autoload": {
+        "psr-4": {
+            "Celyes\\RalphPhp\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Celyes\\RalphPhp\\Tests\\": "tests/"
+        }
     },
     "minimum-stability": "stable",
     "prefer-stable": true,
