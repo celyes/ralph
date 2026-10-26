@@ -147,12 +147,15 @@ final class ConfigurationLoaderTest extends TestCase
     #[Test]
     public function configured_paths_are_resolved_against_the_project_root(): void
     {
-        $this->project->writeConfigArray(['tasks' => 'docs/./work.md', 'context' => '/etc/ralph/CONTEXT.md']);
+        // An absolute path is used as written rather than joined to the root;
+        // it has to stay inside the project, which the validator enforces.
+        $absoluteContext = $this->project->path('docs/CONTEXT.md');
+        $this->project->writeConfigArray(['tasks' => 'docs/./work.md', 'context' => $absoluteContext]);
 
         $config = (new ConfigurationLoader())->load($this->project->root());
 
         self::assertSame($this->project->path('docs/work.md'), $config->tasksFile());
-        self::assertSame('/etc/ralph/CONTEXT.md', $config->contextFile());
+        self::assertSame($absoluteContext, $config->contextFile());
         self::assertSame($this->project->root(), $config->projectRoot());
         self::assertSame($this->project->path('.ralph/config.json'), $config->source());
     }

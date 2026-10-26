@@ -71,4 +71,35 @@ final class PathTest extends TestCase
     {
         self::assertSame('/does/not/exist/tasks.md', Path::normalize('/does/not/./exist/nope/../tasks.md'));
     }
+
+    /**
+     * @return iterable<string, array{string, bool}>
+     */
+    public static function containment(): iterable
+    {
+        yield 'a file below the root' => ['/srv/project/.ralph/tasks.md', true];
+        yield 'the root itself' => ['/srv/project', true];
+        yield 'the root with a trailing separator' => ['/srv/project/', true];
+        yield 'the parent' => ['/srv', false];
+        yield 'a sibling with a shared prefix' => ['/srv/project-two/tasks.md', false];
+        yield 'escaping with parent segments' => ['/srv/project/docs/../../tasks.md', false];
+        yield 'returning after parent segments' => ['/srv/project/docs/../tasks.md', true];
+        yield 'elsewhere entirely' => ['/etc/ralph/tasks.md', false];
+    }
+
+    #[Test]
+    #[DataProvider('containment')]
+    public function containment_is_decided_after_normalization(string $path, bool $expected): void
+    {
+        self::assertSame($expected, Path::isInside('/srv/project/', $path));
+    }
+
+    #[Test]
+    public function everything_is_inside_the_filesystem_root(): void
+    {
+        // rtrim() on the root separator must not turn the prefix into "" and
+        // start matching relative paths.
+        self::assertTrue(Path::isInside('/', '/etc/ralph/tasks.md'));
+        self::assertFalse(Path::isInside('/srv/project', 'tasks.md'));
+    }
 }

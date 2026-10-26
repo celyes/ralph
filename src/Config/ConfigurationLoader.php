@@ -18,13 +18,18 @@ use Celyes\RalphPhp\Ralph;
  * `checks` is replaced wholesale — a user who lists two checks means those two,
  * not those two plus the package's default.
  *
- * The loader checks shape only. Whether the values make sense — positive
- * limits, non-empty commands, paths inside the repository, an adapter that is
- * actually registered — is the validator's responsibility, and preflight checks
- * whether the environment can satisfy them.
+ * The loader checks shape only: whether the values make sense — positive
+ * limits, non-empty commands, paths inside the repository — is
+ * {@see ConfigurationValidator}'s responsibility, and preflight checks whether
+ * the environment can satisfy them. Every configuration leaves this class
+ * validated, so nothing downstream has to ask whether its settings are usable.
  */
 final class ConfigurationLoader
 {
+    public function __construct(private readonly ConfigurationValidator $validator = new ConfigurationValidator())
+    {
+    }
+
     /**
      * Settings recognised at the top level of the file.
      *
@@ -44,7 +49,7 @@ final class ConfigurationLoader
      * Load the configuration of the project rooted at the given directory.
      *
      * @throws ConfigurationException when the directory, the file, the JSON, or
-     *                                a setting's type is unusable
+     *                                a setting's type or value is unusable
      */
     public function load(string $projectRoot): Configuration
     {
@@ -115,13 +120,14 @@ final class ConfigurationLoader
     }
 
     /**
-     * Merge one document over the defaults and build the value objects.
+     * Merge one document over the defaults, build the value objects, and
+     * validate the result.
      */
     private function fromRaw(RawConfiguration $raw, string $projectRoot, ?string $source): Configuration
     {
         $raw->rejectUnknownKeys(self::KNOWN_KEYS);
 
-        return new Configuration(
+        return $this->validator->validate(new Configuration(
             $projectRoot,
             $source,
             $raw->string('tasks', Defaults::TASKS_FILE),
@@ -131,7 +137,7 @@ final class ConfigurationLoader
             $this->checks($raw),
             GitSettings::fromRaw($raw->section('git')),
             Limits::fromRaw($raw->section('limits')),
-        );
+        ));
     }
 
     /**

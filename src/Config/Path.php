@@ -26,6 +26,28 @@ final class Path
     }
 
     /**
+     * Whether a path is the given root or a location below it.
+     *
+     * Both sides are normalised first, so `..` segments cannot smuggle a path
+     * out of the root: a configured `../../tasks.md` is recognised as outside
+     * the repository instead of being treated as a harmless relative path.
+     * Textual, like the rest of this class, so it works for paths that do not
+     * exist yet — and deliberately not symlink-aware, which is a filesystem
+     * question for preflight rather than a configuration one.
+     */
+    public static function isInside(string $root, string $path): bool
+    {
+        $root = self::normalize($root);
+        $path = self::normalize($path);
+
+        if ($root === $path) {
+            return true;
+        }
+
+        return str_starts_with($path, rtrim($root, '/') . '/');
+    }
+
+    /**
      * Collapse separators and resolve `.` and `..` segments textually.
      *
      * Textual on purpose: the result must be predictable for paths that do not

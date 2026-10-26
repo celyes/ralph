@@ -30,6 +30,14 @@ final class Defaults
     public const string CONTEXT_FILE = Ralph::PROJECT_DIRECTORY . '/CONTEXT.md';
 
     /**
+     * Directory the runner owns: state, logs, memory and task worktrees.
+     *
+     * Its contents are generated, git-ignored and removed by cleanup, so a
+     * configured task checklist or context file must not live here.
+     */
+    public const string RUNTIME_DIRECTORY = Ralph::PROJECT_DIRECTORY . '/runtime';
+
+    /**
      * Agent used when `run --agent NAME` is not given.
      */
     public const string AGENT = 'codex';
