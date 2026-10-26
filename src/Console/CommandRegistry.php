@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Console;
 
 use Celyes\RalphPhp\Console\Command\CommandInterface;
+use Celyes\RalphPhp\Support\Suggestions;
 
 /**
  * The set of commands an application exposes.
@@ -71,20 +72,6 @@ final class CommandRegistry
      */
     public function suggestionsFor(string $name): array
     {
-        $candidate = strtolower($name);
-        $matches = [];
-
-        foreach ($this->names() as $registered) {
-            $distance = levenshtein($candidate, $registered);
-            $tolerance = (int) ceil(max(strlen($registered), 1) / 3);
-
-            if ($distance <= max($tolerance, 2) || str_contains($registered, $candidate)) {
-                $matches[$registered] = $distance;
-            }
-        }
-
-        asort($matches);
-
-        return array_keys($matches);
+        return Suggestions::for($name, $this->names());
     }
 }
