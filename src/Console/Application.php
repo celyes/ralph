@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Console;
 
 use Celyes\RalphPhp\Console\Command\HelpCommand;
+use Celyes\RalphPhp\Console\Command\InitCommand;
 use Celyes\RalphPhp\Console\Command\PlannedCommand;
 use Celyes\RalphPhp\Console\Command\VersionCommand;
 use Celyes\RalphPhp\Exception\RalphException;
@@ -46,6 +47,8 @@ final class Application
     {
         $registry = new CommandRegistry();
         $help = new HelpCommand($registry);
+
+        $registry->add(new InitCommand());
 
         foreach (self::plannedCommands() as $planned) {
             $registry->add($planned);
@@ -287,18 +290,6 @@ final class Application
     private static function plannedCommands(): array
     {
         return [
-            new PlannedCommand(
-                'init',
-                'Create the project configuration, task checklist, context file, and ignore rules.',
-                [
-                    'Usage: ralph init [--force]',
-                    '',
-                    'Creates .ralph/config.json, .ralph/tasks.md, .ralph/CONTEXT.md, the runtime',
-                    'directories, and ignore rules for runtime data. Existing files are preserved',
-                    'unless --force is given.',
-                ],
-                'PROJECT.md section B',
-            ),
             new PlannedCommand(
                 'run',
                 'Process pending tasks within the configured limits.',

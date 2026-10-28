@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Config;
 
 use Celyes\RalphPhp\Exception\ConfigurationException;
-use Celyes\RalphPhp\Ralph;
 
 /**
  * Reads `.ralph/config.json` into a {@see Configuration}.
@@ -42,7 +41,7 @@ final class ConfigurationLoader
      */
     public static function fileIn(string $projectRoot): string
     {
-        return Path::normalize($projectRoot . '/' . Ralph::PROJECT_DIRECTORY . '/config.json');
+        return Path::normalize($projectRoot . '/' . Defaults::CONFIG_FILE);
     }
 
     /**

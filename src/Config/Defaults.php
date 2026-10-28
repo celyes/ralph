@@ -20,6 +20,11 @@ use Celyes\RalphPhp\Ralph;
 final class Defaults
 {
     /**
+     * Project configuration, relative to the repository root.
+     */
+    public const string CONFIG_FILE = Ralph::PROJECT_DIRECTORY . '/config.json';
+
+    /**
      * Markdown checklist the runner reads pending work from.
      */
     public const string TASKS_FILE = Ralph::PROJECT_DIRECTORY . '/tasks.md';
@@ -36,6 +41,21 @@ final class Defaults
      * configured task checklist or context file must not live here.
      */
     public const string RUNTIME_DIRECTORY = Ralph::PROJECT_DIRECTORY . '/runtime';
+
+    /**
+     * Summaries and observations supplied to later attempts.
+     */
+    public const string MEMORY_DIRECTORY = self::RUNTIME_DIRECTORY . '/memory';
+
+    /**
+     * Worker and verification output, one set per task.
+     */
+    public const string LOGS_DIRECTORY = self::RUNTIME_DIRECTORY . '/logs';
+
+    /**
+     * Isolated task workspaces, one linked Git worktree per task.
+     */
+    public const string WORKTREES_DIRECTORY = self::RUNTIME_DIRECTORY . '/worktrees';
 
     /**
      * Agent used when `run --agent NAME` is not given.

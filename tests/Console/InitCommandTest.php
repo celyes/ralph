@@ -1,0 +1,148 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Celyes\RalphPhp\Tests\Console;
+
+use Celyes\RalphPhp\Config\Defaults;
+use Celyes\RalphPhp\Console\Command\InitCommand;
+use Celyes\RalphPhp\Console\ExitCode;
+use Celyes\RalphPhp\Ralph;
+use Celyes\RalphPhp\Tests\Support\Cli;
+use Celyes\RalphPhp\Tests\Support\TemporaryProject;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Test;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * `ralph init` on the command line.
+ *
+ * Run as a real subprocess, because the directory the command initialises is
+ * its own working directory: that is the behaviour under test, and changing the
+ * test runner's working directory to assert it would leak into the rest of the
+ * suite.
+ */
+#[CoversClass(InitCommand::class)]
+final class InitCommandTest extends TestCase
+{
+    private TemporaryProject $project;
+
+    protected function setUp(): void
+    {
+        $this->project = TemporaryProject::create();
+    }
+
+    protected function tearDown(): void
+    {
+        $this->project->remove();
+    }
+
+    #[Test]
+    public function it_initialises_the_working_directory_and_reports_what_it_created(): void
+    {
+        $result = Cli::run(['init'], $this->project->root());
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertSame('', $result->errorOutput, $result->describe());
+
+        self::assertStringContainsString(
+            'Initialising ' . Ralph::NAME . ' in ' . $this->project->root(),
+            $result->standardOutput,
+            $result->describe(),
+        );
+
+        foreach ([Defaults::CONFIG_FILE, Defaults::TASKS_FILE, Defaults::CONTEXT_FILE] as $file) {
+            self::assertStringContainsString('created  ' . $file, $result->standardOutput, $result->describe());
+            self::assertFileExists($this->project->path($file));
+        }
+
+        self::assertStringContainsString(
+            'created  ' . Defaults::LOGS_DIRECTORY . '/',
+            $result->standardOutput,
+            $result->describe(),
+        );
+        self::assertDirectoryExists($this->project->path(Defaults::WORKTREES_DIRECTORY));
+    }
+
+    #[Test]
+    public function the_next_steps_name_the_project_s_own_paths(): void
+    {
+        $this->project->writeConfigArray(['tasks' => 'docs/backlog.md', 'context' => 'docs/AGENT.md']);
+
+        $result = Cli::run(['init'], $this->project->root());
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString('docs/backlog.md, one task per', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('Describe the project in docs/AGENT.md', $result->standardOutput, $result->describe());
+        self::assertStringNotContainsString(Defaults::TASKS_FILE, $result->standardOutput, $result->describe());
+    }
+
+    #[Test]
+    public function a_second_run_keeps_the_user_s_files_and_says_so(): void
+    {
+        Cli::run(['init'], $this->project->root());
+
+        $checklist = "# My tasks\n\n- [ ] Something of my own\n";
+        $this->project->write(Defaults::TASKS_FILE, $checklist);
+
+        $result = Cli::run(['init'], $this->project->root());
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString('kept     ' . Defaults::TASKS_FILE, $result->standardOutput, $result->describe());
+        self::assertStringContainsString('were left as they are', $result->standardOutput, $result->describe());
+        self::assertStringEqualsFile($this->project->path(Defaults::TASKS_FILE), $checklist);
+    }
+
+    #[Test]
+    public function force_is_refused_instead_of_being_silently_ignored(): void
+    {
+        Cli::run(['init'], $this->project->root());
+        $checklist = "- [ ] Mine\n";
+        $this->project->write(Defaults::TASKS_FILE, $checklist);
+
+        $result = Cli::run(['init', '--force'], $this->project->root());
+
+        self::assertSame(ExitCode::UNAVAILABLE, $result->exitCode, $result->describe());
+        self::assertSame('', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('Overwriting existing files is not implemented', $result->errorOutput, $result->describe());
+        self::assertStringEqualsFile($this->project->path(Defaults::TASKS_FILE), $checklist);
+    }
+
+    #[Test]
+    public function an_unknown_option_is_a_usage_error(): void
+    {
+        $result = Cli::run(['init', '--prefix=x'], $this->project->root());
+
+        self::assertSame(ExitCode::USAGE, $result->exitCode, $result->describe());
+        self::assertStringContainsString('Unknown option "--prefix"', $result->errorOutput, $result->describe());
+        self::assertDirectoryDoesNotExist($this->project->path(Ralph::PROJECT_DIRECTORY));
+    }
+
+    #[Test]
+    public function a_directory_argument_is_a_usage_error_rather_than_initialising_elsewhere(): void
+    {
+        $result = Cli::run(['init', $this->project->root()], $this->project->root());
+
+        self::assertSame(ExitCode::USAGE, $result->exitCode, $result->describe());
+        self::assertStringContainsString('takes no arguments', $result->errorOutput, $result->describe());
+        self::assertDirectoryDoesNotExist($this->project->path(Ralph::PROJECT_DIRECTORY));
+    }
+
+    #[Test]
+    public function the_command_is_listed_as_available_and_documents_what_it_writes(): void
+    {
+        $list = Cli::run();
+        $help = Cli::run(['help', 'init']);
+
+        self::assertSame(ExitCode::SUCCESS, $help->exitCode, $help->describe());
+        self::assertStringNotContainsString(
+            'init     Create the project configuration, task checklist, and context file. (not implemented yet)',
+            $list->standardOutput,
+            $list->describe(),
+        );
+
+        foreach ([Defaults::CONFIG_FILE, Defaults::TASKS_FILE, Defaults::CONTEXT_FILE] as $file) {
+            self::assertStringContainsString($file, $help->standardOutput, $help->describe());
+        }
+    }
+}
