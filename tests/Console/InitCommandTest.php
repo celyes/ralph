@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Tests\Console;
 use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Console\Command\InitCommand;
 use Celyes\RalphPhp\Console\ExitCode;
+use Celyes\RalphPhp\Init\IgnoreFileWriter;
 use Celyes\RalphPhp\Init\Templates;
 use Celyes\RalphPhp\Ralph;
 use Celyes\RalphPhp\Tests\Support\Cli;
@@ -168,6 +169,53 @@ final class InitCommandTest extends TestCase
     }
 
     #[Test]
+    public function it_writes_the_ignore_rules_and_lists_them(): void
+    {
+        $result = Cli::run(['init'], $this->project->root());
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertSame('', $result->errorOutput, $result->describe());
+
+        self::assertStringContainsString('created  ' . IgnoreFileWriter::FILE, $result->standardOutput, $result->describe());
+        self::assertStringContainsString('  /' . Defaults::RUNTIME_DIRECTORY . '/', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('  /' . Defaults::TASKS_FILE, $result->standardOutput, $result->describe());
+        self::assertStringContainsString('negate its rule with "!"', $result->standardOutput, $result->describe());
+
+        self::assertFileExists($this->project->path(IgnoreFileWriter::FILE));
+    }
+
+    #[Test]
+    public function a_second_run_says_the_ignore_file_already_decides_every_rule(): void
+    {
+        Cli::run(['init'], $this->project->root());
+
+        $result = Cli::run(['init'], $this->project->root());
+
+        self::assertStringContainsString('kept     ' . IgnoreFileWriter::FILE, $result->standardOutput, $result->describe());
+        self::assertStringContainsString('already decides every rule', $result->standardOutput, $result->describe());
+    }
+
+    #[Test]
+    public function an_ignore_file_that_cannot_be_written_is_a_warning_and_not_a_failure(): void
+    {
+        self::assertTrue(mkdir($this->project->path(IgnoreFileWriter::FILE)));
+
+        $result = Cli::run(['init'], $this->project->root());
+
+        // The rules are a convenience; the project is still initialised.
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertFileExists($this->project->path(Defaults::TASKS_FILE));
+
+        self::assertStringContainsString('skipped  ' . IgnoreFileWriter::FILE, $result->standardOutput, $result->describe());
+        self::assertStringContainsString(
+            'a directory exists at that path',
+            $result->errorOutput,
+            $result->describe(),
+        );
+        self::assertStringContainsString('/' . Defaults::TASKS_FILE, $result->errorOutput, $result->describe());
+    }
+
+    #[Test]
     public function an_unknown_option_is_a_usage_error(): void
     {
         $result = Cli::run(['init', '--prefix=x'], $this->project->root());
@@ -206,5 +254,6 @@ final class InitCommandTest extends TestCase
 
         self::assertStringContainsString('-f, --force', $help->standardOutput, $help->describe());
         self::assertStringContainsString('.bak', $help->standardOutput, $help->describe());
+        self::assertStringContainsString(IgnoreFileWriter::FILE, $help->standardOutput, $help->describe());
     }
 }

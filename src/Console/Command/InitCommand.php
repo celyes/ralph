@@ -10,6 +10,8 @@ use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\UsageException;
+use Celyes\RalphPhp\Init\IgnoreFileOutcome;
+use Celyes\RalphPhp\Init\IgnoreFileWriter;
 use Celyes\RalphPhp\Init\InitializationMode;
 use Celyes\RalphPhp\Init\InitializationReport;
 use Celyes\RalphPhp\Init\InitializedPath;
@@ -25,7 +27,8 @@ use Celyes\RalphPhp\Init\ProjectInitializer;
  * Reports every path it is responsible for, created, kept or replaced, because
  * a user who runs this in an already-initialised project needs to see what
  * happened to their own files — and, when they asked for them to be replaced,
- * where the previous content went.
+ * where the previous content went. The ignore rules are listed too: they are
+ * lines appended to a file the project already owned.
  */
 final class InitCommand implements CommandInterface
 {
@@ -64,6 +67,7 @@ final class InitCommand implements CommandInterface
             $this->helpRow(Defaults::TASKS_FILE, 'the task checklist, with instructions and no tasks'),
             $this->helpRow(Defaults::CONTEXT_FILE, 'project instructions passed to the agent'),
             $this->helpRow(Defaults::RUNTIME_DIRECTORY . '/', 'state, logs, memory and task worktrees'),
+            $this->helpRow(IgnoreFileWriter::FILE, 'rules for the two above, appended if missing'),
             '',
             'Files that already exist are kept as they are, and the configured task and',
             'context paths of an existing configuration are honoured. To regenerate a single',
@@ -78,7 +82,12 @@ final class InitCommand implements CommandInterface
             'written at the default paths above; files a previous configuration pointed',
             'somewhere else are left alone and reported as no longer referenced.',
             '',
-            'Nothing is read from or written to the Git repository.',
+            'The ignore file is never rewritten, in either mode: missing rules are appended',
+            'and nothing already in it is touched. A rule negated with "!" counts as decided,',
+            'so tracking the checklist yourself is a choice "ralph init" will not undo.',
+            '',
+            'Nothing is read from or written to the Git repository itself: no command here',
+            'runs git.',
         ];
     }
 
@@ -163,8 +172,11 @@ final class InitCommand implements CommandInterface
             $output->line(sprintf('  %-8s %s', $path->outcome()->label(), $path->label()));
         }
 
+        $ignore = $report->ignoreFile();
+        $output->line(sprintf('  %-8s %s', $ignore->outcome()->label(), $ignore->relativePath()));
         $output->line();
 
+        $this->reportIgnoreFile($report, $output);
         $this->reportReplaced($report, $output);
         $this->reportKept($report, $output);
         $this->reportUnreferenced($report, $output);
@@ -186,6 +198,62 @@ final class InitCommand implements CommandInterface
             '     completed only once its verification commands pass.',
             '  4. Run "ralph run".',
         ]);
+    }
+
+    /**
+     * Name the ignore rules, because they are lines added to a file the user
+     * owns — and say what to do when they could not be added at all.
+     *
+     * The rules are listed rather than summarised: whether the local task
+     * checklist is tracked is the user's decision to make (PROJECT.md section
+     * 4), and they cannot make it without seeing the rule.
+     */
+    private function reportIgnoreFile(InitializationReport $report, Output $output): void
+    {
+        $ignore = $report->ignoreFile();
+
+        if ($ignore->outcome() === IgnoreFileOutcome::Skipped) {
+            $output->diagnosticLine(sprintf(
+                'The ignore rules were not written to %s: %s.',
+                $ignore->path(),
+                (string) $ignore->reason(),
+            ));
+            $output->diagnosticLine('Add these rules yourself to keep generated files out of commits:');
+
+            foreach ($ignore->rules() as $rule) {
+                $output->diagnosticLine('  ' . $rule);
+            }
+
+            $output->diagnosticLine();
+
+            return;
+        }
+
+        if (!$ignore->wrote()) {
+            $output->line(sprintf(
+                '%s already decides every rule Ralph PHP needs, so it was left alone.',
+                $ignore->relativePath(),
+            ));
+            $output->line();
+
+            return;
+        }
+
+        $output->line(sprintf(
+            'These rules %s %s, so the runtime data and the local checklist stay out of commits:',
+            $ignore->outcome() === IgnoreFileOutcome::Created ? 'were written to' : 'were added to',
+            $ignore->relativePath(),
+        ));
+
+        foreach ($ignore->rules() as $rule) {
+            $output->line('  ' . $rule);
+        }
+
+        $output->line(
+            'To track one of these yourself, negate its rule with "!": a deleted line is'
+            . ' added again on the next "ralph init".',
+        );
+        $output->line();
     }
 
     /**

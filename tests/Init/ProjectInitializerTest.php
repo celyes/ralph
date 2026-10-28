@@ -9,6 +9,8 @@ use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Exception\ConfigurationException;
 use Celyes\RalphPhp\Exception\FilesystemException;
+use Celyes\RalphPhp\Init\IgnoreFileOutcome;
+use Celyes\RalphPhp\Init\IgnoreFileWriter;
 use Celyes\RalphPhp\Init\InitializationMode;
 use Celyes\RalphPhp\Init\InitializationOutcome;
 use Celyes\RalphPhp\Init\InitializationReport;
@@ -482,6 +484,81 @@ final class ProjectInitializerTest extends TestCase
 
         self::assertStringContainsString('A directory exists at', $exception->getMessage());
         self::assertDirectoryExists($this->project->path(Defaults::TASKS_FILE));
+    }
+
+    #[Test]
+    public function it_ignores_the_runtime_data_and_the_local_checklist(): void
+    {
+        $report = (new ProjectInitializer())->initialize($this->project->root());
+
+        $ignore = $report->ignoreFile();
+
+        self::assertSame(IgnoreFileOutcome::Created, $ignore->outcome());
+        self::assertSame($this->project->path(IgnoreFileWriter::FILE), $ignore->path());
+        self::assertContains('/' . Defaults::RUNTIME_DIRECTORY . '/', $ignore->rules());
+        self::assertContains('/' . Defaults::TASKS_FILE, $ignore->rules());
+
+        $contents = (string) file_get_contents($ignore->path());
+
+        foreach ($ignore->rules() as $rule) {
+            self::assertStringContainsString("\n" . $rule . "\n", "\n" . $contents);
+        }
+
+        // The ignore file is not one of the paths initialisation owns, so it is
+        // reported on its own rather than among them.
+        self::assertNotContains(
+            IgnoreFileWriter::FILE,
+            array_map(static fn (InitializedPath $path): string => $path->relativePath(), $report->paths()),
+        );
+    }
+
+    #[Test]
+    public function an_existing_ignore_file_is_only_appended_to(): void
+    {
+        $existing = "/vendor/\n.ralph/tasks.md\n";
+        $this->project->write(IgnoreFileWriter::FILE, $existing);
+
+        $ignore = (new ProjectInitializer())->initialize($this->project->root())->ignoreFile();
+
+        self::assertSame(IgnoreFileOutcome::Extended, $ignore->outcome());
+
+        // The checklist is already ignored, in the user's own words, so only
+        // the rules the file does not decide were added.
+        self::assertNotContains('/' . Defaults::TASKS_FILE, $ignore->rules());
+        self::assertStringStartsWith($existing, (string) file_get_contents($ignore->path()));
+    }
+
+    #[Test]
+    public function overwriting_resets_the_files_but_still_only_appends_to_the_ignore_file(): void
+    {
+        $existing = "# mine\n/vendor/\n";
+        $this->project->write(IgnoreFileWriter::FILE, $existing);
+
+        $report = (new ProjectInitializer())->initialize(
+            $this->project->root(),
+            InitializationMode::Overwrite,
+        );
+
+        self::assertSame(IgnoreFileOutcome::Extended, $report->ignoreFile()->outcome());
+        self::assertStringStartsWith($existing, (string) file_get_contents($report->ignoreFile()->path()));
+        self::assertFileDoesNotExist($this->project->path(IgnoreFileWriter::FILE . '.bak'));
+    }
+
+    #[Test]
+    public function an_unusable_ignore_file_is_reported_without_losing_the_rest(): void
+    {
+        self::assertTrue(mkdir($this->project->path(IgnoreFileWriter::FILE)));
+
+        $report = (new ProjectInitializer())->initialize($this->project->root());
+
+        self::assertSame(IgnoreFileOutcome::Skipped, $report->ignoreFile()->outcome());
+        self::assertNotNull($report->ignoreFile()->reason());
+
+        // Ignore rules are a convenience for a repository the user controls;
+        // the files a run actually needs were still created.
+        foreach ([Defaults::CONFIG_FILE, Defaults::TASKS_FILE, Defaults::CONTEXT_FILE] as $file) {
+            self::assertFileExists($this->project->path($file));
+        }
     }
 
     /**

@@ -26,6 +26,7 @@ final class InitializationReport
         private readonly InitializedPath $tasks,
         private readonly InitializedPath $context,
         private readonly array $runtimeDirectories,
+        private readonly IgnoreFileUpdate $ignoreFile,
         private readonly array $unreferencedPaths = [],
     ) {
     }
@@ -70,6 +71,19 @@ final class InitializationReport
     public function runtimeDirectories(): array
     {
         return $this->runtimeDirectories;
+    }
+
+    /**
+     * What happened to the project's Git ignore rules.
+     *
+     * Reported apart from {@see paths()} because the ignore file is not one of
+     * the paths initialisation owns: it usually belongs to the project already,
+     * is only ever appended to, and can fail without failing the run — so its
+     * outcomes are {@see IgnoreFileOutcome}, not {@see InitializationOutcome}.
+     */
+    public function ignoreFile(): IgnoreFileUpdate
+    {
+        return $this->ignoreFile;
     }
 
     /**

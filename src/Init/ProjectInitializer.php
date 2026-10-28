@@ -14,7 +14,8 @@ use Celyes\RalphPhp\Exception\FilesystemException;
 
 /**
  * Creates the project files `ralph` needs: the configuration, the task
- * checklist, the context file, and the runtime directories.
+ * checklist, the context file, the runtime directories, and the Git ignore
+ * rules that keep the generated ones out of commits.
  *
  * Free of console output so the same behaviour can be asserted directly: it
  * returns an {@see InitializationReport} and the command renders it.
@@ -28,7 +29,8 @@ use Celyes\RalphPhp\Exception\FilesystemException;
  *
  * An existing configuration file is read before anything is written, so the
  * checklist and context file are created where *that* file says they belong
- * rather than at the package defaults.
+ * rather than at the package defaults. The same configuration decides which
+ * paths the ignore rules name.
  */
 final class ProjectInitializer
 {
@@ -47,8 +49,12 @@ final class ProjectInitializer
 
     /**
      * Suffix of the copy taken before a file is replaced.
+     *
+     * Public because the ignore rules are derived from it: the backups are
+     * named after the files they copy, so {@see IgnoreRules} builds their
+     * patterns from the same suffix rather than repeating the literal.
      */
-    private const string BACKUP_SUFFIX = '.bak';
+    public const string BACKUP_SUFFIX = '.bak';
 
     /**
      * How many backups of one file may accumulate before initialisation asks
@@ -57,8 +63,10 @@ final class ProjectInitializer
      */
     private const int BACKUP_LIMIT = 20;
 
-    public function __construct(private readonly ConfigurationLoader $loader = new ConfigurationLoader())
-    {
+    public function __construct(
+        private readonly ConfigurationLoader $loader = new ConfigurationLoader(),
+        private readonly IgnoreFileWriter $ignoreFile = new IgnoreFileWriter(),
+    ) {
     }
 
     /**
@@ -102,6 +110,11 @@ final class ProjectInitializer
             );
         }
 
+        // Last, and never fatal: the ignore rules are about the repository the
+        // user still controls, and the file they go in is the one path here
+        // that Ralph PHP does not own, so it is only ever appended to.
+        $ignoreFile = $this->ignoreFile->update($root, $configuration);
+
         return new InitializationReport(
             $root,
             $mode,
@@ -109,6 +122,7 @@ final class ProjectInitializer
             $tasksFile,
             $contextFile,
             $directories,
+            $ignoreFile,
             $unreferenced,
         );
     }
