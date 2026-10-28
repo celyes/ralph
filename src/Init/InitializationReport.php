@@ -16,19 +16,31 @@ final class InitializationReport
     /**
      * @param string $projectRoot absolute path that was initialised
      * @param list<InitializedPath> $runtimeDirectories in creation order
+     * @param list<string> $unreferencedPaths paths, as shown to the user, that
+     *        the replaced configuration pointed at and the written one does not
      */
     public function __construct(
         private readonly string $projectRoot,
+        private readonly InitializationMode $mode,
         private readonly InitializedPath $configuration,
         private readonly InitializedPath $tasks,
         private readonly InitializedPath $context,
         private readonly array $runtimeDirectories,
+        private readonly array $unreferencedPaths = [],
     ) {
     }
 
     public function projectRoot(): string
     {
         return $this->projectRoot;
+    }
+
+    /**
+     * Whether existing files were preserved or reset to the templates.
+     */
+    public function mode(): InitializationMode
+    {
+        return $this->mode;
     }
 
     /**
@@ -75,10 +87,7 @@ final class InitializationReport
      */
     public function created(): array
     {
-        return array_values(array_filter(
-            $this->paths(),
-            static fn (InitializedPath $path): bool => $path->wasCreated(),
-        ));
+        return $this->matching(static fn (InitializedPath $path): bool => $path->wasCreated());
     }
 
     /**
@@ -88,9 +97,43 @@ final class InitializationReport
      */
     public function kept(): array
     {
-        return array_values(array_filter(
-            $this->paths(),
-            static fn (InitializedPath $path): bool => $path->wasKept(),
-        ));
+        return $this->matching(static fn (InitializedPath $path): bool => $path->wasKept());
+    }
+
+    /**
+     * Files whose previous content was written over, each carrying the backup
+     * it was copied to.
+     *
+     * @return list<InitializedPath>
+     */
+    public function replaced(): array
+    {
+        return $this->matching(static fn (InitializedPath $path): bool => $path->wasReplaced());
+    }
+
+    /**
+     * Files left on disk that nothing points at any more.
+     *
+     * Replacing the configuration returns the checklist and context paths to
+     * the defaults, so a project that had configured them elsewhere keeps those
+     * files — initialisation does not delete user content — but the run that
+     * follows will not read them. Saying so is the difference between a stale
+     * file and a silently ignored task list.
+     *
+     * @return list<string>
+     */
+    public function unreferencedPaths(): array
+    {
+        return $this->unreferencedPaths;
+    }
+
+    /**
+     * @param callable(InitializedPath): bool $predicate
+     *
+     * @return list<InitializedPath>
+     */
+    private function matching(callable $predicate): array
+    {
+        return array_values(array_filter($this->paths(), $predicate));
     }
 }

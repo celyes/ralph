@@ -8,9 +8,9 @@ use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
-use Celyes\RalphPhp\Exception\CommandUnavailableException;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\UsageException;
+use Celyes\RalphPhp\Init\InitializationMode;
 use Celyes\RalphPhp\Init\InitializationReport;
 use Celyes\RalphPhp\Init\InitializedPath;
 use Celyes\RalphPhp\Init\ProjectInitializer;
@@ -22,12 +22,20 @@ use Celyes\RalphPhp\Init\ProjectInitializer;
  * `composer init`, so that what gets written is wherever the user is standing
  * and no path has to be read from the command line.
  *
- * Reports every path it is responsible for, created or kept, because a user who
- * runs this in an already-initialised project needs to see that their own files
- * were left alone.
+ * Reports every path it is responsible for, created, kept or replaced, because
+ * a user who runs this in an already-initialised project needs to see what
+ * happened to their own files — and, when they asked for them to be replaced,
+ * where the previous content went.
  */
 final class InitCommand implements CommandInterface
 {
+    /**
+     * Options this command understands, beyond the global ones.
+     *
+     * @var list<string>
+     */
+    private const array OPTIONS = ['f', 'force'];
+
     public function __construct(private readonly ProjectInitializer $initializer = new ProjectInitializer())
     {
     }
@@ -48,7 +56,7 @@ final class InitCommand implements CommandInterface
     public function help(): array
     {
         return [
-            'Usage: ralph init',
+            'Usage: ralph init [--force]',
             '',
             'Creates, in the current directory:',
             '',
@@ -58,8 +66,19 @@ final class InitCommand implements CommandInterface
             $this->helpRow(Defaults::RUNTIME_DIRECTORY . '/', 'state, logs, memory and task worktrees'),
             '',
             'Files that already exist are kept as they are, and the configured task and',
-            'context paths of an existing configuration are honoured. Nothing is read from',
-            'or written to the Git repository.',
+            'context paths of an existing configuration are honoured. To regenerate a single',
+            'file, delete it and run "ralph init" again.',
+            '',
+            'Options:',
+            $this->helpRow('-f, --force', 'reset all three files to the templates'),
+            '',
+            'With --force, each file whose content differs from the template is copied to',
+            '"<name>.bak" before being written, so the previous content stays recoverable.',
+            'Because the configuration is reset too, the checklist and context file are',
+            'written at the default paths above; files a previous configuration pointed',
+            'somewhere else are left alone and reported as no longer referenced.',
+            '',
+            'Nothing is read from or written to the Git repository.',
         ];
     }
 
@@ -91,34 +110,25 @@ final class InitCommand implements CommandInterface
             );
         }
 
-        $report = $this->initializer->initialize($directory);
+        $mode = $input->hasOption('f', 'force')
+            ? InitializationMode::Overwrite
+            : InitializationMode::Preserve;
 
-        $this->report($report, $output);
+        $this->report($this->initializer->initialize($directory, $mode), $output);
 
         return ExitCode::SUCCESS;
     }
 
     /**
      * Fail on anything this command does not accept, instead of ignoring it.
-     *
-     * `--force` is singled out because the help text of earlier builds promised
-     * it: a user who types it is asking for their files to be replaced, and
-     * silently not replacing them would be the worst of the three answers.
-     * Overwriting is PROJECT.md section B, item 5.
      */
     private function rejectUnsupportedInput(Input $input): void
     {
-        if ($input->hasOption('f', 'force')) {
-            throw new CommandUnavailableException(
-                'Overwriting existing files is not implemented in this build.',
-                [
-                    'Existing files are always kept; delete the one you want regenerated and run "ralph init" again.',
-                    'The explicit overwrite option is specified in PROJECT.md section B, item 5.',
-                ],
-            );
-        }
+        $unrecognised = array_values(array_diff(
+            $input->optionNames(),
+            [...self::OPTIONS, 'h', 'help', 'v', 'verbose'],
+        ));
 
-        $unrecognised = array_values(array_diff($input->optionNames(), ['h', 'help', 'v', 'verbose']));
         if ($unrecognised !== []) {
             throw new UsageException(
                 sprintf(
@@ -155,30 +165,9 @@ final class InitCommand implements CommandInterface
 
         $output->line();
 
-        // Only kept *files* are called out: they hold content the user wrote,
-        // and the point of the sentence is that initialisation did not touch
-        // it. A directory that already existed is not news.
-        $keptFiles = array_values(array_filter(
-            $report->kept(),
-            static fn (InitializedPath $path): bool => !$path->isDirectory(),
-        ));
-
-        if ($keptFiles !== []) {
-            $output->line(sprintf(
-                'Your existing %s %s left as %s.',
-                $this->list(array_map(
-                    static fn (InitializedPath $path): string => $path->label(),
-                    $keptFiles,
-                )),
-                count($keptFiles) === 1 ? 'was' : 'were',
-                count($keptFiles) === 1 ? 'it is' : 'they are',
-            ));
-            $output->line('Delete a file and run "ralph init" again to write it from the template.');
-            $output->line();
-        } elseif ($report->created() === []) {
-            $output->line('Everything was already in place, so nothing was written.');
-            $output->line();
-        }
+        $this->reportReplaced($report, $output);
+        $this->reportKept($report, $output);
+        $this->reportUnreferenced($report, $output);
 
         // The paths come from the report rather than from the defaults: a
         // project that configures its checklist elsewhere must be told where
@@ -197,6 +186,121 @@ final class InitCommand implements CommandInterface
             '     completed only once its verification commands pass.',
             '  4. Run "ralph run".',
         ]);
+    }
+
+    /**
+     * Name every backup, so recovering from a `--force` the user regrets needs
+     * no guessing about where their content went.
+     */
+    private function reportReplaced(InitializationReport $report, Output $output): void
+    {
+        $replaced = $report->replaced();
+
+        if ($replaced === []) {
+            return;
+        }
+
+        $output->line(sprintf(
+            '%s %s replaced with the %s. The previous content is in:',
+            count($replaced) === 1 ? 'One file' : (string) count($replaced) . ' files',
+            count($replaced) === 1 ? 'was' : 'were',
+            count($replaced) === 1 ? 'template' : 'templates',
+        ));
+
+        foreach ($replaced as $path) {
+            $output->line(sprintf('  %s', (string) $path->backupPath()));
+        }
+
+        $output->line();
+    }
+
+    /**
+     * Only kept *files* are called out: they hold content the user wrote, and
+     * the point of the sentence is that initialisation did not touch it. A
+     * directory that already existed is not news.
+     *
+     * A kept file means something different in each mode, so it is worded
+     * differently: preserving leaves the user's own content in place, whereas
+     * overwriting keeps only a file that was already byte for byte the
+     * template — which is why it has no backup to point at.
+     */
+    private function reportKept(InitializationReport $report, Output $output): void
+    {
+        $keptFiles = array_values(array_filter(
+            $report->kept(),
+            static fn (InitializedPath $path): bool => !$path->isDirectory(),
+        ));
+
+        if ($keptFiles === []) {
+            if ($report->created() === [] && $report->replaced() === []) {
+                $output->line('Everything was already in place, so nothing was written.');
+                $output->line();
+            }
+
+            return;
+        }
+
+        $names = $this->list(array_map(
+            static fn (InitializedPath $path): string => $path->label(),
+            $keptFiles,
+        ));
+        $plural = count($keptFiles) !== 1;
+
+        if ($report->mode()->overwrites()) {
+            $output->line(sprintf(
+                '%s already %s the %s, so %s not backed up.',
+                $names,
+                $plural ? 'match' : 'matches',
+                $plural ? 'templates' : 'template',
+                $plural ? 'they were' : 'it was',
+            ));
+            $output->line();
+
+            return;
+        }
+
+        $output->line(sprintf(
+            'Your existing %s %s left as %s.',
+            $names,
+            $plural ? 'were' : 'was',
+            $plural ? 'they are' : 'it is',
+        ));
+        $output->line(
+            'Delete a file and run "ralph init" again, or run "ralph init --force",'
+            . ' to write it from the template.',
+        );
+        $output->line();
+    }
+
+    /**
+     * Files the replaced configuration pointed at and the new one does not.
+     *
+     * Left on disk — `init` deletes nothing — but a user whose task list has
+     * just stopped being read has to hear about it from the command that did
+     * it, not from a run that reports no pending work.
+     */
+    private function reportUnreferenced(InitializationReport $report, Output $output): void
+    {
+        $unreferenced = $report->unreferencedPaths();
+
+        if ($unreferenced === []) {
+            return;
+        }
+
+        $output->line(sprintf(
+            'The configuration that was replaced pointed at %s the default one does not:',
+            count($unreferenced) === 1 ? 'a file' : 'files',
+        ));
+
+        foreach ($unreferenced as $path) {
+            $output->line(sprintf('  %s', $path));
+        }
+
+        $output->line(sprintf(
+            'Nothing was deleted, but Ralph PHP no longer reads %s.',
+            count($unreferenced) === 1 ? 'it' : 'them',
+        ));
+        $output->line();
     }
 
     /**

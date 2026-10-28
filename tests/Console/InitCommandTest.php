@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Tests\Console;
 use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Console\Command\InitCommand;
 use Celyes\RalphPhp\Console\ExitCode;
+use Celyes\RalphPhp\Init\Templates;
 use Celyes\RalphPhp\Ralph;
 use Celyes\RalphPhp\Tests\Support\Cli;
 use Celyes\RalphPhp\Tests\Support\TemporaryProject;
@@ -94,18 +95,76 @@ final class InitCommandTest extends TestCase
     }
 
     #[Test]
-    public function force_is_refused_instead_of_being_silently_ignored(): void
+    public function a_second_run_without_force_does_not_mention_force_as_the_only_way_out(): void
+    {
+        Cli::run(['init'], $this->project->root());
+        $this->project->write(Defaults::TASKS_FILE, "- [ ] Mine\n");
+
+        $result = Cli::run(['init'], $this->project->root());
+
+        self::assertStringContainsString('Delete a file and run "ralph init" again', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('"ralph init --force"', $result->standardOutput, $result->describe());
+    }
+
+    #[Test]
+    public function force_replaces_the_user_s_files_and_names_the_backups(): void
     {
         Cli::run(['init'], $this->project->root());
         $checklist = "- [ ] Mine\n";
         $this->project->write(Defaults::TASKS_FILE, $checklist);
+        $this->project->write(Defaults::CONTEXT_FILE, "Mine too.\n");
 
         $result = Cli::run(['init', '--force'], $this->project->root());
 
-        self::assertSame(ExitCode::UNAVAILABLE, $result->exitCode, $result->describe());
-        self::assertSame('', $result->standardOutput, $result->describe());
-        self::assertStringContainsString('Overwriting existing files is not implemented', $result->errorOutput, $result->describe());
-        self::assertStringEqualsFile($this->project->path(Defaults::TASKS_FILE), $checklist);
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertSame('', $result->errorOutput, $result->describe());
+
+        self::assertStringContainsString('replaced ' . Defaults::TASKS_FILE, $result->standardOutput, $result->describe());
+        self::assertStringContainsString('replaced ' . Defaults::CONTEXT_FILE, $result->standardOutput, $result->describe());
+        self::assertStringContainsString('2 files were replaced', $result->standardOutput, $result->describe());
+
+        // The configuration was already the template, so there was nothing to
+        // preserve and no backup to report for it.
+        self::assertStringContainsString('kept     ' . Defaults::CONFIG_FILE, $result->standardOutput, $result->describe());
+        self::assertStringContainsString('already matches the template', $result->standardOutput, $result->describe());
+
+        foreach ([Defaults::TASKS_FILE, Defaults::CONTEXT_FILE] as $file) {
+            self::assertStringContainsString(
+                $this->project->path($file) . '.bak',
+                $result->standardOutput,
+                $result->describe(),
+            );
+        }
+
+        self::assertStringEqualsFile($this->project->path(Defaults::TASKS_FILE . '.bak'), $checklist);
+        self::assertStringEqualsFile($this->project->path(Defaults::TASKS_FILE), Templates::tasks());
+    }
+
+    #[Test]
+    public function the_short_force_flag_is_accepted(): void
+    {
+        Cli::run(['init'], $this->project->root());
+        $this->project->write(Defaults::TASKS_FILE, "- [ ] Mine\n");
+
+        $result = Cli::run(['init', '-f'], $this->project->root());
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringEqualsFile($this->project->path(Defaults::TASKS_FILE), Templates::tasks());
+    }
+
+    #[Test]
+    public function force_resets_a_configuration_that_is_too_broken_to_load(): void
+    {
+        $this->project->writeConfigArray(['limits' => ['iterations' => 0]]);
+
+        $refused = Cli::run(['init'], $this->project->root());
+        self::assertSame(ExitCode::CONFIGURATION, $refused->exitCode, $refused->describe());
+
+        $result = Cli::run(['init', '--force'], $this->project->root());
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString('replaced ' . Defaults::CONFIG_FILE, $result->standardOutput, $result->describe());
+        self::assertStringEqualsFile($this->project->path(Defaults::CONFIG_FILE), Templates::config());
     }
 
     #[Test]
@@ -144,5 +203,8 @@ final class InitCommandTest extends TestCase
         foreach ([Defaults::CONFIG_FILE, Defaults::TASKS_FILE, Defaults::CONTEXT_FILE] as $file) {
             self::assertStringContainsString($file, $help->standardOutput, $help->describe());
         }
+
+        self::assertStringContainsString('-f, --force', $help->standardOutput, $help->describe());
+        self::assertStringContainsString('.bak', $help->standardOutput, $help->describe());
     }
 }
