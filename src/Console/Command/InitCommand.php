@@ -196,7 +196,8 @@ final class InitCommand implements CommandInterface
                 $report->configuration()->label(),
             ),
             '     completed only once its verification commands pass.',
-            '  4. Run "ralph run".',
+            '  4. Run "ralph preflight" to check this machine can do the work.',
+            '  5. Run "ralph run".',
         ]);
     }
 

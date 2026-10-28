@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Console;
 use Celyes\RalphPhp\Console\Command\HelpCommand;
 use Celyes\RalphPhp\Console\Command\InitCommand;
 use Celyes\RalphPhp\Console\Command\PlannedCommand;
+use Celyes\RalphPhp\Console\Command\PreflightCommand;
 use Celyes\RalphPhp\Console\Command\VersionCommand;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Exception\UsageException;
@@ -49,6 +50,7 @@ final class Application
         $help = new HelpCommand($registry);
 
         $registry->add(new InitCommand());
+        $registry->add(new PreflightCommand());
 
         foreach (self::plannedCommands() as $planned) {
             $registry->add($planned);
