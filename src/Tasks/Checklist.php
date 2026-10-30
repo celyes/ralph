@@ -58,4 +58,27 @@ final class Checklist
     {
         return $this->items === [];
     }
+
+    /**
+     * How to name this checklist at the start of a message about it.
+     */
+    public function subject(): string
+    {
+        return self::describe($this->source);
+    }
+
+    /**
+     * How to name a checklist read from the given path at the start of a
+     * message about it.
+     *
+     * Here rather than in each thing that reports a problem, so an error raised
+     * while parsing and an error raised while identifying tasks name the same
+     * document the same way — and so a checklist parsed from a string, which
+     * has no path to print, is described without a caller having to remember
+     * that it might not have one.
+     */
+    public static function describe(?string $source): string
+    {
+        return $source === null ? 'The task checklist' : 'The task checklist ' . $source;
+    }
 }

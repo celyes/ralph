@@ -85,6 +85,13 @@ final class Templates
         item to the start of the line, or write it as a plain `- ` bullet to keep it as a
         detail of the item above.
 
+        A task is identified by its description alone — not by its checkbox and not by
+        where it sits in the file — so you can reorder the list, tick an item or rewrite
+        the notes under one without {$name} losing that task's history. Capitalisation
+        and spacing are ignored in that comparison, which also means two items that read
+        the same are one task: a repeated description is reported as an error instead of
+        being run twice.
+
         Avoid editing this file while a run is in progress: the runner rewrites the
         checkbox of the task it finishes.
 

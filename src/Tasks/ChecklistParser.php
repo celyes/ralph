@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tasks;
 
 use Celyes\RalphPhp\Exception\ChecklistException;
+use Celyes\RalphPhp\Support\Excerpt;
 
 /**
  * Reads top-level checklist items out of Markdown.
@@ -328,9 +329,9 @@ final class ChecklistParser
         return new ChecklistException(
             sprintf(
                 '%s has a checkbox with no task on line %d: "%s".',
-                self::subject($source),
+                Checklist::describe($source),
                 $number,
-                self::excerpt($line),
+                Excerpt::of($line),
             ),
             [
                 'Write what should be done after the checkbox, as in "- [ ] Add a --dry-run option".',
@@ -354,9 +355,9 @@ final class ChecklistParser
         return new ChecklistException(
             sprintf(
                 '%s has an indented checkbox on line %d: "%s".',
-                self::subject($source),
+                Checklist::describe($source),
                 $number,
-                self::excerpt($line),
+                Excerpt::of($line),
             ),
             [
                 'This release runs top-level tasks only. Move the item to the start of the line to have it run on its own.',
@@ -364,24 +365,6 @@ final class ChecklistParser
                 'To show the syntax without writing a task, put the line in a fenced code block.',
             ],
         );
-    }
-
-    /**
-     * The offending line, short enough to read inside a message.
-     */
-    private static function excerpt(string $line): string
-    {
-        $line = trim($line);
-
-        return mb_strlen($line) > 60 ? mb_substr($line, 0, 59) . '…' : $line;
-    }
-
-    /**
-     * How to name the document in an error.
-     */
-    private static function subject(?string $source): string
-    {
-        return $source === null ? 'The task checklist' : 'The task checklist ' . $source;
     }
 
     /**
@@ -401,7 +384,7 @@ final class ChecklistParser
         }
 
         throw new ChecklistException(
-            sprintf('%s is not valid UTF-8.', self::subject($source)),
+            sprintf('%s is not valid UTF-8.', Checklist::describe($source)),
             ['Save the file as UTF-8 and run the command again.'],
         );
     }
