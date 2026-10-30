@@ -16,11 +16,10 @@ use Celyes\RalphPhp\Exception\ChecklistException;
  * task — while an ordered list is not, since it is a different construct that
  * neither this project's documentation nor its generated checklist suggests.
  *
- * Everything else in the file is prose. Headings, paragraphs, tables and
- * indented bullets are not items, and a line inside a fenced code block is
- * never an item however it is written, which is what lets the checklist
- * `ralph init` writes carry a worked example of the syntax without that example
- * becoming a task.
+ * Everything else in the file is prose. Headings, paragraphs, tables and plain
+ * bullets are not items, and a line inside a fenced code block is never an item
+ * however it is written, which is what lets the checklist `ralph init` writes
+ * carry a worked example of the syntax without that example becoming a task.
  *
  * Deliberately line-based rather than a Markdown parser. The file is a document
  * a human edits and the runner later rewrites one marker of, so what matters is
@@ -36,10 +35,13 @@ use Celyes\RalphPhp\Exception\ChecklistException;
  * fence, so an example written in a task's details can itself contain
  * checklist syntax.
  *
- * One deferred refinement, already specified: a line that is nearly an item —
- * an empty description, or an indented checkbox pretending to be a subtask —
- * is only skipped or read as a detail line here, where PROJECT.md section C,
- * item 3 makes it a readable error.
+ * Two kinds of line are refused rather than ignored, because both are work a
+ * user believes they have written down: a checkbox with nothing after it, and
+ * an indented checkbox, which this release does not run as a subtask. Silently
+ * skipping either would leave the checklist looking fuller than the runner's
+ * view of it, so each stops the read with the line it was found on and what to
+ * write instead. Prose that merely resembles a task is still prose — the line
+ * has to be a bullet and a well-formed checkbox before it is anyone's mistake.
  */
 final class ChecklistParser
 {
@@ -50,9 +52,28 @@ final class ChecklistParser
      * an indented line belongs to the item above it rather than being one.
      * Whitespace is required after both the bullet and the checkbox, so neither
      * `-[ ] x` nor `- [ ]x` is a task, and the description has to start with a
-     * non-space character, so a bare `- [ ]` is not one either.
+     * non-space character, so a bare `- [ ]` is not one either — it is the
+     * empty description {@see self::EMPTY_ITEM} refuses.
      */
     private const string ITEM = '/^([-*+])[ \t]+\[([ xX])\][ \t]+(\S.*)$/u';
+
+    /**
+     * A top-level checkbox with no description after it.
+     *
+     * Disjoint from {@see self::ITEM}, which requires a non-space character
+     * after the checkbox, so a line is at most one of the two.
+     */
+    private const string EMPTY_ITEM = '/^([-*+])[ \t]+\[([ xX])\][ \t]*$/';
+
+    /**
+     * An indented checkbox: a nested checkable subtask.
+     *
+     * Only the marker is matched, since every indented checkbox is refused
+     * whether or not it has a description. The lookahead keeps the same
+     * requirement as {@see self::ITEM} that something separate the checkbox
+     * from what follows, so an indented `- [ ]x` is ordinary detail text.
+     */
+    private const string NESTED_ITEM = '/^[ \t]+([-*+])[ \t]+\[([ xX])\](?=[ \t]|$)/';
 
     /**
      * The opening line of a fenced code block in column one.
@@ -77,7 +98,9 @@ final class ChecklistParser
      * @param string $markdown the document's contents
      * @param string|null $source path to report in errors and keep with the result
      *
-     * @throws ChecklistException when the contents are not valid UTF-8
+     * @throws ChecklistException when the contents are not valid UTF-8, a
+     *                            checkbox has no description, or a checkbox is
+     *                            indented below another line
      */
     public function parse(string $markdown, ?string $source = null): Checklist
     {
@@ -103,8 +126,8 @@ final class ChecklistParser
                 // fence in column one ends the item above it before it opens.
                 // So everything up to the closing fence belongs to the item,
                 // whatever its indentation: the contents of a fenced example
-                // are not checklist syntax even when written as a task in
-                // column one.
+                // are neither checklist syntax nor a mistake, even when written
+                // as a task in column one.
                 if ($open !== null) {
                     $details[] = self::blankToEmpty($line);
                 }
@@ -130,6 +153,14 @@ final class ChecklistParser
                 $details = [];
 
                 continue;
+            }
+
+            if (preg_match(self::EMPTY_ITEM, $line) === 1) {
+                throw self::emptyDescription($line, $index + 1, $source);
+            }
+
+            if (preg_match(self::NESTED_ITEM, $line) === 1) {
+                throw self::nestedSubtask($line, $index + 1, $source);
             }
 
             if ($open !== null && self::belongsToItem($line)) {
@@ -284,6 +315,76 @@ final class ChecklistParser
     }
 
     /**
+     * Refuse a checkbox with nothing written after it.
+     *
+     * An item with no description cannot be given to an agent, cannot be
+     * identified by its content and cannot be reported in a status line, and
+     * the user is three words away from a task that works — so this says which
+     * line to finish rather than quietly leaving one task fewer than the file
+     * shows.
+     */
+    private static function emptyDescription(string $line, int $number, ?string $source): ChecklistException
+    {
+        return new ChecklistException(
+            sprintf(
+                '%s has a checkbox with no task on line %d: "%s".',
+                self::subject($source),
+                $number,
+                self::excerpt($line),
+            ),
+            [
+                'Write what should be done after the checkbox, as in "- [ ] Add a --dry-run option".',
+                'Delete the line if there is nothing to do there.',
+            ],
+        );
+    }
+
+    /**
+     * Refuse an indented checkbox.
+     *
+     * This release runs top-level items only (PROJECT.md section 2), and an
+     * indented checkbox is the one piece of detail text that looks exactly like
+     * work the runner has accepted. Reading it as an ordinary detail line would
+     * hand it to the agent inside another task's notes and never check it off,
+     * which is indistinguishable from the runner having lost it; both ways out
+     * — promote it, or write it as a plain bullet — are one edit away.
+     */
+    private static function nestedSubtask(string $line, int $number, ?string $source): ChecklistException
+    {
+        return new ChecklistException(
+            sprintf(
+                '%s has an indented checkbox on line %d: "%s".',
+                self::subject($source),
+                $number,
+                self::excerpt($line),
+            ),
+            [
+                'This release runs top-level tasks only. Move the item to the start of the line to have it run on its own.',
+                'To keep it as a detail of the task above it, write it as a plain "- " bullet without a checkbox.',
+                'To show the syntax without writing a task, put the line in a fenced code block.',
+            ],
+        );
+    }
+
+    /**
+     * The offending line, short enough to read inside a message.
+     */
+    private static function excerpt(string $line): string
+    {
+        $line = trim($line);
+
+        return mb_strlen($line) > 60 ? mb_substr($line, 0, 59) . '…' : $line;
+    }
+
+    /**
+     * How to name the document in an error.
+     */
+    private static function subject(?string $source): string
+    {
+        return $source === null ? 'The task checklist' : 'The task checklist ' . $source;
+    }
+
+    /**
      * Refuse a document that is not valid UTF-8.
      *
      * Reported here rather than left to fail later, because task descriptions
@@ -300,7 +401,7 @@ final class ChecklistParser
         }
 
         throw new ChecklistException(
-            sprintf('The task checklist %s is not valid UTF-8.', $source ?? 'contents'),
+            sprintf('%s is not valid UTF-8.', self::subject($source)),
             ['Save the file as UTF-8 and run the command again.'],
         );
     }

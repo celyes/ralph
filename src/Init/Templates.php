@@ -79,6 +79,12 @@ final class Templates
         marked `- [x]` are skipped and are reported as completed by you rather than
         verified by {$name}.
 
+        Two things are reported as errors rather than skipped, so that no task you wrote
+        is quietly left out: a checkbox with nothing after it, and a checkbox indented
+        under another item. This release runs top-level items only — promote a nested
+        item to the start of the line, or write it as a plain `- ` bullet to keep it as a
+        detail of the item above.
+
         Avoid editing this file while a run is in progress: the runner rewrites the
         checkbox of the task it finishes.
 

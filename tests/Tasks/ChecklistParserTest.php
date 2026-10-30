@@ -128,11 +128,6 @@ final class ChecklistParserTest extends TestCase
         yield 'empty checkbox marker' => ['- [] Work'];
         yield 'unsupported marker' => ['- [?] Work'];
         yield 'two-character marker' => ['- [xx] Work'];
-        yield 'no description' => ['- [ ]'];
-        yield 'whitespace description' => ['- [ ]    '];
-        yield 'indented item' => ['  - [ ] Work'];
-        yield 'tab-indented item' => ["\t- [ ] Work"];
-        yield 'space before the bullet' => [' - [ ] Work'];
         yield 'ordered list item' => ['1. [ ] Work'];
         yield 'blockquoted item' => ['> - [ ] Work'];
         yield 'checkbox later in the line' => ['Later - [ ] Work'];
@@ -497,19 +492,181 @@ final class ChecklistParserTest extends TestCase
         self::assertSame("Print what would change.\nThen exit 0.", $item->details());
     }
 
-    #[Test]
-    public function an_indented_checkbox_becomes_a_detail_of_the_task_above_it(): void
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function emptyDescriptions(): iterable
     {
-        // PROJECT.md section C, item 3 makes an unsupported nested checkable
-        // subtask a readable error. Until then it is text under the task, which
-        // at least keeps it in front of the agent instead of dropping it.
+        yield 'pending' => ['- [ ]'];
+        yield 'checked' => ['- [x]'];
+        yield 'uppercase marker' => ['- [X]'];
+        yield 'trailing spaces' => ['- [ ]    '];
+        yield 'trailing tab' => ["- [ ]\t"];
+        yield 'asterisk bullet' => ['* [ ]'];
+        yield 'plus bullet' => ['+ [ ]'];
+        yield 'several spaces after the bullet' => ['-   [ ]'];
+    }
+
+    #[Test]
+    #[DataProvider('emptyDescriptions')]
+    public function a_checkbox_with_no_task_after_it_is_refused(string $line): void
+    {
+        $this->expectException(ChecklistException::class);
+        $this->expectExceptionMessage('has a checkbox with no task on line 1');
+
+        $this->parser->parse($line);
+    }
+
+    #[Test]
+    public function the_empty_description_error_names_the_file_the_line_and_what_to_write(): void
+    {
+        try {
+            $this->parser->parse("# Tasks\n\n- [ ] Work\n- [x]\n", '/srv/project/.ralph/tasks.md');
+            self::fail('Expected the empty description to be refused.');
+        } catch (ChecklistException $exception) {
+            self::assertSame(
+                'The task checklist /srv/project/.ralph/tasks.md has a checkbox with no task on line 4: "- [x]".',
+                $exception->getMessage(),
+            );
+            self::assertSame(
+                [
+                    'Write what should be done after the checkbox, as in "- [ ] Add a --dry-run option".',
+                    'Delete the line if there is nothing to do there.',
+                ],
+                $exception->hints(),
+            );
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function nestedSubtasks(): iterable
+    {
+        yield 'one space' => [" - [ ] Work"];
+        yield 'two spaces' => ['  - [ ] Work'];
+        yield 'tab' => ["\t- [ ] Work"];
+        yield 'checked' => ['  - [x] Work'];
+        yield 'asterisk bullet' => ['  * [ ] Work'];
+        yield 'plus bullet' => ['  + [ ] Work'];
+        yield 'no description' => ['  - [ ]'];
+        yield 'deeply indented' => ['        - [ ] Work'];
+    }
+
+    #[Test]
+    #[DataProvider('nestedSubtasks')]
+    public function an_indented_checkbox_is_refused(string $line): void
+    {
+        $this->expectException(ChecklistException::class);
+        $this->expectExceptionMessage('has an indented checkbox on line 2');
+
+        $this->parser->parse("- [ ] Add a --dry-run option\n" . $line . "\n");
+    }
+
+    #[Test]
+    public function an_indented_checkbox_is_refused_even_with_no_task_above_it(): void
+    {
+        // It is still work the user wrote down and the runner will never run,
+        // and the fix is the same one.
+        $this->expectException(ChecklistException::class);
+        $this->expectExceptionMessage('has an indented checkbox on line 3');
+
+        $this->parser->parse("Notes on the release:\n\n  - [ ] Work\n");
+    }
+
+    #[Test]
+    public function the_nested_subtask_error_names_the_file_the_line_and_both_ways_out(): void
+    {
+        try {
+            $this->parser->parse(<<<'MARKDOWN'
+                - [ ] Add a --dry-run option
+                  - Print what would change.
+                  - [ ] Cover it with a test
+                MARKDOWN, '/srv/project/.ralph/tasks.md');
+            self::fail('Expected the nested subtask to be refused.');
+        } catch (ChecklistException $exception) {
+            self::assertSame(
+                'The task checklist /srv/project/.ralph/tasks.md has an indented checkbox on line 3: "- [ ] Cover it with a test".',
+                $exception->getMessage(),
+            );
+            self::assertSame(
+                [
+                    'This release runs top-level tasks only. Move the item to the start of the line to have it run on its own.',
+                    'To keep it as a detail of the task above it, write it as a plain "- " bullet without a checkbox.',
+                    'To show the syntax without writing a task, put the line in a fenced code block.',
+                ],
+                $exception->hints(),
+            );
+        }
+    }
+
+    #[Test]
+    public function a_refused_line_is_quoted_in_full_unless_it_is_long(): void
+    {
+        $description = str_repeat('a', 80);
+
+        try {
+            $this->parser->parse('  - [ ] ' . $description);
+            self::fail('Expected the nested subtask to be refused.');
+        } catch (ChecklistException $exception) {
+            self::assertStringContainsString('"- [ ] ' . str_repeat('a', 53) . "\u{2026}\"", $exception->getMessage());
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function linesThatOnlyResembleItems(): iterable
+    {
+        yield 'empty marker' => ['- []'];
+        yield 'unsupported marker' => ['- [?]'];
+        yield 'indented empty marker' => ['  - []'];
+        yield 'indented unsupported marker' => ['  - [?] Work'];
+        yield 'indented checkbox with no space after it' => ['  - [ ]Work'];
+        yield 'indented checkbox with no space before it' => ['  -[ ] Work'];
+        yield 'indented ordered list item' => ['  1. [ ] Work'];
+        yield 'blockquoted item' => ['> - [ ] Work'];
+        yield 'indented blockquoted item' => ['  > - [ ] Work'];
+        yield 'prose mentioning the syntax' => ['Write subtasks as   - [ ] items.'];
+        yield 'indented prose mentioning the syntax' => ['  Write subtasks as - [ ] items.'];
+        yield 'a checkbox in a table cell' => ['| - [ ] Work | no |'];
+    }
+
+    #[Test]
+    #[DataProvider('linesThatOnlyResembleItems')]
+    public function a_line_that_only_resembles_an_item_is_left_as_prose(string $line): void
+    {
+        $checklist = $this->parser->parse("- [ ] Add a --dry-run option\n" . $line . "\n");
+
+        self::assertSame(1, $checklist->count(), 'Expected no error and no second item from: ' . $line);
+    }
+
+    #[Test]
+    public function checklist_mistakes_inside_a_fenced_code_block_are_not_refused(): void
+    {
+        // The whole point of the fence: a document may show what a malformed
+        // task looks like without the reader of that document failing on it.
         $checklist = $this->parser->parse(<<<'MARKDOWN'
-            - [ ] Add a --dry-run option
-              - [ ] Print what would change
+            # Tasks
+
+            Neither of these works:
+
+            ```markdown
+            - [ ]
+              - [ ] A nested subtask
+            ```
+
+            - [ ] The only real task
+              Shown here too:
+
+              ```markdown
+              - [ ]
+                - [ ] A nested subtask
+              ```
             MARKDOWN);
 
         self::assertSame(1, $checklist->count());
-        self::assertSame('- [ ] Print what would change', $checklist->items()[0]->details());
+        self::assertSame('The only real task', $checklist->items()[0]->description());
     }
 
     #[Test]
