@@ -13,12 +13,12 @@ namespace Celyes\RalphPhp\Tasks;
  * apart needs what the state store knows and is {@see Completion}'s job, which
  * {@see TaskList} applies when it decides what is pending.
  *
- * The position is kept because two later pieces of work need it and neither can
- * recover it from the description: the checkbox update has to change one marker
- * and leave every other byte of the file alone (section C, item 6), and an
- * error about a task has to say which line it is on. {@see self::source()} is
- * the line as it was read, so a writer can confirm the line it is about to
- * rewrite is still the one that was parsed before it touches the file.
+ * The position is kept because two other pieces of work need it and neither can
+ * recover it from the description: {@see CheckboxEditor} changes the marker on
+ * this line and leaves every other byte of the file alone, and an error about a
+ * task has to say which line it is on. {@see self::source()} is the line as it
+ * was read, so a writer can confirm the line it is about to rewrite is still
+ * the one that was parsed before it touches the file.
  *
  * An item may also carry details: the indented bullets and paragraphs written
  * under it, which the agent receives as implementation notes or acceptance

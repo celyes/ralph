@@ -28,10 +28,11 @@ use InvalidArgumentException;
  * See {@see Completion} for why that distinction is kept rather than collapsed
  * into "done".
  *
- * Immutable, and a snapshot: it describes one reading of the file. The checkbox
- * writer of PROJECT.md section C, item 6 changes the file underneath it, and
- * item 7 makes a mid-run edit something to reconcile rather than absorb, so a
- * runner that has finished a task re-reads instead of mutating this.
+ * Immutable, and a snapshot: it describes one reading of the file.
+ * {@see ChecklistWriter} changes that file underneath it, and PROJECT.md
+ * section C, item 7 makes a mid-run edit something to reconcile rather than
+ * absorb, so a runner that has finished a task re-reads instead of mutating
+ * this.
  */
 final class TaskList
 {

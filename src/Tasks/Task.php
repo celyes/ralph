@@ -14,10 +14,9 @@ namespace Celyes\RalphPhp\Tasks;
  * place instead of being implied by whatever the parser happened to hash.
  *
  * The item is kept whole rather than copied field by field, because the things
- * that come next need it as it was read: the checkbox writer has to confirm the
- * line it is about to rewrite is still the line that was parsed
- * ({@see ChecklistItem::source()}), and an error about a task has to say which
- * line it is on.
+ * around it need it as it was read: {@see CheckboxEditor} rewrites the marker on
+ * the line it was parsed from ({@see ChecklistItem::source()}), and an error
+ * about a task has to say which line it is on.
  */
 final class Task
 {
