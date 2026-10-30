@@ -82,8 +82,9 @@ final class Task
      * Whether the checklist marks this task as done.
      *
      * The file's marker, not a verdict: an item a user ticked by hand looks the
-     * same here, and telling the two apart is the state store's job (PROJECT.md
-     * section C, item 5).
+     * same here. {@see TaskList} is what turns this into a {@see Completion},
+     * using the state store's record to say whether a ticked item is the user's
+     * word or the runner's.
      */
     public function isChecked(): bool
     {

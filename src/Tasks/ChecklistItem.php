@@ -9,9 +9,9 @@ namespace Celyes\RalphPhp\Tasks;
  *
  * Deliberately a record of what was read rather than of what the runner knows:
  * `checked` is the marker in the file, not a verdict that the work was verified
- * — an item the user ticked by hand is indistinguishable here, and the
- * distinction between user-completed and runner-verified belongs to the state
- * store (PROJECT.md section C, item 5).
+ * — an item the user ticked by hand is indistinguishable here. Telling the two
+ * apart needs what the state store knows and is {@see Completion}'s job, which
+ * {@see TaskList} applies when it decides what is pending.
  *
  * The position is kept because two later pieces of work need it and neither can
  * recover it from the description: the checkbox update has to change one marker
