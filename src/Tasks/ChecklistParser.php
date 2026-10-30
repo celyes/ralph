@@ -27,11 +27,19 @@ use Celyes\RalphPhp\Exception\ChecklistException;
  * that the same line the user sees as a task is the line that is read and
  * written back, not that every CommonMark subtlety is honoured.
  *
- * Two deferred refinements, both already specified: indented bullets and
- * paragraphs under an item are ignored here and become its details in
- * PROJECT.md section C, item 2, and a line that is nearly an item — an empty
- * description, or an indented checkbox pretending to be a subtask — is only
- * skipped here, where section C, item 3 makes it a readable error.
+ * What is indented under an item belongs to it. The bullets and paragraphs
+ * written below a task, indented by any amount, are collected as that task's
+ * details — the implementation notes or acceptance criteria the agent is given
+ * along with the description — and they end at the first line that starts in
+ * column one. A blank line does not end them, so an item can carry several
+ * paragraphs, and a fenced block opened inside them runs to its own closing
+ * fence, so an example written in a task's details can itself contain
+ * checklist syntax.
+ *
+ * One deferred refinement, already specified: a line that is nearly an item —
+ * an empty description, or an indented checkbox pretending to be a subtask —
+ * is only skipped or read as a detail line here, where PROJECT.md section C,
+ * item 3 makes it a readable error.
  */
 final class ChecklistParser
 {
@@ -47,12 +55,21 @@ final class ChecklistParser
     private const string ITEM = '/^([-*+])[ \t]+\[([ xX])\][ \t]+(\S.*)$/u';
 
     /**
-     * The opening or closing line of a fenced code block.
+     * The opening line of a fenced code block in column one.
      *
      * Up to three leading spaces are allowed, as CommonMark does, because a
      * fence indented that far still opens a code block.
      */
     private const string FENCE = '/^ {0,3}(`{3,}|~{3,})(.*)$/';
+
+    /**
+     * The opening line of a fenced code block inside an item's details.
+     *
+     * Any indentation at all, because details are indented to begin with and a
+     * fenced example inside them is indented at least as far as the prose
+     * around it.
+     */
+    private const string DETAIL_FENCE = '/^[ \t]+(`{3,}|~{3,})(.*)$/';
 
     /**
      * Parse checklist items out of Markdown.
@@ -69,33 +86,135 @@ final class ChecklistParser
         $items = [];
         $openFence = null;
 
+        /**
+         * The item being read, held back until its details are known.
+         *
+         * @var array{description: string, checked: bool, line: int, source: string}|null $open
+         */
+        $open = null;
+
+        /** @var list<string> $details */
+        $details = [];
+
         foreach ($this->lines($markdown) as $index => $line) {
             if ($openFence !== null) {
-                if ($this->closesFence($openFence, $line)) {
+                // A fence is only ever open while an item is still being read
+                // when that fence was opened inside the item's details, since a
+                // fence in column one ends the item above it before it opens.
+                // So everything up to the closing fence belongs to the item,
+                // whatever its indentation: the contents of a fenced example
+                // are not checklist syntax even when written as a task in
+                // column one.
+                if ($open !== null) {
+                    $details[] = self::blankToEmpty($line);
+                }
+
+                if ($this->closesFence($openFence, $line, $open !== null)) {
                     $openFence = null;
                 }
 
                 continue;
             }
 
+            if (preg_match(self::ITEM, $line, $matches) === 1) {
+                if ($open !== null) {
+                    $items[] = self::itemFrom($open, $details);
+                }
+
+                $open = [
+                    'description' => rtrim($matches[3]),
+                    'checked' => $matches[2] !== ' ',
+                    'line' => $index + 1,
+                    'source' => $line,
+                ];
+                $details = [];
+
+                continue;
+            }
+
+            if ($open !== null && self::belongsToItem($line)) {
+                $details[] = self::blankToEmpty($line);
+                $openFence = $this->opensFence($line, true);
+
+                continue;
+            }
+
+            // A line in column one ends the item above it, whether it is a
+            // heading, a paragraph or the start of a code block.
+            if ($open !== null) {
+                $items[] = self::itemFrom($open, $details);
+                $open = null;
+                $details = [];
+            }
+
             $openFence = $this->opensFence($line);
-            if ($openFence !== null) {
-                continue;
-            }
+        }
 
-            if (preg_match(self::ITEM, $line, $matches) !== 1) {
-                continue;
-            }
-
-            $items[] = new ChecklistItem(
-                rtrim($matches[3]),
-                $matches[2] !== ' ',
-                $index + 1,
-                $line,
-            );
+        if ($open !== null) {
+            $items[] = self::itemFrom($open, $details);
         }
 
         return new Checklist($items, $source);
+    }
+
+    /**
+     * Whether a line continues the item above it.
+     *
+     * Indented lines do, by any amount: the nesting an editor shows is what a
+     * user means by "under this task", and demanding CommonMark's exact
+     * continuation width would reject a one-space indent that plainly reads as
+     * a detail. Blank lines do too, so an item can carry more than one
+     * paragraph; the blank lines that turn out to be followed by something else
+     * are dropped again when the item is built.
+     *
+     * A line in column one never does. That makes a new task, a heading or a
+     * paragraph end the details above it, and it means CommonMark's lazy
+     * continuation — unindented prose directly below a list item — is not
+     * supported here: in a file the runner rewrites line by line, "indented
+     * belongs to the task above" is a rule a user can see is being followed.
+     */
+    private static function belongsToItem(string $line): bool
+    {
+        return trim($line) === '' || $line[0] === ' ' || $line[0] === "\t";
+    }
+
+    /**
+     * A whitespace-only line, reduced to nothing.
+     *
+     * Kept out of the indentation a detail block shares, so a stray space on an
+     * otherwise empty line cannot stop the block from being dedented. Inside a
+     * fenced example this also drops trailing whitespace from an otherwise
+     * empty line of code, which no checklist depends on.
+     */
+    private static function blankToEmpty(string $line): string
+    {
+        return trim($line) === '' ? '' : $line;
+    }
+
+    /**
+     * Build an item from the line it was read on and the lines below it.
+     *
+     * The blank lines between an item's last detail and whatever follows are
+     * dropped, so an item's details end at its last line of content and
+     * {@see ChecklistItem::endLine()} points at that line rather than at the
+     * empty space in front of the next task.
+     *
+     * @param array{description: string, checked: bool, line: int, source: string} $open
+     * @param list<string> $details
+     */
+    private static function itemFrom(array $open, array $details): ChecklistItem
+    {
+        while ($details !== [] && $details[count($details) - 1] === '') {
+            array_pop($details);
+        }
+
+        return new ChecklistItem(
+            $open['description'],
+            $open['checked'],
+            $open['line'],
+            $open['source'],
+            $details,
+        );
     }
 
     /**
@@ -124,10 +243,15 @@ final class ChecklistParser
      * A backtick fence's info string cannot contain a backtick, so a line of
      * prose that happens to hold several code spans does not silently swallow
      * the rest of the checklist.
+     *
+     * @param bool $withinItem whether the line is one of an item's detail
+     *                         lines, which may be indented any distance
      */
-    private function opensFence(string $line): ?string
+    private function opensFence(string $line, bool $withinItem = false): ?string
     {
-        if (preg_match(self::FENCE, $line, $matches) !== 1) {
+        $pattern = $withinItem ? self::DETAIL_FENCE : self::FENCE;
+
+        if (preg_match($pattern, $line, $matches) !== 1) {
             return null;
         }
 
@@ -146,10 +270,15 @@ final class ChecklistParser
      * runs to the end of the document, which is CommonMark's behaviour and the
      * safer one here: an unterminated example is treated as the code it looks
      * like rather than as tasks.
+     *
+     * @param bool $withinItem whether the fence was opened inside an item's
+     *                         details, where its closing line is indented as
+     *                         far as the example it ends
      */
-    private function closesFence(string $fence, string $line): bool
+    private function closesFence(string $fence, string $line, bool $withinItem = false): bool
     {
-        $pattern = sprintf('/^ {0,3}%s{%d,}[ \t]*$/', $fence[0], strlen($fence));
+        $indent = $withinItem ? '[ \t]*' : ' {0,3}';
+        $pattern = sprintf('/^%s%s{%d,}[ \t]*$/', $indent, $fence[0], strlen($fence));
 
         return preg_match($pattern, $line) === 1;
     }

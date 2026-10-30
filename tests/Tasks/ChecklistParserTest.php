@@ -300,4 +300,362 @@ final class ChecklistParserTest extends TestCase
             'A freshly initialised project must have nothing pending: the template\'s example is fenced.',
         );
     }
+
+    #[Test]
+    public function a_task_written_on_its_own_has_no_details(): void
+    {
+        $item = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Add a --dry-run option
+            - [ ] Document it
+            MARKDOWN)->items()[0];
+
+        self::assertFalse($item->hasDetails());
+        self::assertSame([], $item->detailLines());
+        self::assertSame('', $item->details());
+        self::assertSame($item->line(), $item->endLine());
+    }
+
+    #[Test]
+    public function indented_bullets_below_a_task_become_its_details(): void
+    {
+        $checklist = $this->parser->parse(<<<'MARKDOWN'
+            # Tasks
+
+            - [ ] Add a --dry-run option
+              - Print what would change and exit 0.
+              - Touch nothing on disk.
+            - [ ] Document the exit codes
+            MARKDOWN);
+
+        self::assertSame(2, $checklist->count());
+
+        $item = $checklist->items()[0];
+        self::assertSame('Add a --dry-run option', $item->description());
+        self::assertTrue($item->hasDetails());
+        self::assertSame(
+            ['  - Print what would change and exit 0.', '  - Touch nothing on disk.'],
+            $item->detailLines(),
+        );
+        self::assertSame(
+            "- Print what would change and exit 0.\n- Touch nothing on disk.",
+            $item->details(),
+        );
+        self::assertSame(3, $item->line());
+        self::assertSame(5, $item->endLine());
+
+        self::assertFalse($checklist->items()[1]->hasDetails());
+    }
+
+    #[Test]
+    public function an_indented_paragraph_below_a_task_becomes_its_details(): void
+    {
+        $item = $this->parser->parse(<<<'MARKDOWN'
+            - [x] Extract the importer
+              It has grown two responsibilities, so move the parsing half out
+              into its own class and leave the writing half where it is.
+            MARKDOWN)->items()[0];
+
+        self::assertTrue($item->isChecked());
+        self::assertSame(
+            "It has grown two responsibilities, so move the parsing half out\ninto its own class and leave the writing half where it is.",
+            $item->details(),
+        );
+    }
+
+    #[Test]
+    public function details_can_hold_several_paragraphs(): void
+    {
+        $item = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Add a --dry-run option
+
+              Acceptance criteria:
+
+              - The command exits 0 and writes nothing.
+              - The summary names every file it would have changed.
+            MARKDOWN)->items()[0];
+
+        self::assertSame(
+            <<<'DETAILS'
+
+            Acceptance criteria:
+
+            - The command exits 0 and writes nothing.
+            - The summary names every file it would have changed.
+            DETAILS,
+            $item->details(),
+        );
+        self::assertSame(6, $item->endLine());
+    }
+
+    #[Test]
+    public function blank_lines_before_the_next_task_are_not_details(): void
+    {
+        $checklist = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Add a --dry-run option
+              Print what would change.
+
+
+            - [ ] Document the exit codes
+
+            MARKDOWN);
+
+        $item = $checklist->items()[0];
+        self::assertSame(['  Print what would change.'], $item->detailLines());
+        self::assertSame(2, $item->endLine());
+        self::assertFalse($checklist->items()[1]->hasDetails());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function detailTerminators(): iterable
+    {
+        yield 'another task' => ['- [ ] Document the exit codes'];
+        yield 'a heading' => ['## Later'];
+        yield 'a paragraph' => ['Everything below is for the next release.'];
+        yield 'a plain bullet' => ['- Not a task, and not indented either'];
+        yield 'a fence' => ['```'];
+    }
+
+    #[Test]
+    #[DataProvider('detailTerminators')]
+    public function details_end_at_the_first_line_in_column_one(string $terminator): void
+    {
+        $item = $this->parser->parse(
+            "- [ ] Add a --dry-run option\n  Print what would change.\n" . $terminator . "\n",
+        )->items()[0];
+
+        self::assertSame(['  Print what would change.'], $item->detailLines());
+        self::assertSame(2, $item->endLine());
+    }
+
+    #[Test]
+    public function details_keep_their_own_nesting_and_lose_the_indentation_they_share(): void
+    {
+        $item = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Add a --dry-run option
+                - Print what would change
+                  - one line per file
+                  - with the old and the new value
+                - Exit 0
+            MARKDOWN)->items()[0];
+
+        self::assertSame(
+            <<<'DETAILS'
+            - Print what would change
+              - one line per file
+              - with the old and the new value
+            - Exit 0
+            DETAILS,
+            $item->details(),
+        );
+    }
+
+    #[Test]
+    public function details_indented_with_tabs_are_dedented_by_the_prefix_they_share(): void
+    {
+        $item = $this->parser->parse(
+            "- [ ] Add a --dry-run option\n\t- Print what would change\n\t\t- one line per file\n",
+        )->items()[0];
+
+        self::assertSame("- Print what would change\n\t- one line per file", $item->details());
+    }
+
+    #[Test]
+    public function a_detail_block_mixing_tabs_and_spaces_only_loses_what_every_line_has(): void
+    {
+        // No tab width is assumed: the shared prefix of "\t" and "    " is
+        // nothing, so both lines keep the whitespace they were written with.
+        $item = $this->parser->parse(
+            "- [ ] Add a --dry-run option\n\t- Tab indented\n    - Space indented\n",
+        )->items()[0];
+
+        self::assertSame("\t- Tab indented\n    - Space indented", $item->details());
+    }
+
+    #[Test]
+    public function detail_lines_are_kept_exactly_as_read(): void
+    {
+        $item = $this->parser->parse(
+            "- [ ] Add a --dry-run option\n  Print what would change.   \n   \n  Then exit 0.\n",
+        )->items()[0];
+
+        self::assertSame(
+            ['  Print what would change.   ', '', '  Then exit 0.'],
+            $item->detailLines(),
+            'Detail lines keep their trailing spaces; a whitespace-only line is emptied.',
+        );
+    }
+
+    #[Test]
+    public function details_are_read_the_same_with_windows_line_endings(): void
+    {
+        $item = $this->parser->parse(
+            "- [ ] Add a --dry-run option\r\n  Print what would change.\r\n  Then exit 0.\r\n",
+        )->items()[0];
+
+        self::assertSame("Print what would change.\nThen exit 0.", $item->details());
+    }
+
+    #[Test]
+    public function an_indented_checkbox_becomes_a_detail_of_the_task_above_it(): void
+    {
+        // PROJECT.md section C, item 3 makes an unsupported nested checkable
+        // subtask a readable error. Until then it is text under the task, which
+        // at least keeps it in front of the agent instead of dropping it.
+        $checklist = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Add a --dry-run option
+              - [ ] Print what would change
+            MARKDOWN);
+
+        self::assertSame(1, $checklist->count());
+        self::assertSame('- [ ] Print what would change', $checklist->items()[0]->details());
+    }
+
+    #[Test]
+    public function a_fenced_example_inside_details_is_kept_and_hides_its_checkboxes(): void
+    {
+        $checklist = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Document the checklist syntax
+              Show the reader this:
+
+              ```markdown
+              - [ ] A task
+                - a detail
+              ```
+
+              And nothing else.
+            - [ ] Document the exit codes
+            MARKDOWN);
+
+        self::assertSame(2, $checklist->count(), 'The fenced example holds no tasks.');
+        self::assertSame(
+            <<<'DETAILS'
+            Show the reader this:
+
+            ```markdown
+            - [ ] A task
+              - a detail
+            ```
+
+            And nothing else.
+            DETAILS,
+            $checklist->items()[0]->details(),
+        );
+        self::assertSame(9, $checklist->items()[0]->endLine());
+        self::assertSame(10, $checklist->items()[1]->line());
+    }
+
+    #[Test]
+    public function a_column_one_checkbox_inside_a_detail_fence_is_not_a_task(): void
+    {
+        // Fenced content is free to sit in column one, and a user pasting the
+        // syntax into an example may well leave it there. It belongs to the
+        // example, so it is neither a task of its own nor the end of the
+        // details — and because it shares no indentation with the lines around
+        // it, the block is handed over exactly as written rather than dedented
+        // to the point of breaking the example.
+        $checklist = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Document the checklist syntax
+              ```markdown
+            - [ ] A task
+              ```
+            - [ ] Document the exit codes
+            MARKDOWN);
+
+        self::assertSame(2, $checklist->count());
+        self::assertSame(
+            "  ```markdown\n- [ ] A task\n  ```",
+            $checklist->items()[0]->details(),
+        );
+        self::assertSame(4, $checklist->items()[0]->endLine());
+        self::assertSame(5, $checklist->items()[1]->line());
+    }
+
+    #[Test]
+    public function a_deeply_indented_fence_inside_details_hides_a_checkbox_in_column_one(): void
+    {
+        // A fence nested that far in is still a fence, so what it encloses is
+        // code wherever it starts — including the one place a checkbox would
+        // otherwise be read as a task of its own.
+        $checklist = $this->parser->parse(
+            "- [ ] Document the checklist syntax\n"
+            . "      ```markdown\n"
+            . "- [ ] Hidden by the example\n"
+            . "      ```\n"
+            . "- [ ] Document the exit codes\n",
+        );
+
+        self::assertSame(2, $checklist->count());
+        self::assertSame(4, $checklist->items()[0]->endLine());
+        self::assertSame('Document the exit codes', $checklist->items()[1]->description());
+    }
+
+    #[Test]
+    public function a_deeply_indented_fence_inside_details_closes_at_its_own_indentation(): void
+    {
+        // Details are indented to begin with, so a fenced example nested under
+        // a bullet of its own sits further in than the three spaces CommonMark
+        // allows a top-level fence. Its closing line is indented just as far,
+        // and has to be read as the close rather than as more code — otherwise
+        // the example swallows every task below it.
+        $checklist = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Document the checklist syntax
+              - Show the reader this:
+
+                ```markdown
+                - [ ] A task
+                ```
+
+              - And nothing else.
+            - [ ] Document the exit codes
+            MARKDOWN);
+
+        self::assertSame(2, $checklist->count());
+        self::assertSame(8, $checklist->items()[0]->endLine());
+        self::assertSame('Document the exit codes', $checklist->items()[1]->description());
+        self::assertSame(
+            <<<'DETAILS'
+            - Show the reader this:
+
+              ```markdown
+              - [ ] A task
+              ```
+
+            - And nothing else.
+            DETAILS,
+            $checklist->items()[0]->details(),
+        );
+    }
+
+    #[Test]
+    public function an_unclosed_fence_inside_details_runs_to_the_end_of_the_document(): void
+    {
+        $checklist = $this->parser->parse(<<<'MARKDOWN'
+            - [ ] Document the checklist syntax
+              ```markdown
+              - [ ] Hidden
+            - [ ] Hidden too
+            MARKDOWN);
+
+        self::assertSame(1, $checklist->count());
+        self::assertSame(4, $checklist->items()[0]->endLine());
+    }
+
+    #[Test]
+    public function indented_lines_that_follow_no_task_are_ignored(): void
+    {
+        $checklist = $this->parser->parse(<<<'MARKDOWN'
+            Notes on the release:
+
+              - nothing here is a task
+              - and nothing here attaches to one
+
+            - [ ] Add a --dry-run option
+            MARKDOWN);
+
+        self::assertSame(1, $checklist->count());
+        self::assertFalse($checklist->items()[0]->hasDetails());
+        self::assertSame(6, $checklist->items()[0]->line());
+    }
 }
