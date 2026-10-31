@@ -155,7 +155,7 @@ final class Migrations
      * carries — a box the user ticked against one the runner earned — is the
      * reason it is a column rather than a boolean.
      *
-     * There is deliberately no lifecycle state here: see {@see Schema::STATES}.
+     * There is deliberately no lifecycle state here: see {@see LifecycleState}.
      */
     private static function tasks(): string
     {
@@ -229,7 +229,7 @@ final class Migrations
                 UNIQUE (task_id, number)
             )
             SQL,
-            Schema::literals(Schema::STATES),
+            Schema::literals(Schema::states()),
             Schema::literals(Schema::PHASES),
             Schema::literals(Schema::PUSH_STATES),
         );
@@ -276,7 +276,7 @@ final class Migrations
                 UNIQUE (generation_id, number)
             )
             SQL,
-            Schema::literals(Schema::STATES),
+            Schema::literals(Schema::states()),
             Schema::literals(Schema::PHASES),
             Schema::literals(Schema::ATTEMPT_OUTCOMES),
         );
@@ -433,11 +433,11 @@ final class Migrations
                 ON generations (branch) WHERE branch IS NOT NULL',
 
             // A task has at most one pass that can still be continued. The
-            // states listed are Schema::CLOSED_STATES; everything else is open.
+            // states listed are Schema::closedStates(); everything else is open.
             sprintf(
                 'CREATE UNIQUE INDEX generations_open_per_task
                     ON generations (task_id) WHERE state NOT IN (%s)',
-                Schema::literals(Schema::CLOSED_STATES),
+                Schema::literals(Schema::closedStates()),
             ),
 
             'CREATE INDEX generations_run ON generations (run_id)',

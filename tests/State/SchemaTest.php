@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Tests\State;
 
 use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\State\Database;
+use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Migration;
 use Celyes\RalphPhp\State\Migrations;
 use Celyes\RalphPhp\State\Migrator;
@@ -137,6 +138,33 @@ final class SchemaTest extends TestCase
 
             self::assertTrue(Schema::isOpen($state));
         }
+    }
+
+    /**
+     * The drift guard between the enum and the DDL: the `CHECK` constraint is
+     * built from these cases, so a case the column refuses would be a state the
+     * runner could compute and never store.
+     */
+    #[Test]
+    public function every_state_the_enum_names_is_a_state_the_column_takes(): void
+    {
+        foreach (LifecycleState::cases() as $state) {
+            $task = $this->insertTask('a task recorded as ' . $state->value);
+            $this->insertGeneration($task, 1, 'ralph/takes-' . $state->value, state: $state->value);
+        }
+
+        self::assertSame(count(LifecycleState::cases()), $this->rowsIn('generations'));
+    }
+
+    #[Test]
+    public function a_state_the_enum_does_not_name_is_refused(): void
+    {
+        $task = $this->insertTask('add a flag');
+
+        $this->refuses(
+            'CHECK constraint failed: state IN',
+            fn (): int => $this->insertGeneration($task, 1, 'ralph/first', state: 'paused'),
+        );
     }
 
     #[Test]
@@ -415,9 +443,9 @@ final class SchemaTest extends TestCase
     public function the_vocabularies_are_lowercase_identifiers(): void
     {
         $vocabularies = [
-            Schema::STATES,
-            Schema::OPEN_STATES,
-            Schema::CLOSED_STATES,
+            Schema::states(),
+            Schema::openStates(),
+            Schema::closedStates(),
             Schema::PHASES,
             Schema::RUN_STATES,
             Schema::ATTEMPT_OUTCOMES,
@@ -442,15 +470,15 @@ final class SchemaTest extends TestCase
         self::assertSame(
             [],
             array_values(array_diff(
-                Schema::STATES,
-                [...Schema::OPEN_STATES, ...Schema::CLOSED_STATES],
+                Schema::states(),
+                [...Schema::openStates(), ...Schema::closedStates()],
             )),
             'A lifecycle state is neither open nor closed, so the one-open-pass index cannot classify it.',
         );
 
         self::assertSame(
             [],
-            array_values(array_intersect(Schema::OPEN_STATES, Schema::CLOSED_STATES)),
+            array_values(array_intersect(Schema::openStates(), Schema::closedStates())),
             'A lifecycle state is both open and closed.',
         );
     }

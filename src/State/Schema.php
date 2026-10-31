@@ -19,11 +19,11 @@ use InvalidArgumentException;
  * puzzled over three runs later.
  *
  * Some of these lists mirror a PHP enum that already exists
- * ({@see Completion}, {@see AgentSource}); those are built from the enum's
- * cases so the two cannot drift. The rest — lifecycle states, phases, attempt
- * outcomes — are named here first because the schema needs them before the
- * enums of PROJECT.md section D, items 2 and 3 are written, and those enums are
- * expected to adopt exactly these spellings.
+ * ({@see LifecycleState}, {@see Completion}, {@see AgentSource}); those are
+ * built from the enum's cases so the two cannot drift. The rest — phases,
+ * attempt outcomes, push and reference vocabularies — are named here first
+ * because the schema needs them before the types that will own them are
+ * written, and those types are expected to adopt exactly these spellings.
  *
  * The list of {@see self::TABLES} is part of the contract too: it is what
  * bootstrap and the tests check a database against to decide it is a Ralph PHP
@@ -31,52 +31,6 @@ use InvalidArgumentException;
  */
 final class Schema
 {
-    /**
-     * Where a task stands in a run.
-     *
-     * The seven states of PROJECT.md section D, item 2, in the order a task
-     * moves through them. `skipped` and the three failure states are terminal
-     * for a pass; `interrupted` is the one that resume is allowed to pick up.
-     *
-     * Stored on an execution generation rather than on the task, because a
-     * reopened task has a finished pass and a running one at the same time and
-     * a single column could not say both. A task's own state is its latest
-     * generation's, or `pending` when it has never been run.
-     *
-     * @var list<string>
-     */
-    public const array STATES = [
-        'pending',
-        'running',
-        'completed',
-        'skipped',
-        'blocked',
-        'failed',
-        'interrupted',
-    ];
-
-    /**
-     * The states a pass can still be picked up from, so it is continued rather
-     * than superseded.
-     *
-     * The complement of {@see self::CLOSED_STATES}, and the definition behind
-     * the one-open-pass-per-task index in {@see Migrations}: it is what
-     * `GenerationHistory` means by an open generation.
-     *
-     * @var list<string>
-     */
-    public const array OPEN_STATES = ['pending', 'running', 'blocked', 'failed', 'interrupted'];
-
-    /**
-     * The states a pass does not come back from.
-     *
-     * `completed` in the strict sense the package puts on ticking a box, and
-     * `skipped` for a pass the runner deliberately did not carry out.
-     *
-     * @var list<string>
-     */
-    public const array CLOSED_STATES = ['completed', 'skipped'];
-
     /**
      * What a running task is in the middle of.
      *
@@ -205,6 +159,54 @@ final class Schema
     public const string LEDGER = 'schema_migrations';
 
     /**
+     * Where a task stands in a run.
+     *
+     * The seven states of PROJECT.md section D, item 2, in the order a pass
+     * moves through them. Built from {@see LifecycleState} so the column cannot
+     * hold a value the enum does not have, and the enum cannot name a state the
+     * column would refuse.
+     *
+     * Stored on an execution generation rather than on the task, because a
+     * reopened task has a finished pass and a running one at the same time and
+     * a single column could not say both. A task's own state is its latest
+     * generation's, or `pending` when it has never been run.
+     *
+     * @return list<string>
+     */
+    public static function states(): array
+    {
+        return LifecycleState::values();
+    }
+
+    /**
+     * The states a pass can still be picked up from, so it is continued rather
+     * than superseded.
+     *
+     * The complement of {@see self::closedStates()}, and the definition behind
+     * the one-open-pass-per-task index in {@see Migrations}: it is what
+     * `GenerationHistory` means by an open generation.
+     *
+     * @return list<string>
+     */
+    public static function openStates(): array
+    {
+        return LifecycleState::openValues();
+    }
+
+    /**
+     * The states a pass does not come back from.
+     *
+     * `completed` in the strict sense the package puts on ticking a box, and
+     * `skipped` for a pass the runner deliberately did not carry out.
+     *
+     * @return list<string>
+     */
+    public static function closedStates(): array
+    {
+        return LifecycleState::closedValues();
+    }
+
+    /**
      * Where a task's completion came from: the user's checklist or a verified
      * run.
      *
@@ -238,16 +240,21 @@ final class Schema
 
     /**
      * Whether a state is one a pass can be continued from.
+     *
+     * Takes the stored spelling rather than a {@see LifecycleState}, for the
+     * callers that are reading rows: a query returns a string, and this answers
+     * the open/closed question without first having to decide what to do about
+     * a value the enum cannot read.
      */
     public static function isOpen(string $state): bool
     {
-        return in_array($state, self::OPEN_STATES, true);
+        return in_array($state, self::openStates(), true);
     }
 
     /**
      * A list of values as a SQL `IN` list of quoted literals.
      *
-     * The vocabularies are package constants, never user input, so quoting is
+     * The vocabularies are package-defined, never user input, so quoting is
      * about producing valid SQL rather than about safety; the guard below is
      * there so that a value added carelessly later fails loudly here instead of
      * silently widening a constraint.
