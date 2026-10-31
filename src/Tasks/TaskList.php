@@ -257,9 +257,11 @@ final class TaskList
      *
      * An unticked task is pending even when the state store has verified it
      * before: that is a completed item the user reopened, and the file is the
-     * authority on what is being asked for. Giving it back its old identifier
-     * and a new execution generation is PROJECT.md section C, item 8; what
-     * matters here is that it is not skipped.
+     * authority on what is being asked for. It keeps the identifier it had, so
+     * its history is still findable; which execution generation the new pass
+     * belongs to is {@see GenerationSelector}'s decision, taken from what the
+     * state store recorded rather than from the marker. What matters here is
+     * that it is not skipped.
      */
     private static function completionFor(Task $task, VerifiedTasks $verified): Completion
     {
