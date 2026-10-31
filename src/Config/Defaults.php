@@ -58,6 +58,16 @@ final class Defaults
     public const string WORKTREES_DIRECTORY = self::RUNTIME_DIRECTORY . '/worktrees';
 
     /**
+     * SQLite database holding task, attempt, Git and recovery records.
+     *
+     * Deliberately not a configurable setting. It is the file that says which
+     * commit belongs to which task, and a project that could point two
+     * configurations at two databases would be a project where reopening a
+     * finished task cannot see that it was ever finished.
+     */
+    public const string STATE_FILE = self::RUNTIME_DIRECTORY . '/state.sqlite';
+
+    /**
      * Agent used when `run --agent NAME` is not given.
      */
     public const string AGENT = 'codex';

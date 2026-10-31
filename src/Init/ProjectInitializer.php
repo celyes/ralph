@@ -11,6 +11,7 @@ use Celyes\RalphPhp\Config\Path;
 use Celyes\RalphPhp\Config\RawConfiguration;
 use Celyes\RalphPhp\Exception\ConfigurationException;
 use Celyes\RalphPhp\Exception\FilesystemException;
+use Celyes\RalphPhp\State\StateBootstrap;
 
 /**
  * Creates the project files `ralph` needs: the configuration, the task
@@ -130,8 +131,8 @@ final class ProjectInitializer
     /**
      * The runtime directories a run writes into.
      *
-     * The state database itself is created by the state store when a run starts
-     * (PROJECT.md section D), so initialisation only has to make the places it
+     * The state database itself is created by {@see StateBootstrap} when a
+     * command first opens it, so initialisation only has to make the places it
      * and the logs go.
      *
      * @return list<string>
