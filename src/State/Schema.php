@@ -20,11 +20,11 @@ use InvalidArgumentException;
  *
  * Some of these lists mirror a PHP enum that already exists
  * ({@see LifecycleState}, {@see Phase}, {@see Completion},
- * {@see AgentSource}); those are built from the enum's cases so the two cannot
- * drift. The rest — run states, attempt outcomes, push and reference
- * vocabularies — are named here first because the schema needs them before the
- * types that will own them are written, and those types are expected to adopt
- * exactly these spellings.
+ * {@see PushState}, {@see AgentSource}); those are built from the enum's cases
+ * so the two cannot drift. The rest — run states, attempt outcomes, reference
+ * and checklist vocabularies — are named here first because the schema needs
+ * them before the types that will own them are written, and those types are
+ * expected to adopt exactly these spellings.
  *
  * The list of {@see self::TABLES} is part of the contract too: it is what
  * bootstrap and the tests check a database against to decide it is a Ralph PHP
@@ -60,17 +60,6 @@ final class Schema
      * @var list<string>
      */
     public const array CHECK_OUTCOMES = ['passed', 'failed', 'timed_out', 'not_run'];
-
-    /**
-     * Whether a pass's commit has been published.
-     *
-     * `not_required` is the default because pushing is opt-in. `failed` is kept
-     * distinct from `pending` so that resume can retry only the publication,
-     * without repeating the implementation or the commit.
-     *
-     * @var list<string>
-     */
-    public const array PUSH_STATES = ['not_required', 'pending', 'published', 'failed'];
 
     /**
      * The kinds of Git fact worth recording.
@@ -207,6 +196,23 @@ final class Schema
     public static function phases(): array
     {
         return Phase::values();
+    }
+
+    /**
+     * Whether a pass's commit has been published.
+     *
+     * `not_required` is the default because pushing is opt-in. `failed` is kept
+     * distinct from `pending` so that resume can retry only the publication,
+     * without repeating the implementation or the commit.
+     *
+     * Built from {@see PushState} so the column cannot hold a value the enum
+     * does not have.
+     *
+     * @return list<string>
+     */
+    public static function pushStates(): array
+    {
+        return PushState::values();
     }
 
     /**
