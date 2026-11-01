@@ -10,6 +10,7 @@ use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Migration;
 use Celyes\RalphPhp\State\Migrations;
 use Celyes\RalphPhp\State\Migrator;
+use Celyes\RalphPhp\State\Phase;
 use Celyes\RalphPhp\State\Schema;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\Tasks\Completion;
@@ -240,6 +241,22 @@ final class SchemaTest extends TestCase
         );
     }
 
+    /**
+     * The drift guard between {@see Phase} and the DDL: the `CHECK` constraint
+     * is built from these cases, so a case the column refuses would be a phase
+     * the runner could record and never store.
+     */
+    #[Test]
+    public function every_phase_the_enum_names_is_a_phase_the_column_takes(): void
+    {
+        foreach (Phase::cases() as $phase) {
+            $task = $this->insertTask('a task stopped while ' . $phase->value);
+            $this->insertGeneration($task, 1, 'ralph/takes-' . $phase->value, phase: $phase->value);
+        }
+
+        self::assertSame(count(Phase::cases()), $this->rowsIn('generations'));
+    }
+
     #[Test]
     public function a_phase_the_package_does_not_know_is_refused(): void
     {
@@ -446,7 +463,7 @@ final class SchemaTest extends TestCase
             Schema::states(),
             Schema::openStates(),
             Schema::closedStates(),
-            Schema::PHASES,
+            Schema::phases(),
             Schema::RUN_STATES,
             Schema::ATTEMPT_OUTCOMES,
             Schema::CHECK_OUTCOMES,

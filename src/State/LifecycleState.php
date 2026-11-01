@@ -60,8 +60,7 @@ enum LifecycleState: string
     /**
      * Being worked on now, by this runner.
      *
-     * The phase column says what part of it — preparing, executing, verifying,
-     * committing, publishing, finalizing. Only a pass in this state holds a
+     * {@see Phase} says what part of it. Only a pass in this state holds a
      * worktree the runner considers its own.
      */
     case Running = 'running';
@@ -109,8 +108,9 @@ enum LifecycleState: string
      * Stopped mid-flight, with the work preserved.
      *
      * Ctrl+C, a killed process, a crashed machine. The one state resume is
-     * meant to pick up: the recorded phase says how far the pass got, which is
-     * the difference between invoking the agent again and only retrying a push.
+     * meant to pick up: the recorded {@see Phase} says how far the pass got,
+     * which is the difference between invoking the agent again and only
+     * retrying a push.
      */
     case Interrupted = 'interrupted';
 
@@ -248,6 +248,26 @@ enum LifecycleState: string
     public function isRunning(): bool
     {
         return $this === self::Running;
+    }
+
+    /**
+     * Whether a pass in this state has a {@see Phase} worth recording.
+     *
+     * `generations.phase` and `attempts.phase` are nullable because three
+     * states are not in the middle of anything: a pending pass has not begun,
+     * and a completed or skipped one is finished with. The four in between all
+     * are, or were, somewhere — and where is evidence, not decoration. The
+     * phase a pass was blocked or failed in is what `ralph logs` reports and
+     * what tells a verification failure apart from a rejected push, and the
+     * phase it was interrupted in is what `ralph resume` reads to decide
+     * whether the agent has to be invoked again.
+     */
+    public function recordsPhase(): bool
+    {
+        return match ($this) {
+            self::Running, self::Blocked, self::Failed, self::Interrupted => true,
+            self::Pending, self::Completed, self::Skipped => false,
+        };
     }
 
     /**

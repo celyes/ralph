@@ -19,11 +19,12 @@ use InvalidArgumentException;
  * puzzled over three runs later.
  *
  * Some of these lists mirror a PHP enum that already exists
- * ({@see LifecycleState}, {@see Completion}, {@see AgentSource}); those are
- * built from the enum's cases so the two cannot drift. The rest — phases,
- * attempt outcomes, push and reference vocabularies — are named here first
- * because the schema needs them before the types that will own them are
- * written, and those types are expected to adopt exactly these spellings.
+ * ({@see LifecycleState}, {@see Phase}, {@see Completion},
+ * {@see AgentSource}); those are built from the enum's cases so the two cannot
+ * drift. The rest — run states, attempt outcomes, push and reference
+ * vocabularies — are named here first because the schema needs them before the
+ * types that will own them are written, and those types are expected to adopt
+ * exactly these spellings.
  *
  * The list of {@see self::TABLES} is part of the contract too: it is what
  * bootstrap and the tests check a database against to decide it is a Ralph PHP
@@ -31,25 +32,6 @@ use InvalidArgumentException;
  */
 final class Schema
 {
-    /**
-     * What a running task is in the middle of.
-     *
-     * The six phases of PROJECT.md section D, item 3. Recorded so that an
-     * interrupted run can be resumed from where it stopped instead of from the
-     * beginning: the difference between `executing` and `publishing` is the
-     * difference between invoking the agent again and only retrying a push.
-     *
-     * @var list<string>
-     */
-    public const array PHASES = [
-        'preparing',
-        'executing',
-        'verifying',
-        'committing',
-        'publishing',
-        'finalizing',
-    ];
-
     /**
      * How a run ended.
      *
@@ -204,6 +186,27 @@ final class Schema
     public static function closedStates(): array
     {
         return LifecycleState::closedValues();
+    }
+
+    /**
+     * What a running task is in the middle of.
+     *
+     * The six phases of PROJECT.md section D, item 3. Built from {@see Phase}
+     * so the column cannot hold a phase the enum does not have, and the enum
+     * cannot name one the column would refuse.
+     *
+     * Recorded so that an interrupted run can be resumed from where it stopped
+     * instead of from the beginning: the difference between `executing` and
+     * `publishing` is the difference between invoking the agent again and only
+     * retrying a push. The column is nullable because a pass that has not begun
+     * and one that is finished with are not in the middle of anything;
+     * {@see LifecycleState::recordsPhase()} is which states carry one.
+     *
+     * @return list<string>
+     */
+    public static function phases(): array
+    {
+        return Phase::values();
     }
 
     /**
