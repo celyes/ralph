@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Agent;
 
+use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Log\Sinks;
 use Celyes\RalphPhp\Memory\AttemptContext;
 use Celyes\RalphPhp\State\FailureEvidence;
 use Celyes\RalphPhp\Tasks\Task;
@@ -30,6 +32,13 @@ use InvalidArgumentException;
  * handle and no checklist: an adapter implements one invocation, and the loop's
  * bookkeeping stays with the loop.
  *
+ * **The output sink is here, and is not part of the briefing.** An adapter has
+ * to be handed somewhere to stream its worker's output to (section E, item 4),
+ * and it cannot hold one itself: adapters are stateless across attempts, while
+ * a log belongs to one attempt. So it arrives with the attempt, like everything
+ * else here, and is the one member of this object the agent is never told
+ * about. Nothing is read back from it; it is a destination.
+ *
  * **It is not a prompt.** {@see self::toMarkdown()} renders what is *known*
  * about the attempt, in one place, for the same reason
  * {@see AttemptContext::toMarkdown()} exists: two adapters composing the same
@@ -48,9 +57,17 @@ final class ExecutionRequest
     private readonly FailureEvidence $evidence;
 
     /**
+     * Where this attempt's output is streamed as it arrives.
+     */
+    private readonly OutputSink $output;
+
+    /**
      * @param int $attempt 1-based attempt number within this generation
      * @param FailureEvidence|null $evidence what the previous attempt ran into,
      *        or null on the first attempt at a generation
+     * @param OutputSink|null $output where the worker's output goes while it
+     *        runs, or null to keep and show nothing — which is what a test of
+     *        something else wants, and never what a run wants
      *
      * @throws InvalidArgumentException when the attempt number is not positive,
      *                                 the task is not the one the generation is
@@ -65,6 +82,7 @@ final class ExecutionRequest
         private readonly AttemptContext $context,
         private readonly ExecutionBudget $budget,
         ?FailureEvidence $evidence = null,
+        ?OutputSink $output = null,
     ) {
         if ($attempt < 1) {
             throw new InvalidArgumentException('An attempt number starts at 1.');
@@ -94,6 +112,7 @@ final class ExecutionRequest
         }
 
         $this->evidence = $evidence ?? FailureEvidence::none();
+        $this->output = $output ?? Sinks::none();
     }
 
     /**
@@ -208,6 +227,20 @@ final class ExecutionRequest
     public function hasEvidence(): bool
     {
         return !$this->evidence->isEmpty();
+    }
+
+    /**
+     * Where to stream this attempt's output as it is produced.
+     *
+     * Handed to the process runner by {@see ProcessAdapter}, so an adapter that
+     * extends that base class gets the terminal and the log without doing
+     * anything. An adapter that runs its agent some other way is responsible
+     * for writing to this itself; an attempt that streams nowhere is an attempt
+     * a user can only watch by waiting for it to finish.
+     */
+    public function output(): OutputSink
+    {
+        return $this->output;
     }
 
     /**

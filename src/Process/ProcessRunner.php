@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Process;
 
 use Celyes\RalphPhp\Exception\ProcessException;
+use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Log\OutputStream;
 use InvalidArgumentException;
+use Throwable;
 
 /**
  * Runs a command and collects its result.
@@ -15,11 +18,20 @@ use InvalidArgumentException;
  * executed or add a command to it. The working directory is always explicit:
  * the runner never depends on, and never changes, the process's own.
  *
- * This is the collecting runner: it waits for the command, captures both
- * streams, and enforces a timeout. It is what preflight needs to ask `git` and
- * an agent executable a question. Streaming a worker's output to the terminal
- * and to its log while it runs is a different job, specified in PROJECT.md
- * section E, and will be built alongside the adapters.
+ * It waits for the command, captures both streams, and enforces a timeout. It
+ * is what preflight needs to ask `git` and an agent executable a question, and
+ * — given an {@see OutputSink} — it is also what runs a coding agent for
+ * twenty minutes with its output appearing as it is produced. Those are the
+ * same code path on purpose: a separate streaming runner would be a second
+ * implementation of the pipe draining, the timeout and the termination, and the
+ * one that ran agents would be the one tested least.
+ *
+ * **Streaming does not replace collecting.** A chunk goes to the sink and into
+ * the result both. The sink is for the user and for the log; the result is what
+ * an adapter reads to decide what the agent did, and an adapter cannot read a
+ * file it has already streamed past. The cost is that a worker's whole output
+ * is held in memory for the length of the command, which for a coding agent's
+ * progress chatter is a few hundred kilobytes.
  */
 final class ProcessRunner
 {
@@ -53,6 +65,9 @@ final class ProcessRunner
      *        with `false` to remove from, the inherited environment
      * @param string|null $input what the command reads from standard input, or
      *        null for nothing at all
+     * @param OutputSink|null $sink where output is forwarded as it arrives, or
+     *        null to only collect it. Never closed here: an attempt's log spans
+     *        several commands, and the caller that opened it owns it.
      *
      * @throws ProcessException when the command cannot be started
      */
@@ -62,6 +77,7 @@ final class ProcessRunner
         int $timeout = self::DEFAULT_TIMEOUT_SECONDS,
         array $environment = [],
         ?string $input = null,
+        ?OutputSink $sink = null,
     ): ProcessResult {
         if ($command === []) {
             throw new InvalidArgumentException('A command must have at least an executable.');
@@ -94,7 +110,7 @@ final class ProcessRunner
                 throw $this->cannotStart($command, $workingDirectory);
             }
 
-            [$standardOutput, $errorOutput, $exitCode, $timedOut] = $this->wait($process, $pipes, $timeout);
+            [$standardOutput, $errorOutput, $exitCode, $timedOut] = $this->wait($process, $pipes, $timeout, $sink);
         } finally {
             if ($inputFile !== null) {
                 @unlink($inputFile);
@@ -155,11 +171,16 @@ final class ProcessRunner
      * fills the error pipe's buffer, which is exactly what a failing verification
      * command does.
      *
+     * Each chunk is handed to the sink the moment it is read, before it is
+     * appended to anything: the whole value of streaming is that a user sees an
+     * agent working, and buffering a chunk until the next loop iteration would
+     * hold back the last line of a worker that then goes quiet for a minute.
+     *
      * @param resource $process
      * @param array<int, resource> $pipes
      * @return array{string, string, int|null, bool}
      */
-    private function wait(mixed $process, array $pipes, int $timeout): array
+    private function wait(mixed $process, array $pipes, int $timeout, ?OutputSink $sink = null): array
     {
         $standardOutput = '';
         $errorOutput = '';
@@ -204,6 +225,8 @@ final class ProcessRunner
                     continue;
                 }
 
+                $sink = $this->forward($sink, $descriptor, $chunk);
+
                 if ($descriptor === self::STANDARD_OUTPUT) {
                     $standardOutput .= $chunk;
 
@@ -221,6 +244,7 @@ final class ProcessRunner
             // keeping: it is usually the explanation.
             foreach ($open as $descriptor => $stream) {
                 $pending = (string) stream_get_contents($stream);
+                $sink = $this->forward($sink, $descriptor, $pending);
 
                 if ($descriptor === self::STANDARD_OUTPUT) {
                     $standardOutput .= $pending;
@@ -243,6 +267,33 @@ final class ProcessRunner
         proc_close($process);
 
         return [$standardOutput, $errorOutput, $exitCode, $timedOut];
+    }
+
+    /**
+     * Pass a chunk on, and stop using a sink that throws.
+     *
+     * A sink is contractually not allowed to throw ({@see OutputSink}), and
+     * this exists for when one does anyway. The child process is alive and its
+     * pipes are half-drained at this point, so letting the exception out would
+     * skip the close and the `proc_close` below and leave a coding agent
+     * running with nothing waiting for it. Dropping the sink loses the rest of
+     * the streamed copy; the result still carries the whole output.
+     *
+     * Returns the sink to keep using, or null once it has misbehaved.
+     */
+    private function forward(?OutputSink $sink, int $descriptor, string $chunk): ?OutputSink
+    {
+        if ($sink === null || $chunk === '') {
+            return $sink;
+        }
+
+        try {
+            $sink->write(OutputStream::forDescriptor($descriptor), $chunk);
+        } catch (Throwable) {
+            return null;
+        }
+
+        return $sink;
     }
 
     /**

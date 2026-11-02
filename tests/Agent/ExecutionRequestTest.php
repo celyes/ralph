@@ -9,6 +9,10 @@ use Celyes\RalphPhp\Agent\AgentSource;
 use Celyes\RalphPhp\Agent\ExecutionBudget;
 use Celyes\RalphPhp\Agent\ExecutionRequest;
 use Celyes\RalphPhp\Agent\Workspace;
+use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Log\Sinks;
+use Celyes\RalphPhp\Log\OutputStream;
+use Celyes\RalphPhp\Tests\Log\RecordingSink;
 use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Limits;
@@ -258,6 +262,53 @@ final class ExecutionRequestTest extends TestCase
         );
     }
 
+    /**
+     * Where the adapter streams its worker's output (section E, item 4). It
+     * arrives with the attempt because an adapter cannot hold one: adapters are
+     * stateless across attempts, while a log belongs to one attempt.
+     */
+    #[Test]
+    public function it_carries_the_sink_the_attempts_output_goes_to(): void
+    {
+        $sink = new RecordingSink();
+
+        $this->request(output: $sink)->output()->write(OutputStream::Standard, 'working');
+
+        self::assertSame('working', $sink->textOf(OutputStream::Standard));
+    }
+
+    /**
+     * A request built without one writes nowhere rather than holding a null
+     * every adapter would have to test for — and nowhere means nowhere, not
+     * the process's own streams. Ralph PHP is a library as well as a command,
+     * and an attempt prepared by a host application must not print to its
+     * standard output because nobody passed a sink.
+     */
+    #[Test]
+    public function an_attempt_with_nowhere_to_stream_to_writes_nowhere(): void
+    {
+        $output = $this->request()->output();
+
+        $output->write(OutputStream::Standard, 'nobody is reading this');
+        $output->note('nor this');
+
+        self::assertInstanceOf(Sinks::class, $output);
+        self::assertTrue($output->isEmpty());
+    }
+
+    /**
+     * The one member of the request the agent is never told about: it is a
+     * destination, not part of the briefing.
+     */
+    #[Test]
+    public function the_sink_is_not_mentioned_in_the_briefing(): void
+    {
+        self::assertSame(
+            $this->request()->toMarkdown(),
+            $this->request(output: new RecordingSink())->toMarkdown(),
+        );
+    }
+
     private function request(
         int $attempt = 1,
         ?TaskGeneration $generation = null,
@@ -265,6 +316,7 @@ final class ExecutionRequestTest extends TestCase
         ?FailureEvidence $evidence = null,
         ?AttemptContext $context = null,
         string $markdown = '- [ ] ' . self::DESCRIPTION . "\n    The flag must default to off.\n",
+        ?OutputSink $output = null,
     ): ExecutionRequest {
         $task = Task::fromItem((new ChecklistParser())->parse($markdown, 'tasks.md')->items()[0]);
 
@@ -277,6 +329,7 @@ final class ExecutionRequestTest extends TestCase
             $context ?? $this->context($task->id()),
             $budget ?? ExecutionBudget::of(new Limits(attemptsPerTask: 3, taskTimeout: 1800, runTimeout: 7200)),
             $evidence,
+            $output,
         );
     }
 

@@ -44,11 +44,23 @@ use Celyes\RalphPhp\State\FailureEvidence;
  * place in this package where neither is checkable afterwards: once a shell has
  * run a composed string, nothing downstream can tell that it did.
  *
- * Streaming the agent's output to the terminal and to its log while it runs is
- * section E, item 4; this collects it and hands it over at the end. Telling a
- * candidate implementation from a request for human input is item 5, and lives
- * in {@see self::interpret()} because the answer is written in each agent's own
- * output format.
+ * **Streamed and captured both.** The agent's output is forwarded to
+ * {@see ExecutionRequest::output()} as it is produced — the terminal and the
+ * attempt's log — and also collected into the {@see ProcessResult} the
+ * subclass interprets (section E, item 4). The subclass does nothing to get
+ * this, which is deliberate: an adapter that had to remember to stream would be
+ * an adapter whose agent silently went dark for twenty minutes the first time
+ * someone forgot.
+ *
+ * **The log says what the package observed, not what the agent claimed.** Three
+ * notes are written around every invocation: which attempt this is, the command
+ * that was started, and how it ended — the exit status and the elapsed time, or
+ * the timeout that stopped it. They are marked as Ralph PHP's own, because the
+ * output between them is an agent's and may say anything about itself.
+ *
+ * Telling a candidate implementation from a request for human input is item 5,
+ * and lives in {@see self::interpret()} because the answer is written in each
+ * agent's own output format.
  */
 abstract class ProcessAdapter implements ExecutionAdapter
 {
@@ -69,9 +81,17 @@ abstract class ProcessAdapter implements ExecutionAdapter
     final public function execute(ExecutionRequest $request): ExecutionResult
     {
         $invocation = $this->invocationFor($request);
+        $output = $request->output();
+
+        // Written before the executable is resolved, so that a run whose agent
+        // cannot be found has a log saying which attempt it was looking for.
+        $output->note($request->summary());
+
+        $invocation = $invocation->at($this->resolve($request, $invocation));
+        $output->note('running ' . $invocation->describe());
 
         $result = $this->processes->run(
-            $invocation->at($this->resolve($request, $invocation))->command(),
+            $invocation->command(),
             // The one working directory this process may have. Not a default,
             // not the runner's own: see the class description.
             $request->directory(),
@@ -80,6 +100,10 @@ abstract class ProcessAdapter implements ExecutionAdapter
             $request->seconds(),
             [],
             $invocation->input(),
+            // The terminal and the attempt's log. Not closed here: the
+            // verification commands of section G write into the same log after
+            // this returns, and whoever opened it closes it.
+            $output,
         );
 
         // Normalised here rather than in each adapter: a killed process has no
@@ -88,22 +112,30 @@ abstract class ProcessAdapter implements ExecutionAdapter
         // case would report a timeout as an ordinary failure and have the
         // user raise the wrong limit.
         if ($result->timedOut()) {
+            $stopped = sprintf(
+                '%s was stopped after %d second%s (%s)',
+                $request->agent()->name(),
+                $request->seconds(),
+                $request->seconds() === 1 ? '' : 's',
+                $request->budget()->isLimitedByRun()
+                    ? 'the run\'s remaining time'
+                    : 'the task timeout',
+            );
+
+            $output->note($stopped);
+
             return ExecutionResult::timedOut(
-                $this->evidenceOf(
-                    sprintf(
-                        '%s was stopped after %d second%s (%s)',
-                        $request->agent()->name(),
-                        $request->seconds(),
-                        $request->seconds() === 1 ? '' : 's',
-                        $request->budget()->isLimitedByRun()
-                            ? 'the run\'s remaining time'
-                            : 'the task timeout',
-                    ),
-                    $result,
-                ),
+                $this->evidenceOf($stopped, $result),
                 seconds: $result->seconds(),
             );
         }
+
+        $output->note(sprintf(
+            '%s exited with status %d after %s',
+            $request->agent()->name(),
+            $result->exitCode() ?? -1,
+            self::elapsed($result->seconds()),
+        ));
 
         return $this->interpret($request, $result);
     }
@@ -154,6 +186,22 @@ abstract class ProcessAdapter implements ExecutionAdapter
             $result->seconds(),
             $result->exitCode(),
         );
+    }
+
+    /**
+     * A wall-clock duration for a log note.
+     *
+     * Seconds for anything short and minutes once a duration is long enough
+     * that counting seconds is work, because an agent's attempt is routinely
+     * several minutes and "after 743.2s" is a number a reader has to divide.
+     */
+    private static function elapsed(float $seconds): string
+    {
+        if ($seconds < 60.0) {
+            return sprintf('%.1fs', $seconds);
+        }
+
+        return sprintf('%dm %ds', (int) ($seconds / 60), (int) fmod($seconds, 60.0));
     }
 
     /**

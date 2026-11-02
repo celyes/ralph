@@ -14,11 +14,17 @@ use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Limits;
 use Celyes\RalphPhp\Exception\ProcessException;
+use Celyes\RalphPhp\Log\AttemptLog;
+use Celyes\RalphPhp\Log\LogDirectory;
+use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Memory\AttemptContextLoader;
 use Celyes\RalphPhp\State\AttemptOutcome;
 use Celyes\RalphPhp\Tasks\ChecklistParser;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskGeneration;
+use Celyes\RalphPhp\Tests\Log\RecordingSink;
+use Celyes\RalphPhp\Tests\Support\CapturingOutput;
 use Celyes\RalphPhp\Tests\Support\Environment;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -350,10 +356,181 @@ final class ProcessAdapterTest extends TestCase
         }
     }
 
+    /**
+     * PROJECT.md section E, item 4, and the half of it a subclass gets for
+     * free: {@see ScriptedProcessAdapter} does nothing to stream, because an
+     * adapter that had to remember to would be an adapter whose agent went
+     * silently dark the first time someone forgot.
+     *
+     * What is asserted is the timing rather than the text: the first line
+     * reached the sink before the second was written.
+     */
+    #[Test]
+    public function the_agents_output_is_streamed_while_it_works(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter(
+            ['-r', 'fwrite(STDOUT, "reading the task\n"); usleep(300000); fwrite(STDOUT, "done\n");'],
+        );
+
+        $adapter->execute($this->request(output: $sink));
+
+        self::assertGreaterThanOrEqual(2, $sink->chunkCountOf(OutputStream::Standard));
+        self::assertSame("reading the task\n", $sink->writes[0]['chunk']);
+    }
+
+    /**
+     * Streamed and captured both: the sink is for the user and the log, and the
+     * collected output is what the adapter reads to decide what the agent did.
+     */
+    #[Test]
+    public function streaming_does_not_take_the_output_away_from_the_adapter(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo "implemented";']);
+
+        $result = $adapter->execute($this->request(output: $sink));
+
+        self::assertSame('implemented', $result->claim()->text());
+        self::assertSame('implemented', $sink->textOf(OutputStream::Standard));
+    }
+
+    /**
+     * The three notes the base class writes around every invocation: which
+     * attempt this is, what was started, and how it ended. The last is the
+     * item's "exit code and timing", recorded where a reader of the log finds
+     * it — and recorded by the package, so an agent cannot write it.
+     */
+    #[Test]
+    public function the_attempt_and_how_it_ended_are_noted_around_the_output(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo "chatter"; exit(3);']);
+
+        $adapter->execute($this->request(output: $sink));
+
+        self::assertCount(3, $sink->notes);
+        self::assertStringContainsString('attempt 1, agent scripted', $sink->notes[0]);
+        self::assertStringContainsString(self::DESCRIPTION, $sink->notes[0]);
+        self::assertStringStartsWith('running ' . PHP_BINARY, $sink->notes[1]);
+        self::assertMatchesRegularExpression(
+            '/^scripted exited with status 3 after \d+\.\ds$/',
+            $sink->notes[2],
+        );
+    }
+
+    /**
+     * So that a log of an attempt whose agent could not be found still says
+     * which attempt it was looking for.
+     */
+    #[Test]
+    public function the_attempt_is_noted_before_the_executable_is_resolved(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter([]);
+
+        try {
+            $adapter->execute($this->request(
+                definition: new AgentDefinition('scripted', 'scripted', $this->project . '/bin/agent'),
+                output: $sink,
+            ));
+            self::fail('Expected a ProcessException.');
+        } catch (ProcessException) {
+            self::assertCount(1, $sink->notes);
+            self::assertStringContainsString('attempt 1, agent scripted', $sink->notes[0]);
+        }
+    }
+
+    /**
+     * The command is noted as the resolved program and separate arguments, not
+     * as a shell line: a log that showed a composed command line would invite a
+     * reader to paste it into a shell, which is the one thing this adapter
+     * exists to never do.
+     */
+    #[Test]
+    public function the_noted_command_shows_argument_boundaries_rather_than_a_shell_line(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo 1;'], descriptionAsArgument: true);
+
+        $adapter->execute($this->request(
+            description: 'Escape $HOME; touch written.txt',
+            output: $sink,
+        ));
+
+        self::assertStringContainsString("'Escape \$HOME; touch written.txt'", $sink->notes[1]);
+    }
+
+    /**
+     * The briefing can be thousands of characters and is in the log already as
+     * the request it came from; its size is the part worth seeing.
+     */
+    #[Test]
+    public function the_briefing_is_noted_by_size_rather_than_printed_again(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo 1;'], briefingOnInput: true);
+
+        $adapter->execute($this->request(output: $sink));
+
+        self::assertStringContainsString('characters on standard input', $sink->notes[1]);
+        self::assertStringNotContainsString('Acceptance criteria', $sink->notes[1]);
+    }
+
+    #[Test]
+    public function a_stopped_attempt_notes_the_limit_that_ran_out(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo "working"; sleep(30);']);
+
+        $adapter->execute($this->request(
+            limits: new Limits(attemptsPerTask: 3, taskTimeout: 1, runTimeout: 7200),
+            output: $sink,
+        ));
+
+        self::assertSame('scripted was stopped after 1 second (the task timeout)', $sink->notes[2]);
+        self::assertSame('working', $sink->textOf(OutputStream::Standard));
+    }
+
+    /**
+     * The whole of the item, end to end, against the real destinations: an
+     * agent's output on the terminal as it is produced and in the task's own
+     * log afterwards, with the exit status and the elapsed time recorded in the
+     * log by the package rather than claimed by the agent.
+     */
+    #[Test]
+    public function an_attempt_is_shown_on_the_terminal_and_kept_in_the_tasks_log(): void
+    {
+        $terminal = new CapturingOutput();
+        $request = $this->request();
+        $logs = LogDirectory::in($this->project);
+        $log = AttemptLog::open($logs, $request->generation(), $request->attempt(), $terminal->output());
+
+        $adapter = new ScriptedProcessAdapter(
+            ['-r', 'echo "reading the task\n"; fwrite(STDERR, "warning: slow\n"); exit(0);'],
+        );
+
+        $result = $adapter->execute($this->request(output: $log));
+        $log->close();
+
+        self::assertTrue($result->hasCandidate());
+
+        self::assertStringContainsString('reading the task', $terminal->standardOutput());
+        self::assertStringContainsString('warning: slow', $terminal->errorOutput());
+
+        $kept = (string) file_get_contents($logs->agentLog($request->generation(), 1));
+        self::assertStringContainsString('attempt 1, agent scripted', $kept);
+        self::assertStringContainsString("--- stdout\nreading the task", $kept);
+        self::assertStringContainsString("--- stderr\nwarning: slow", $kept);
+        self::assertStringContainsString('--- scripted exited with status 0 after', $kept);
+        self::assertGreaterThan(0, $log->bytes());
+    }
+
     private function request(
         string $description = self::DESCRIPTION,
         ?Limits $limits = null,
         ?AgentDefinition $definition = null,
+        ?OutputSink $output = null,
     ): ExecutionRequest {
         $task = Task::fromItem(
             (new ChecklistParser())->parse('- [ ] ' . $description . "\n", 'tasks.md')->items()[0],
@@ -373,6 +550,8 @@ final class ProcessAdapterTest extends TestCase
                 $task->id(),
             ),
             ExecutionBudget::of($limits ?? new Limits(attemptsPerTask: 3, taskTimeout: 60, runTimeout: 7200)),
+            null,
+            $output,
         );
     }
 }

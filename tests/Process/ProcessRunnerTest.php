@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Process;
 
 use Celyes\RalphPhp\Exception\ProcessException;
+use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Process\ProcessRunner;
+use Celyes\RalphPhp\Tests\Log\RecordingSink;
+use Celyes\RalphPhp\Tests\Log\ThrowingSink;
 use Celyes\RalphPhp\Tests\Support\Environment;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use InvalidArgumentException;
@@ -252,6 +255,183 @@ final class ProcessRunnerTest extends TestCase
         $found = glob(sys_get_temp_dir() . '/ralph-input-*');
 
         return $found === false ? [] : $found;
+    }
+
+    /**
+     * PROJECT.md section E, item 4. The assertion that matters is not what the
+     * sink ended up holding — collecting would produce the same string — but
+     * that it was handed the first line *before* the second was written. A
+     * coding agent can be quiet for minutes, and a loop that showed nothing
+     * until the process exited would be indistinguishable from one that had
+     * hung.
+     */
+    #[Test]
+    public function output_is_streamed_while_the_command_is_still_running(): void
+    {
+        $sink = new RecordingSink();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', 'fwrite(STDOUT, "first\n"); usleep(300000); fwrite(STDOUT, "second\n");'],
+            $this->directory,
+            30,
+            [],
+            null,
+            $sink,
+        );
+
+        self::assertGreaterThanOrEqual(2, $sink->chunkCountOf(OutputStream::Standard), $result->describe());
+        self::assertSame("first\n", $sink->writes[0]['chunk']);
+        self::assertSame("first\nsecond\n", $sink->textOf(OutputStream::Standard));
+    }
+
+    /**
+     * The sink is for the user and the log; the result is what an adapter reads
+     * to decide what the agent did, and an adapter cannot read a chunk that has
+     * already been streamed past.
+     */
+    #[Test]
+    public function streamed_output_is_also_collected_into_the_result(): void
+    {
+        $sink = new RecordingSink();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', 'fwrite(STDOUT, "out"); fwrite(STDERR, "err"); exit(2);'],
+            $this->directory,
+            30,
+            [],
+            null,
+            $sink,
+        );
+
+        self::assertSame('out', $result->standardOutput());
+        self::assertSame('err', $result->errorOutput());
+        self::assertSame('out', $sink->textOf(OutputStream::Standard));
+        self::assertSame('err', $sink->textOf(OutputStream::Error));
+        self::assertSame(2, $result->exitCode());
+    }
+
+    /**
+     * Which descriptor a chunk came off decides where the terminal sends it and
+     * how the log marks it, so it has to survive the trip.
+     */
+    #[Test]
+    public function each_chunk_arrives_with_the_stream_it_came_off(): void
+    {
+        $sink = new RecordingSink();
+
+        $this->runner->run(
+            [PHP_BINARY, '-r', 'fwrite(STDERR, "only on stderr");'],
+            $this->directory,
+            30,
+            [],
+            null,
+            $sink,
+        );
+
+        self::assertSame('', $sink->textOf(OutputStream::Standard));
+        self::assertSame('only on stderr', $sink->textOf(OutputStream::Error));
+    }
+
+    /**
+     * An attempt stopped by its timeout is exactly the attempt whose output a
+     * user needs, so what the worker managed to say is streamed as well as
+     * kept.
+     */
+    #[Test]
+    public function what_a_stopped_command_printed_is_streamed_too(): void
+    {
+        $sink = new RecordingSink();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', 'fwrite(STDOUT, "started"); sleep(30);'],
+            $this->directory,
+            1,
+            [],
+            null,
+            $sink,
+        );
+
+        self::assertTrue($result->timedOut(), $result->describe());
+        self::assertSame('started', $sink->textOf(OutputStream::Standard));
+    }
+
+    /**
+     * The timeout path drains whatever is still sitting in the pipes after the
+     * process is killed, and that drained tail has to be streamed as well as
+     * kept — otherwise the log of a timed-out attempt is missing its last
+     * kilobytes, which on a worker that was killed mid-sentence is exactly the
+     * part being read for.
+     *
+     * The condition is arranged rather than hoped for: a sink slower than the
+     * worker keeps the pipe buffer full, so there is certainly unread output
+     * when the deadline arrives. The assertion is then that the sink saw
+     * everything the result did — a drain that only collects makes the result
+     * longer than what was streamed.
+     */
+    #[Test]
+    public function the_tail_left_in_the_pipes_at_a_timeout_is_streamed_as_well_as_kept(): void
+    {
+        $sink = new RecordingSink(delayMicroseconds: 5000);
+        $script = '$block = str_repeat("x", 4096);'
+            . 'while (true) { fwrite(STDOUT, $block); }';
+
+        $result = $this->runner->run([PHP_BINARY, '-r', $script], $this->directory, 1, [], null, $sink);
+
+        self::assertTrue($result->timedOut(), $result->describe());
+        self::assertGreaterThan(0, strlen($result->standardOutput()));
+        self::assertSame(
+            strlen($result->standardOutput()),
+            $sink->byteCountOf(OutputStream::Standard),
+            'the output kept and the output streamed should be the same output',
+        );
+    }
+
+    #[Test]
+    public function the_sink_is_not_closed_by_the_runner(): void
+    {
+        $sink = new RecordingSink();
+
+        $this->runner->run([PHP_BINARY, '-r', 'echo 1;'], $this->directory, 30, [], null, $sink);
+
+        // An attempt's log spans the agent and then the verification commands,
+        // so a runner that closed it would leave the checks writing to a closed
+        // file.
+        self::assertSame(0, $sink->closes);
+    }
+
+    /**
+     * A sink is contractually not allowed to throw, and this is what happens
+     * when one does anyway: the child is still waited for, its output is still
+     * collected, and its exit status is still reported. The alternative is an
+     * exception out of the pipe-draining loop and a coding agent left running
+     * with nothing waiting for it.
+     */
+    #[Test]
+    public function a_sink_that_throws_does_not_abandon_the_child_process(): void
+    {
+        $broken = new ThrowingSink();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', 'fwrite(STDOUT, "one"); usleep(200000); fwrite(STDOUT, "two"); exit(4);'],
+            $this->directory,
+            30,
+            [],
+            null,
+            $broken,
+        );
+
+        self::assertSame('onetwo', $result->standardOutput(), $result->describe());
+        self::assertSame(4, $result->exitCode());
+        // Dropped after the first failure rather than retried per chunk.
+        self::assertSame(1, $broken->attempts);
+    }
+
+    #[Test]
+    public function a_command_run_without_a_sink_still_collects_its_output(): void
+    {
+        $result = $this->runner->run([PHP_BINARY, '-r', 'echo "collected";'], $this->directory);
+
+        self::assertSame('collected', $result->standardOutput());
     }
 
     #[Test]

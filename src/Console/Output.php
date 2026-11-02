@@ -52,6 +52,28 @@ final class Output
     }
 
     /**
+     * Write text exactly as given, with no line ending added.
+     *
+     * For output that is not ours to format: a worker's bytes, streamed to the
+     * terminal as they arrive ({@see \Celyes\RalphPhp\Log\TerminalSink}).
+     * A chunk off a pipe begins and ends wherever the worker happened to be, so
+     * anything appended here would insert a line break into the middle of the
+     * worker's own line.
+     */
+    public function text(string $text): void
+    {
+        $this->write($this->standard, $text);
+    }
+
+    /**
+     * Write diagnostic text exactly as given, with no line ending added.
+     */
+    public function diagnosticText(string $text): void
+    {
+        $this->write($this->diagnostic, $text);
+    }
+
+    /**
      * Write a line of diagnostic output.
      */
     public function diagnosticLine(string $text = ''): void
