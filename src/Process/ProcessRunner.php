@@ -51,6 +51,8 @@ final class ProcessRunner
      * @param int $timeout seconds before the command is terminated
      * @param array<string, string|false> $environment variables to add to, or
      *        with `false` to remove from, the inherited environment
+     * @param string|null $input what the command reads from standard input, or
+     *        null for nothing at all
      *
      * @throws ProcessException when the command cannot be started
      */
@@ -59,6 +61,7 @@ final class ProcessRunner
         string $workingDirectory,
         int $timeout = self::DEFAULT_TIMEOUT_SECONDS,
         array $environment = [],
+        ?string $input = null,
     ): ProcessResult {
         if ($command === []) {
             throw new InvalidArgumentException('A command must have at least an executable.');
@@ -68,26 +71,35 @@ final class ProcessRunner
             throw new InvalidArgumentException('A command timeout must be at least 1 second.');
         }
 
+        $inputFile = $input === null ? null : $this->spool($input);
+
         $descriptors = [
-            // Nothing this package runs is interactive. Reading from the null
-            // device rather than inheriting the terminal means a command that
-            // decides to prompt sees end-of-input and gives up, instead of
+            // Nothing this package runs is interactive. Reading from a file —
+            // the null device when there is no input, a spooled copy of it when
+            // there is — rather than inheriting the terminal means a command
+            // that decides to prompt sees end-of-input and gives up, instead of
             // sitting on a question nobody is there to answer.
-            0 => ['file', self::nullDevice(), 'rb'],
+            0 => ['file', $inputFile ?? self::nullDevice(), 'rb'],
             self::STANDARD_OUTPUT => ['pipe', 'wb'],
             self::ERROR_OUTPUT => ['pipe', 'wb'],
         ];
 
         $started = microtime(true);
 
-        error_clear_last();
-        $process = @proc_open($command, $descriptors, $pipes, $workingDirectory, self::environment($environment));
+        try {
+            error_clear_last();
+            $process = @proc_open($command, $descriptors, $pipes, $workingDirectory, self::environment($environment));
 
-        if (!is_resource($process)) {
-            throw $this->cannotStart($command, $workingDirectory);
+            if (!is_resource($process)) {
+                throw $this->cannotStart($command, $workingDirectory);
+            }
+
+            [$standardOutput, $errorOutput, $exitCode, $timedOut] = $this->wait($process, $pipes, $timeout);
+        } finally {
+            if ($inputFile !== null) {
+                @unlink($inputFile);
+            }
         }
-
-        [$standardOutput, $errorOutput, $exitCode, $timedOut] = $this->wait($process, $pipes, $timeout);
 
         return new ProcessResult(
             $command,
@@ -97,6 +109,42 @@ final class ProcessRunner
             $timedOut,
             microtime(true) - $started,
         );
+    }
+
+    /**
+     * Write the command's input to a file it can be given as descriptor zero.
+     *
+     * A write pipe would be the obvious way and is the wrong one: the parent
+     * has to drain two output pipes while it fills the input pipe, and a
+     * briefing larger than the pipe buffer — which an agent's prompt, with the
+     * project context and the previous attempt's evidence in it, comfortably is
+     * — blocks the write until the child reads, while the child may be blocked
+     * writing output nobody is reading. A file cannot deadlock, and the child
+     * sees an ordinary readable stream ending in end-of-input.
+     *
+     * The file goes in the system temporary directory and never in the task
+     * workspace: a file written there would be an untracked change inside a
+     * worktree whose diff the runner is about to stage (PROJECT.md section F,
+     * item 6). It is removed when the command finishes, however that goes.
+     *
+     * @throws ProcessException when the input cannot be spooled
+     */
+    private function spool(string $input): string
+    {
+        $path = @tempnam(sys_get_temp_dir(), 'ralph-input-');
+
+        if ($path === false || @file_put_contents($path, $input) === false) {
+            if (is_string($path)) {
+                @unlink($path);
+            }
+
+            throw new ProcessException(
+                'Unable to write the command\'s standard input to a temporary file.',
+                [sprintf('Temporary directory: %s.', sys_get_temp_dir())],
+            );
+        }
+
+        return $path;
     }
 
     /**

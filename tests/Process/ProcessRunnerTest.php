@@ -155,6 +155,106 @@ final class ProcessRunnerTest extends TestCase
     }
 
     #[Test]
+    public function a_command_given_input_reads_it_and_then_end_of_input(): void
+    {
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', 'echo file_get_contents("php://stdin") . var_export(fgets(STDIN), true);'],
+            $this->directory,
+            5,
+            [],
+            "first\nsecond\n",
+        );
+
+        self::assertTrue($result->succeeded(), $result->describe());
+        self::assertSame("first\nsecond\nfalse", $result->trimmedOutput());
+    }
+
+    /**
+     * An agent's briefing is as long as the task, its criteria and the project
+     * context make it, which is well past a pipe buffer. Spooling it to a file
+     * is what makes that impossible to deadlock on.
+     */
+    #[Test]
+    public function large_input_is_delivered_while_the_command_is_also_writing_output(): void
+    {
+        $input = str_repeat("briefing line\n", 60_000);
+
+        $result = $this->runner->run(
+            [
+                PHP_BINARY,
+                '-r',
+                'fwrite(STDERR, str_repeat("x", 256 * 1024)); echo strlen(file_get_contents("php://stdin"));',
+            ],
+            $this->directory,
+            20,
+            [],
+            $input,
+        );
+
+        self::assertTrue($result->succeeded(), $result->describe());
+        self::assertSame((string) strlen($input), $result->trimmedOutput());
+        self::assertSame(256 * 1024, strlen($result->errorOutput()));
+    }
+
+    #[Test]
+    public function empty_input_is_an_empty_stream_rather_than_no_stream(): void
+    {
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', 'echo var_export(file_get_contents("php://stdin"), true);'],
+            $this->directory,
+            5,
+            [],
+            '',
+        );
+
+        self::assertSame("''", $result->trimmedOutput(), $result->describe());
+    }
+
+    /**
+     * The briefing is the user's text and the project's context; a copy of it
+     * is not left lying in the temporary directory after the run.
+     */
+    #[Test]
+    public function the_spooled_input_is_removed_afterwards(): void
+    {
+        $before = $this->spooledInputFiles();
+
+        $this->runner->run([PHP_BINARY, '-r', 'echo 1;'], $this->directory, 5, [], 'briefing');
+        $timedOut = $this->runner->run(
+            [PHP_BINARY, '-r', 'sleep(30);'],
+            $this->directory,
+            1,
+            [],
+            'briefing',
+        );
+
+        self::assertTrue($timedOut->timedOut(), $timedOut->describe());
+        self::assertSame($before, $this->spooledInputFiles());
+    }
+
+    /**
+     * Never in the working directory: a file written into a task's worktree
+     * would be an untracked change in a diff the runner is about to stage.
+     */
+    #[Test]
+    public function input_is_not_spooled_into_the_commands_working_directory(): void
+    {
+        $this->runner->run([PHP_BINARY, '-r', 'echo 1;'], $this->directory, 5, [], 'briefing');
+
+        self::assertSame(['.', '..'], scandir($this->directory));
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function spooledInputFiles(): array
+    {
+        $found = glob(sys_get_temp_dir() . '/ralph-input-*');
+
+        return $found === false ? [] : $found;
+    }
+
+    #[Test]
     public function a_missing_executable_cannot_be_started(): void
     {
         $missing = $this->directory . '/not-a-program';

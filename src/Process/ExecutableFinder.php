@@ -68,6 +68,21 @@ final class ExecutableFinder
     }
 
     /**
+     * Whether a command name is a path that depends on where it is resolved
+     * from.
+     *
+     * Asked by callers for whom "where from" is not one directory. An adapter
+     * runs its agent inside a per-task worktree, so a relative path would name
+     * a different program for every task and a different one again from the
+     * program preflight checked in the project root; it refuses such a path
+     * rather than resolving one of the two meanings silently.
+     */
+    public static function isRelativePath(string $name): bool
+    {
+        return self::looksLikePath($name) && !self::isAbsolute($name);
+    }
+
+    /**
      * The directories a bare name is searched in, in order.
      *
      * @return list<string>
