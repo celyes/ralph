@@ -39,8 +39,10 @@ use InvalidArgumentException;
  * headings, and nothing merges them.
  *
  * Interpreting an agent's raw output *into* one of these — including refusing
- * output that is absent or malformed — is section E, item 5, and belongs to
- * each adapter.
+ * output that is absent or malformed — is section E, item 5: the format an
+ * agent declares its case in is {@see ResultProtocol}, reading it is
+ * {@see ReportReader}, and measuring what it declared against what the process
+ * actually did is {@see ProcessAdapter::reported()}.
  */
 final class ExecutionResult
 {

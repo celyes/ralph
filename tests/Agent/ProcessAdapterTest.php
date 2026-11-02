@@ -8,6 +8,8 @@ use Celyes\RalphPhp\Agent\AgentSelection;
 use Celyes\RalphPhp\Agent\AgentSource;
 use Celyes\RalphPhp\Agent\ExecutionBudget;
 use Celyes\RalphPhp\Agent\ExecutionRequest;
+use Celyes\RalphPhp\Agent\ReportReader;
+use Celyes\RalphPhp\Agent\ResultProtocol;
 use Celyes\RalphPhp\Agent\ProcessAdapter;
 use Celyes\RalphPhp\Agent\Workspace;
 use Celyes\RalphPhp\Config\AgentDefinition;
@@ -20,6 +22,8 @@ use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Memory\AttemptContextLoader;
 use Celyes\RalphPhp\State\AttemptOutcome;
+use Celyes\RalphPhp\State\Blocker;
+use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\Tasks\ChecklistParser;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskGeneration;
@@ -121,19 +125,26 @@ final class ProcessAdapterTest extends TestCase
         self::assertFileDoesNotExist($this->workspace . '/written.txt');
     }
 
+    /**
+     * Echoed back as a hash rather than as itself: a claim is bounded by
+     * {@see \Celyes\RalphPhp\Support\UnverifiedText}, and a briefing is
+     * longer than that, so comparing the text would be comparing the first 800
+     * characters of it. The digest is the stronger assertion anyway — it is
+     * every byte, untrimmed.
+     */
     #[Test]
     public function the_briefing_can_be_handed_over_whole_on_standard_input(): void
     {
         $request = $this->request();
         $adapter = new ScriptedProcessAdapter(
-            ['-r', 'echo file_get_contents("php://stdin");'],
+            ['-r', 'echo md5(file_get_contents("php://stdin"));'],
             briefingOnInput: true,
         );
 
         $result = $adapter->execute($request);
 
-        self::assertSame(trim($request->toMarkdown()), $result->claim()->text());
-        self::assertStringContainsString(self::DESCRIPTION, $result->claim()->text());
+        self::assertSame(md5($request->toMarkdown()), $result->claim()->text());
+        self::assertStringContainsString(self::DESCRIPTION, $request->toMarkdown());
     }
 
     #[Test]
@@ -524,6 +535,277 @@ final class ProcessAdapterTest extends TestCase
         self::assertStringContainsString("--- stderr\nwarning: slow", $kept);
         self::assertStringContainsString('--- scripted exited with status 0 after', $kept);
         self::assertGreaterThan(0, $log->bytes());
+    }
+
+    /**
+     * Section E, item 5, through the common reading every adapter shares. The
+     * agent's own account becomes the claim, and the outcome is the one it
+     * declared.
+     */
+    #[Test]
+    public function a_reported_candidate_on_a_clean_exit_is_something_to_verify(): void
+    {
+        $adapter = new ReportingProcessAdapter($this->printing(
+            '{"outcome": "candidate", "summary": "Added --dry-run to ImportCommand and a test."}',
+        ));
+
+        $result = $adapter->execute($this->request());
+
+        self::assertSame(AttemptOutcome::Candidate, $result->outcome());
+        self::assertTrue($result->hasCandidate());
+        self::assertSame('Added --dry-run to ImportCommand and a test.', $result->claim()->text());
+        self::assertSame(0, $result->exitCode());
+        self::assertTrue($result->evidence()->isEmpty());
+
+        // Still the only thing an adapter may claim: what finishes the task is
+        // the verification run after this.
+        self::assertNull($result->settles());
+    }
+
+    /**
+     * The exit status is something the package watched happen; the declaration
+     * is the agent's account of itself. Where they disagree about whether the
+     * attempt went well, the status wins — and the claim is kept, so a user can
+     * see what was claimed alongside the status that contradicts it.
+     */
+    #[Test]
+    public function a_reported_candidate_from_a_process_that_failed_is_an_error_that_keeps_the_claim(): void
+    {
+        $adapter = new ReportingProcessAdapter($this->printing(
+            '{"outcome": "candidate", "summary": "All done, everything works."}',
+            status: 1,
+        ));
+
+        $result = $adapter->execute($this->request());
+
+        self::assertSame(AttemptOutcome::Error, $result->outcome());
+        self::assertFalse($result->hasCandidate());
+        self::assertSame('All done, everything works.', $result->claim()->text());
+        self::assertSame('scripted exited with status 1', $result->evidence()->label());
+    }
+
+    /**
+     * A question does not stop being a question when the process that asked it
+     * then failed, and an agent that needs a decision will need the same
+     * decision on the next attempt — so the blocker outranks the status, which
+     * is the one place the declaration wins.
+     */
+    #[Test]
+    public function a_question_is_honoured_even_when_the_process_that_asked_it_failed(): void
+    {
+        $adapter = new ReportingProcessAdapter($this->printing(
+            '{"outcome": "blocked", "summary": "Two queue drivers are configured.",'
+                . ' "next_action": "Name the driver in CONTEXT.md and retry."}',
+            status: 2,
+        ));
+
+        $result = $adapter->execute($this->request(
+            definition: new AgentDefinition('reporting', 'reporting', PHP_BINARY),
+        ));
+
+        $blocker = $result->blocker();
+
+        self::assertSame(AttemptOutcome::Blocked, $result->outcome());
+        self::assertTrue($result->requiresHumanInput());
+        self::assertSame(LifecycleState::Blocked, $result->settles());
+        self::assertInstanceOf(Blocker::class, $blocker);
+        self::assertSame('Two queue drivers are configured.', $blocker->reason());
+        self::assertSame('Name the driver in CONTEXT.md and retry.', $blocker->nextAction());
+
+        // Attributed to the agent, not to the runner: a user has a different
+        // thing to do about an agent's question than about the package's.
+        self::assertSame('reporting', $blocker->reportedBy());
+        self::assertFalse($blocker->isFromRunner());
+    }
+
+    #[Test]
+    public function an_agents_own_report_of_failing_is_an_execution_error(): void
+    {
+        $adapter = new ReportingProcessAdapter($this->printing(
+            '{"outcome": "error", "summary": "There is no composer.json in this workspace."}',
+        ));
+
+        $result = $adapter->execute($this->request());
+
+        self::assertSame(AttemptOutcome::Error, $result->outcome());
+        self::assertTrue($result->isRetryable());
+        self::assertSame('There is no composer.json in this workspace.', $result->claim()->text());
+        self::assertSame('scripted reported that it could not do the work', $result->evidence()->label());
+    }
+
+    /**
+     * Section 4's rule where it can be enforced: a zero exit code is not
+     * sufficient. An agent that printed nothing has not said it changed
+     * anything, and the alternative — verifying and committing on the strength
+     * of an exit status — is how work nobody claimed gets committed.
+     */
+    #[Test]
+    public function a_clean_exit_with_nothing_reported_is_not_a_candidate(): void
+    {
+        $adapter = new ReportingProcessAdapter(['-r', 'echo "Done! The feature is implemented."; exit(0);']);
+
+        $result = $adapter->execute($this->request());
+
+        self::assertSame(AttemptOutcome::Error, $result->outcome());
+        self::assertFalse($result->hasCandidate());
+        self::assertTrue($result->claim()->isEmpty());
+        self::assertStringStartsWith(
+            'scripted exited with status 0 without reporting a result',
+            $result->evidence()->label(),
+        );
+        self::assertStringContainsString('Done! The feature is implemented.', $result->evidence()->toMarkdown());
+    }
+
+    /**
+     * The evidence is handed to the next attempt in its briefing, and a retry
+     * told only "no result" produces the same no result. This is the one
+     * failure an agent cannot diagnose from its own output.
+     */
+    #[Test]
+    public function an_attempt_that_reported_nothing_is_told_what_to_print(): void
+    {
+        $adapter = new ReportingProcessAdapter(['-r', 'exit(0);']);
+
+        $result = $adapter->execute($this->request());
+        $evidence = $result->evidence()->toMarkdown();
+
+        self::assertStringContainsString('Ralph PHP has no result to act on', $evidence);
+        self::assertStringContainsString(ResultProtocol::FENCE, $evidence);
+        self::assertStringContainsString('Reporting back', $evidence);
+
+        // Two observations rather than one run together: what the package saw,
+        // and what the agent has to do instead.
+        self::assertSame(2, $result->evidence()->count());
+    }
+
+    #[Test]
+    public function a_failed_process_with_nothing_reported_names_its_exit_status(): void
+    {
+        $adapter = new ReportingProcessAdapter(['-r', 'fwrite(STDERR, "no model configured"); exit(9);']);
+
+        $result = $adapter->execute($this->request());
+
+        self::assertSame(AttemptOutcome::Error, $result->outcome());
+        self::assertSame(9, $result->exitCode());
+        self::assertStringStartsWith(
+            'scripted exited with status 9 without reporting a result',
+            $result->evidence()->label(),
+        );
+        self::assertStringContainsString('no model configured', $result->evidence()->toMarkdown());
+    }
+
+    /**
+     * Refused rather than read as a candidate, and quoted: "could not be read"
+     * without the thing that could not be read is not evidence a user can act
+     * on. Nothing of the broken block becomes a claim, either — there is no
+     * telling what it was claiming.
+     */
+    #[Test]
+    public function a_block_that_cannot_be_read_is_an_execution_error_quoting_it(): void
+    {
+        $adapter = new ReportingProcessAdapter($this->printing('{"outcome": "finished", "summary": "shipped it"}'));
+
+        $result = $adapter->execute($this->request());
+        $evidence = $result->evidence()->toMarkdown();
+
+        self::assertSame(AttemptOutcome::Error, $result->outcome());
+        self::assertTrue($result->claim()->isEmpty());
+        self::assertStringStartsWith(
+            'scripted printed a result block Ralph PHP could not read',
+            $result->evidence()->label(),
+        );
+        self::assertStringContainsString('{"outcome": "finished", "summary": "shipped it"}', $evidence);
+        self::assertStringContainsString('"finished" is not one of', $evidence);
+    }
+
+    /**
+     * The package's own reading of the output, marked as its own like the notes
+     * around the invocation — so a user can see why an attempt was classified
+     * the way it was without opening the database. What the agent said about
+     * itself is in the output above it.
+     */
+    #[Test]
+    public function the_reading_of_the_output_is_noted_as_the_packages_own(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ReportingProcessAdapter($this->printing(
+            '{"outcome": "candidate", "summary": "Rewrote the parser."}',
+        ));
+
+        $adapter->execute($this->request(output: $sink));
+
+        self::assertCount(4, $sink->notes);
+        self::assertSame(
+            'scripted reported a candidate implementation: Rewrote the parser. (stdout)',
+            $sink->notes[3],
+        );
+    }
+
+    #[Test]
+    public function an_attempt_that_reported_nothing_says_so_in_the_log(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ReportingProcessAdapter(['-r', 'echo "all good"; exit(0);']);
+
+        $adapter->execute($this->request(output: $sink));
+
+        self::assertSame('scripted printed no result block', $sink->notes[3]);
+    }
+
+    /**
+     * An agent whose CLI writes its whole transcript to standard error reports
+     * perfectly well, and the stream it used is in the log — the first thing to
+     * check when the package and the agent disagree about what was reported.
+     */
+    #[Test]
+    public function a_report_on_the_error_stream_is_read_and_the_stream_is_noted(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ReportingProcessAdapter($this->printing(
+            '{"outcome": "candidate", "summary": "wrote it"}',
+            toErrorStream: true,
+        ));
+
+        $result = $adapter->execute($this->request(output: $sink));
+
+        self::assertTrue($result->hasCandidate());
+        self::assertStringContainsString('(stderr)', $sink->notes[3]);
+    }
+
+    /**
+     * The agent is asked for its report in the briefing it is given, which is
+     * the half of the protocol this test pins: an adapter cannot be expected to
+     * read a format nothing asked for.
+     */
+    #[Test]
+    public function the_briefing_asks_for_the_report_the_adapter_reads(): void
+    {
+        $briefing = $this->request()->toMarkdown();
+
+        self::assertStringContainsString('# Reporting back', $briefing);
+        self::assertTrue(ReportReader::readText($briefing)->hasReport());
+    }
+
+    /**
+     * The agent is PHP, so the block is written by a program rather than
+     * composed into a command line: the arguments go over as an array, and
+     * nothing here is parsed by a shell.
+     *
+     * @return list<string>
+     */
+    private function printing(string $body, int $status = 0, bool $toErrorStream = false): array
+    {
+        $block = sprintf("```%s\n%s\n```\n", ResultProtocol::FENCE, $body);
+
+        return [
+            '-r',
+            sprintf(
+                'fwrite(%s, %s); exit(%d);',
+                $toErrorStream ? 'STDERR' : 'STDOUT',
+                var_export($block, true),
+                $status,
+            ),
+        ];
     }
 
     private function request(

@@ -280,10 +280,10 @@ final class ExecutionRequest
      * The briefing, as Markdown.
      *
      * In the order it is meant to be read: the work, then what finishing it
-     * means, then the standing instructions and the history, then what the last
-     * attempt ran into. The failure evidence is last on purpose — it is the
-     * most specific thing here, and on a retry it is what the attempt should
-     * act on first.
+     * means and how to report it, then the standing instructions and the
+     * history, then what the last attempt ran into. The failure evidence is
+     * last on purpose — it is the most specific thing here, and on a retry it
+     * is what the attempt should act on first.
      */
     public function toMarkdown(): string
     {
@@ -299,6 +299,15 @@ final class ExecutionRequest
                 $criteria,
             ]);
         }
+
+        // Before the context and the history, because it is part of what
+        // finishing the task means, and after the criteria for the same reason:
+        // what the work is comes first. Stated in the common briefing rather
+        // than in each adapter's preamble because the outcomes it names are
+        // agent-independent (section E, item 10) — two adapters wording this
+        // their own way would be two agents reporting in two formats the reader
+        // of section E, item 5 does not accept.
+        $sections[] = ResultProtocol::instructions();
 
         $context = trim($this->context->toMarkdown());
         if ($context !== '') {

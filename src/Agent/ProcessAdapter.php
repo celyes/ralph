@@ -58,9 +58,13 @@ use Celyes\RalphPhp\State\FailureEvidence;
  * the timeout that stopped it. They are marked as Ralph PHP's own, because the
  * output between them is an agent's and may say anything about itself.
  *
- * Telling a candidate implementation from a request for human input is item 5,
- * and lives in {@see self::interpret()} because the answer is written in each
- * agent's own output format.
+ * **Telling the three outcomes apart is offered, not left to each adapter.**
+ * Item 5 — a candidate implementation, a request for human input, an execution
+ * error, and a refusal of output that is absent or malformed — is
+ * {@see self::reported()}, reading the {@see ResultProtocol} block every
+ * briefing asks for. {@see self::interpret()} stays abstract because an agent
+ * whose CLI says some of this natively should use that first, but an adapter
+ * that has nothing else to go on has one line to write.
  */
 abstract class ProcessAdapter implements ExecutionAdapter
 {
@@ -159,6 +163,10 @@ abstract class ProcessAdapter implements ExecutionAdapter
      * verification and Git behaviour stay agent-independent (section E, item
      * 10), and an adapter that cannot read its agent's output says so with
      * {@see ExecutionResult::error()} instead of claiming a candidate.
+     *
+     * {@see self::reported()} is the common reading of the result block the
+     * briefing asks for, and is what an adapter returns when its CLI reports
+     * nothing more than the agent's own output.
      */
     abstract protected function interpret(ExecutionRequest $request, ProcessResult $result): ExecutionResult;
 
@@ -185,6 +193,150 @@ abstract class ProcessAdapter implements ExecutionAdapter
             $claim,
             $result->seconds(),
             $result->exitCode(),
+        );
+    }
+
+    /**
+     * The attempt as the agent reported it, measured against what the package
+     * observed.
+     *
+     * PROJECT.md section E, item 5, in the one place both built-in adapters and
+     * any registered one can share it: the output is read for a
+     * {@see ResultProtocol} block, the three declarable cases become the three
+     * normalised outcomes, and output that is absent or malformed becomes an
+     * execution error rather than a candidate nobody checked.
+     *
+     * **The observation outranks the declaration, except for a question.** A
+     * declared candidate from a process that exited non-zero is an error: the
+     * exit status is something the package watched happen and the declaration
+     * is an agent's account of itself, so where they disagree about whether the
+     * run went well, the status wins — and the claim is kept, so a user can see
+     * what was claimed. A declared blocker is honoured whatever the status,
+     * because a question does not stop being a question when the process that
+     * asked it then failed, and retrying an attempt that needs a decision
+     * spends an attempt to be asked the same thing again.
+     *
+     * **Silence is not success.** A zero exit with no block is an error, which
+     * is section 4's rule in the one place it can be enforced: an agent that
+     * printed nothing has not said it changed anything, and the alternative —
+     * verifying and committing on the strength of an exit status — is how work
+     * nobody claimed gets committed. The evidence says so and says what to
+     * print, because this is the one failure an agent cannot diagnose from its
+     * own output.
+     *
+     * An adapter whose CLI reports some of this natively — a known status for
+     * "no changes", its own structured transcript — reads that first and falls
+     * back to this, in the same way {@see self::failure()} is the ordinary
+     * reading of a process that failed.
+     */
+    protected function reported(ExecutionRequest $request, ProcessResult $result): ExecutionResult
+    {
+        $reading = ReportReader::read($result);
+        $agent = $request->agent()->name();
+
+        // The package's own reading of the output, marked as its own like the
+        // notes execute() writes around the invocation. What the agent said
+        // about itself is in the output above it.
+        $request->output()->note(sprintf('%s %s', $agent, $reading->describe()));
+
+        $report = $reading->report();
+
+        if ($report === null) {
+            return ExecutionResult::error(
+                $this->unreadable($request, $result, $reading),
+                '',
+                $result->seconds(),
+                $result->exitCode(),
+            );
+        }
+
+        if ($report->requiresHumanInput()) {
+            $blocker = $report->blocker($agent);
+
+            // Unreachable while a blocked report is required to carry both
+            // halves of its question, which ReportReader checks before this is
+            // ever called. Kept because ExecutionResult::blocked() would throw
+            // rather than return, and an adapter must not turn an agent's
+            // output into an exception that stops the run.
+            if ($blocker === null) {
+                return ExecutionResult::error(
+                    $this->evidenceOf(sprintf('%s asked for human input without a question', $agent), $result),
+                    $report->summary()->text(),
+                    $result->seconds(),
+                    $result->exitCode(),
+                );
+            }
+
+            return ExecutionResult::blocked(
+                $blocker,
+                $report->summary()->text(),
+                $result->seconds(),
+                $result->exitCode(),
+            );
+        }
+
+        if ($report->isError()) {
+            return ExecutionResult::error(
+                $this->evidenceOf(sprintf('%s reported that it could not do the work', $agent), $result),
+                $report->summary()->text(),
+                $result->seconds(),
+                $result->exitCode(),
+            );
+        }
+
+        if (!$result->succeeded()) {
+            return $this->failure($request, $result, $report->summary()->text());
+        }
+
+        return ExecutionResult::candidate($report->summary()->text(), $result->seconds(), $result->exitCode());
+    }
+
+    /**
+     * What to record when there was no report to read.
+     *
+     * Two observations rather than one, because they answer different
+     * questions: what the package saw, and what the agent has to do instead.
+     * The second is addressed to the next attempt, which is handed this
+     * evidence in its briefing (section D, item 5) — and a retry that is told
+     * only "no result" will produce the same no result.
+     *
+     * The quoted block comes before the explanation on purpose:
+     * {@see FailureEvidence} keeps the end of a detail, so the sentence saying
+     * what was wrong is the part that survives a long one.
+     */
+    private function unreadable(
+        ExecutionRequest $request,
+        ProcessResult $result,
+        ReportReading $reading,
+    ): FailureEvidence {
+        $agent = $request->agent()->name();
+
+        $evidence = $reading->isMalformed()
+            ? FailureEvidence::of(
+                sprintf('%s printed a result block Ralph PHP could not read', $agent),
+                trim(sprintf(
+                    "%s\n\nNot read because %s.",
+                    $reading->block(),
+                    rtrim((string) $reading->problem(), '.'),
+                )),
+            )
+            : $this->evidenceOf(
+                $result->succeeded()
+                    ? sprintf('%s exited with status 0 without reporting a result', $agent)
+                    : sprintf('%s exited with status %d without reporting a result', $agent, $result->exitCode() ?? -1),
+                $result,
+            );
+
+        return $evidence->with(
+            'Ralph PHP has no result to act on',
+            sprintf(
+                'An attempt is finished by printing one fenced `%s` block holding a JSON object'
+                    . ' with an "%s" of %s, as "Reporting back" in the briefing describes.'
+                    . ' Without one the attempt is an execution error whatever its exit status.',
+                ResultProtocol::FENCE,
+                ResultProtocol::OUTCOME,
+                '"' . implode('", "', ResultProtocol::outcomes()) . '"',
+            ),
         );
     }
 
