@@ -45,11 +45,12 @@ use Celyes\RalphPhp\Support\Suggestions;
  * Codex did work Codex never did. Section E, item 9's rule that no agent is
  * silently substituted for another is the same rule read from the other end.
  *
- * Until the built-in adapters land (section E, items 6 and 7),
- * {@see BuiltInAdapters::providers()} is empty and a default registry provides
- * nothing: a registry's answers are its registrations, and it does not claim an
- * implementation exists before one does. {@see BuiltInAdapters} remains the
- * declared name list agent selection uses in the meantime.
+ * A default registry holds the adapters that exist: Codex (section E, item 6)
+ * and, once item 7 lands, Claude Code. A registry's answers are its
+ * registrations and it does not claim an implementation exists before one does,
+ * so {@see BuiltInAdapters} remains the declared name list agent selection uses
+ * — selection accepts a configured `claude` agent, and {@see self::create()} is
+ * where an adapter that is declared but not yet registered is reported.
  */
 final class AdapterRegistry implements AdapterCatalog
 {
@@ -103,19 +104,11 @@ final class AdapterRegistry implements AdapterCatalog
             );
         }
 
-        if (isset($this->providers[$name])) {
-            throw new ConfigurationException(
-                sprintf('The adapter "%s" is already registered.', $name),
-                [
-                    sprintf('It is provided by %s.', $this->describe($this->providers[$name])),
-                    sprintf('%s registers the same name.', $this->describe($provider)),
-                    'Ralph PHP does not replace a registered adapter: attempts, logs and commits are '
-                        . 'attributed to the adapter name, so two implementations may not share one.',
-                    'Give the new adapter a name of its own, and point "agents.*.adapter" at that name.',
-                ],
-            );
-        }
-
+        // Before the already-registered check below, so that a name the
+        // package ships is refused as reserved whether or not its provider has
+        // been added yet. The alternative is a message that changes as the
+        // built-in adapters land — "already registered" for Codex and
+        // "reserved" for Claude Code — for two attempts at the same mistake.
         if ((new BuiltInAdapters())->has($name)) {
             throw new ConfigurationException(
                 sprintf('The adapter name "%s" is reserved for the adapter Ralph PHP ships.', $name),
@@ -126,6 +119,19 @@ final class AdapterRegistry implements AdapterCatalog
                         . 'the wrong tool.',
                     'Give the adapter a name of its own; an agent may then select it through '
                         . '"agents.*.adapter".',
+                ],
+            );
+        }
+
+        if (isset($this->providers[$name])) {
+            throw new ConfigurationException(
+                sprintf('The adapter "%s" is already registered.', $name),
+                [
+                    sprintf('It is provided by %s.', $this->describe($this->providers[$name])),
+                    sprintf('%s registers the same name.', $this->describe($provider)),
+                    'Ralph PHP does not replace a registered adapter: attempts, logs and commits are '
+                        . 'attributed to the adapter name, so two implementations may not share one.',
+                    'Give the new adapter a name of its own, and point "agents.*.adapter" at that name.',
                 ],
             );
         }

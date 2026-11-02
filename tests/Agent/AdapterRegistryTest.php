@@ -129,6 +129,16 @@ final class AdapterRegistryTest extends TestCase
                 'attribute work to the wrong tool',
                 implode("\n", $failure->hints()),
             );
+
+            // Said the same way on a registry that already holds the shipped
+            // provider, so the reason a project cannot take the name does not
+            // change as the built-in adapters land.
+            self::assertSame(
+                sprintf('The adapter name "%s" is reserved for the adapter Ralph PHP ships.', $reserved),
+                $this->failure(
+                    fn () => AdapterRegistry::default()->register($this->provider($reserved)),
+                )->getMessage(),
+            );
         }
     }
 
@@ -253,7 +263,8 @@ final class AdapterRegistryTest extends TestCase
         }
 
         // A default registry provides exactly what the package ships, in the
-        // order it declares them. Empty until section E, items 6 and 7.
+        // order it declares them. Codex is there (section E, item 6); Claude
+        // Code joins it with item 7.
         self::assertSame(
             array_map(static fn (AdapterProvider $provider): string => $provider->adapter(), BuiltInAdapters::providers()),
             AdapterRegistry::default()->names(),

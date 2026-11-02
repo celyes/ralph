@@ -52,16 +52,17 @@ final class BuiltInAdapters implements AdapterCatalog
      * PROJECT.md section E, item 3 the real one rather than a second-class
      * route around the built-ins.
      *
-     * Empty until items 6 and 7 implement the Codex and Claude Code adapters.
-     * A registry does not claim an implementation exists before one does, so
-     * until then a default registry provides nothing and agent selection keeps
-     * using the declared names above. A test holds every provider listed here
-     * to one of those names.
+     * Codex is here (item 6); Claude Code arrives with item 7. A registry does
+     * not claim an implementation exists before one does, so until then a
+     * default registry provides the Codex adapter alone, while both names
+     * above stay declared and agent selection keeps accepting `claude` as a
+     * configured adapter it will be able to build. A test holds every provider
+     * listed here to one of those names.
      *
      * @return list<AdapterProvider>
      */
     public static function providers(): array
     {
-        return [];
+        return [new CodexAdapterProvider()];
     }
 }
