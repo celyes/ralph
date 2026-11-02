@@ -38,12 +38,13 @@ final class ConfigurationValidator
     private const string CONTROL_CHARACTERS = '/[\x00-\x1F\x7F]/';
 
     /**
-     * Agent names are typed as `run --agent NAME`, shown in status output and
-     * persisted with every run, so they stay to an unambiguous character set.
-     * The same shape is required of adapter names, which identify an adapter
-     * implementation in the registry.
+     * Agent names, and the adapter names that identify an implementation in the
+     * registry. Defined with the agent entry itself, because the adapter
+     * registry validates a registered name against the same pattern and the two
+     * must not drift: a provider must not be able to register a name no
+     * configuration file may contain.
      */
-    private const string IDENTIFIER = '/^[A-Za-z0-9][A-Za-z0-9._-]*$/';
+    private const string IDENTIFIER = AgentDefinition::NAME_PATTERN;
 
     /**
      * Environment variable names, as the shell accepts them.

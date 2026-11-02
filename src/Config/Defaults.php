@@ -68,6 +68,17 @@ final class Defaults
     public const string STATE_FILE = self::RUNTIME_DIRECTORY . '/state.sqlite';
 
     /**
+     * Optional PHP file registering adapters for agents the package does not
+     * ship, read by {@see \Celyes\RalphPhp\Agent\AdapterRegistrationFile}.
+     *
+     * Deliberately not a configurable setting, for the same reason the state
+     * file is not: it is code this package executes in its own process, and a
+     * file that says which code a run loads belongs at one reviewable path
+     * rather than wherever a setting points. Most projects have no such file.
+     */
+    public const string ADAPTERS_FILE = Ralph::PROJECT_DIRECTORY . '/adapters.php';
+
+    /**
      * Agent used when `run --agent NAME` is not given.
      */
     public const string AGENT = 'codex';

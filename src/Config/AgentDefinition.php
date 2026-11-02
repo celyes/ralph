@@ -15,6 +15,18 @@ namespace Celyes\RalphPhp\Config;
 final class AgentDefinition
 {
     /**
+     * The shape of a name in this part of the configuration.
+     *
+     * Agent names are typed as `run --agent NAME`, shown in status output and
+     * persisted with every run, so they stay to an unambiguous character set.
+     * Adapter names have the same shape for the same reasons: they are written
+     * in `agents.*.adapter`, and {@see \Celyes\RalphPhp\Agent\AdapterRegistry}
+     * holds registrations to it too, so that a name a provider registers is a
+     * name a configuration file can legally contain.
+     */
+    public const string NAME_PATTERN = '/^[A-Za-z0-9][A-Za-z0-9._-]*$/';
+
+    /**
      * @param string $name key this agent is configured under, and the value of `run --agent`
      * @param string $adapter registered adapter implementing the invocation
      * @param string $executable command or absolute path to run
