@@ -465,7 +465,7 @@ final class SchemaTest extends TestCase
             Schema::closedStates(),
             Schema::phases(),
             Schema::RUN_STATES,
-            Schema::ATTEMPT_OUTCOMES,
+            Schema::attemptOutcomes(),
             Schema::CHECK_OUTCOMES,
             Schema::pushStates(),
             Schema::GIT_REFERENCE_KINDS,

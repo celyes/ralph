@@ -278,7 +278,7 @@ final class Migrations
             SQL,
             Schema::literals(Schema::states()),
             Schema::literals(Schema::phases()),
-            Schema::literals(Schema::ATTEMPT_OUTCOMES),
+            Schema::literals(Schema::attemptOutcomes()),
         );
     }
 

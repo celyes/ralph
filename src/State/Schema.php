@@ -19,12 +19,12 @@ use InvalidArgumentException;
  * puzzled over three runs later.
  *
  * Some of these lists mirror a PHP enum that already exists
- * ({@see LifecycleState}, {@see Phase}, {@see Completion},
- * {@see PushState}, {@see AgentSource}); those are built from the enum's cases
- * so the two cannot drift. The rest — run states, attempt outcomes, reference
- * and checklist vocabularies — are named here first because the schema needs
- * them before the types that will own them are written, and those types are
- * expected to adopt exactly these spellings.
+ * ({@see LifecycleState}, {@see Phase}, {@see Completion}, {@see PushState},
+ * {@see AttemptOutcome}, {@see AgentSource}); those are built from the enum's
+ * cases so the two cannot drift. The rest — run states, check outcomes,
+ * reference and checklist vocabularies — are named here first because the
+ * schema needs them before the types that will own them are written, and those
+ * types are expected to adopt exactly these spellings.
  *
  * The list of {@see self::TABLES} is part of the contract too: it is what
  * bootstrap and the tests check a database against to decide it is a Ralph PHP
@@ -38,17 +38,6 @@ final class Schema
      * @var list<string>
      */
     public const array RUN_STATES = ['running', 'completed', 'interrupted', 'failed'];
-
-    /**
-     * What the agent came back with, normalised across adapters.
-     *
-     * The three outcomes PROJECT.md section E, item 5 requires be told apart —
-     * a candidate implementation, a request for human input, an execution
-     * error — plus the two ways the runner itself ends an attempt.
-     *
-     * @var list<string>
-     */
-    public const array ATTEMPT_OUTCOMES = ['candidate', 'blocked', 'error', 'timed_out', 'cancelled'];
 
     /**
      * How one verification command finished.
@@ -196,6 +185,22 @@ final class Schema
     public static function phases(): array
     {
         return Phase::values();
+    }
+
+    /**
+     * What the agent came back with, normalised across adapters.
+     *
+     * The three outcomes PROJECT.md section E, item 5 requires be told apart —
+     * a candidate implementation, a request for human input, an execution
+     * error — plus the two ways the runner itself ends an attempt. Built from
+     * {@see AttemptOutcome} so the column cannot hold an outcome the enum does
+     * not have, and the enum cannot name one the column would refuse.
+     *
+     * @return list<string>
+     */
+    public static function attemptOutcomes(): array
+    {
+        return AttemptOutcome::values();
     }
 
     /**
