@@ -108,10 +108,13 @@ use Celyes\RalphPhp\Process\ProcessResult;
  * is section H, item 4, where interruption is handled for every command the
  * package runs.
  *
- * The invocation was tested against Claude Code 2.1.226. Refusing a CLI too old
- * for these flags is section E, item 9.
+ * **Which Claude Code this is written for.** The invocation was exercised
+ * against 2.1.226, and {@see self::MINIMUM_VERSION} states the floor of the
+ * series it belongs to, so an installation too old for these flags is refused
+ * before a run starts rather than discovered from a usage message in an
+ * attempt's log (section E, item 9).
  */
-final class ClaudeAdapter extends ProcessAdapter
+final class ClaudeAdapter extends ProcessAdapter implements VersionedAdapter
 {
     /**
      * The flag that runs a prompt without a terminal.
@@ -129,9 +132,39 @@ final class ClaudeAdapter extends ProcessAdapter
      */
     public const string PERMISSIONS = 'bypassPermissions';
 
+    /**
+     * The CLI's name in a report a person reads.
+     */
+    public const string CLI = 'Claude Code';
+
+    /**
+     * The oldest Claude Code release this invocation is written for.
+     *
+     * The floor of the 2.x line rather than the 2.1.226 the class description
+     * records as tested: a floor is what can be required without refusing an
+     * operator for running something newer, and what stays true as the CLI
+     * moves. The 1.x line is where it would bite — `--permission-mode` and the
+     * `bypassPermissions` value this adapter depends on are not how that
+     * generation spelled an unattended session, and an attempt under it is a
+     * usage message repeated once per retry.
+     */
+    public const string MINIMUM_VERSION = '2.0.0';
+
     public function name(): string
     {
         return BuiltInAdapters::CLAUDE;
+    }
+
+    /**
+     * `claude --version`, measured against {@see self::MINIMUM_VERSION}.
+     *
+     * It answers with a bare `2.1.226 (Claude Code)` and exits, without a
+     * session, a model or a credential — which is what makes it something
+     * preflight may run on a machine that is only being checked.
+     */
+    public function versionRequirement(): VersionRequirement
+    {
+        return VersionRequirement::of(self::CLI, self::MINIMUM_VERSION);
     }
 
     /**

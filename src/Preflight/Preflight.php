@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Preflight;
 
+use Celyes\RalphPhp\Agent\AdapterRegistrationFile;
+use Celyes\RalphPhp\Agent\AdapterRegistry;
 use Celyes\RalphPhp\Agent\AgentSelector;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Exception\ConfigurationException;
 use Celyes\RalphPhp\Exception\UsageException;
 use Celyes\RalphPhp\Preflight\Check\AgentCheck;
+use Celyes\RalphPhp\Preflight\Check\AgentVersionCheck;
 use Celyes\RalphPhp\Preflight\Check\BaseReferenceCheck;
 use Celyes\RalphPhp\Preflight\Check\ExtensionsCheck;
 use Celyes\RalphPhp\Preflight\Check\GitCheck;
@@ -35,9 +38,18 @@ use Celyes\RalphPhp\Process\ProcessRunner;
  * failed one: asking Git for a commit in a directory that is not a repository
  * produces a message about the wrong thing, so those are reported as skipped.
  *
- * Nothing here writes, and no verification command or agent is executed: the
- * checks resolve and interrogate, which is why preflight is safe to run at any
- * time, including on a project with an interrupted run in it.
+ * Nothing here writes, and no verification command and no agent *session* is
+ * started: the checks resolve and interrogate, which is why preflight is safe
+ * to run at any time, including on a project with an interrupted run in it.
+ * Two things are executed, both of them queries that change nothing — `git`,
+ * to ask about the repository, and the selected agent's version argument
+ * ({@see AgentVersionCheck}), which starts no session, reads no task and costs
+ * nothing.
+ *
+ * A project's own adapters are loaded before the agent is selected, so an
+ * agent pointed at an adapter from `.ralph/adapters.php` is checked rather
+ * than reported as unsupported. That executes the project's registration file,
+ * with the trust {@see AdapterRegistrationFile} documents.
  */
 final class Preflight
 {
@@ -47,11 +59,14 @@ final class Preflight
     private readonly array $checks;
 
     /**
+     * @param AdapterRegistry|null $adapters the adapters a run could use; null
+     *        reads the project's own registrations for each run, which is what
+     *        a command does
      * @param list<PreflightCheck>|null $checks the checks to run, for tests;
      *        null uses the full set in {@see CheckId} order
      */
     public function __construct(
-        private readonly AgentSelector $selector = new AgentSelector(),
+        private readonly ?AdapterRegistry $adapters = null,
         ?array $checks = null,
     ) {
         $this->checks = $checks ?? self::defaultChecks();
@@ -68,13 +83,17 @@ final class Preflight
      * @param string|null $requestedAgent the value of `--agent`, or null for the project default
      *
      * @throws UsageException when `--agent` was given without a name
-     * @throws ConfigurationException when no such agent is configured, or its adapter is unavailable
+     * @throws ConfigurationException when no such agent is configured, its adapter is
+     *         unavailable, or the project's registration file cannot be used
      */
     public function run(Configuration $configuration, ?string $requestedAgent = null): PreflightReport
     {
+        $adapters = $this->adaptersFor($configuration);
+
         $context = new PreflightContext(
             $configuration,
-            $this->selector->select($configuration, $requestedAgent),
+            (new AgentSelector($adapters))->select($configuration, $requestedAgent),
+            $adapters,
         );
 
         foreach ($this->checks as $check) {
@@ -87,6 +106,30 @@ final class Preflight
             $context->agent(),
             $context->results(),
         );
+    }
+
+    /**
+     * The adapters this project can execute: the shipped ones, plus whatever
+     * `.ralph/adapters.php` registers.
+     *
+     * Built per run rather than held, because the registrations belong to the
+     * project being checked and one process may check more than one — and
+     * because a registry is what both halves of the answer need: selection,
+     * to accept an agent naming a project's adapter, and
+     * {@see AgentVersionCheck}, to ask that adapter about its CLI.
+     *
+     * @throws ConfigurationException when the registration file cannot be used
+     */
+    private function adaptersFor(Configuration $configuration): AdapterRegistry
+    {
+        if ($this->adapters !== null) {
+            return $this->adapters;
+        }
+
+        $registry = AdapterRegistry::default();
+        AdapterRegistrationFile::in($configuration->projectRoot())->registerInto($registry);
+
+        return $registry;
     }
 
     /**
@@ -121,6 +164,7 @@ final class Preflight
             new BaseReferenceCheck($git),
             new IdentityCheck($git),
             new AgentCheck($executables),
+            new AgentVersionCheck(),
             new VerificationCheck($executables),
         ];
     }

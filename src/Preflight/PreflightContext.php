@@ -4,16 +4,17 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Preflight;
 
+use Celyes\RalphPhp\Agent\AdapterRegistry;
 use Celyes\RalphPhp\Agent\AgentSelection;
 use Celyes\RalphPhp\Config\Configuration;
 
 /**
  * What a preflight check is given to work with.
  *
- * The settings and the resolved agent, plus the results of the checks that
- * already ran — which a check reads to answer questions the earlier ones have
- * already paid for, such as where `git` was found, rather than looking it up
- * again.
+ * The settings and the resolved agent, the adapters this project can execute,
+ * plus the results of the checks that already ran — which a check reads to
+ * answer questions the earlier ones have already paid for, such as where `git`
+ * was found, rather than looking it up again.
  *
  * Collecting results is {@see Preflight}'s job; a check only ever reads them.
  */
@@ -29,10 +30,19 @@ final class PreflightContext
      */
     private array $facts = [];
 
+    private readonly AdapterRegistry $adapters;
+
+    /**
+     * @param AdapterRegistry|null $adapters the registry the agent was selected
+     *        against, including whatever the project registered; the shipped
+     *        adapters alone when a caller has none to add
+     */
     public function __construct(
         private readonly Configuration $configuration,
         private readonly AgentSelection $agent,
+        ?AdapterRegistry $adapters = null,
     ) {
+        $this->adapters = $adapters ?? AdapterRegistry::default();
     }
 
     public function configuration(): Configuration
@@ -43,6 +53,19 @@ final class PreflightContext
     public function agent(): AgentSelection
     {
         return $this->agent;
+    }
+
+    /**
+     * The adapters this project can execute.
+     *
+     * The same registry agent selection was answered from, so a check that
+     * builds the selected adapter — {@see Check\AgentVersionCheck}, to ask it
+     * what its CLI must be — gets the implementation the run would use, a
+     * project's own included.
+     */
+    public function adapters(): AdapterRegistry
+    {
+        return $this->adapters;
     }
 
     /**

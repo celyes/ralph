@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Preflight;
 
+use Celyes\RalphPhp\Agent\ClaudeAdapter;
+use Celyes\RalphPhp\Agent\CodexAdapter;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Exception\ConfigurationException;
 use Celyes\RalphPhp\Preflight\Check\AgentCheck;
+use Celyes\RalphPhp\Preflight\Check\AgentVersionCheck;
 use Celyes\RalphPhp\Preflight\Check\BaseReferenceCheck;
 use Celyes\RalphPhp\Preflight\Check\ExtensionsCheck;
 use Celyes\RalphPhp\Preflight\Check\GitCheck;
@@ -23,6 +26,7 @@ use Celyes\RalphPhp\Preflight\Preflight;
 use Celyes\RalphPhp\Preflight\PreflightReport;
 use Celyes\RalphPhp\Process\ExecutableFinder;
 use Celyes\RalphPhp\Ralph;
+use Celyes\RalphPhp\Tests\Agent\NamedAdapterProvider;
 use Celyes\RalphPhp\Tests\Support\Environment;
 use Celyes\RalphPhp\Tests\Support\Git;
 use Celyes\RalphPhp\Tests\Support\TemporaryProject;
@@ -36,8 +40,10 @@ use PHPUnit\Framework\TestCase;
  * Every test prepares an actual Git repository and actual executables: the
  * checks exist to report what this machine can do, so a double would only
  * confirm that the double was configured as the test expected. The agent and
- * the verification commands are fake programs rather than real ones, because
- * preflight resolves them and never runs them — which is itself asserted.
+ * the verification commands are fake programs rather than real ones: a
+ * verification command is resolved and never run, which is itself asserted,
+ * and the agent is asked for its version and nothing else, which is asserted
+ * from what the fake records about every invocation it received.
  */
 #[CoversClass(Preflight::class)]
 #[CoversClass(PhpCheck::class)]
@@ -47,9 +53,22 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(BaseReferenceCheck::class)]
 #[CoversClass(IdentityCheck::class)]
 #[CoversClass(AgentCheck::class)]
+#[CoversClass(AgentVersionCheck::class)]
 #[CoversClass(VerificationCheck::class)]
 final class PreflightTest extends TestCase
 {
+    /**
+     * A version the shipped adapters' minimums are certainly below, for the
+     * tests that are about something other than the version.
+     */
+    private const string NEW_ENOUGH = '9.9.9';
+
+    /**
+     * Where the fake agent records every invocation it received, relative to
+     * the project root.
+     */
+    private const string INVOCATIONS = 'agent-invocations.txt';
+
     private TemporaryProject $project;
 
     private Environment $environment;
@@ -385,6 +404,10 @@ final class PreflightTest extends TestCase
         $hints = implode("\n", $this->hints($report, CheckId::Agent));
         self::assertStringContainsString('agents.codex.executable', $hints);
         self::assertStringContainsString($this->project->path(Defaults::CONFIG_FILE), $hints);
+
+        // The one moment a tool could plausibly reach for whatever else is
+        // installed. It says, in as many words, that it will not.
+        self::assertStringContainsString('Ralph PHP does not run a different agent in its place.', $hints);
     }
 
     #[Test]
@@ -460,6 +483,221 @@ final class PreflightTest extends TestCase
             'selected with "--agent"',
             implode("\n", $this->hints($overridden, CheckId::Agent)),
         );
+    }
+
+    #[Test]
+    public function an_agent_cli_older_than_its_adapter_requires_is_refused(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $report = $this->report(['agents' => ['codex' => ['executable' => $this->agentProgram('codex-cli 0.39.0')]]]);
+
+        // The executable is there and runnable: it is the release that this
+        // adapter's "exec --cd --sandbox" invocation is not written for.
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Agent), $this->describe($report));
+        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::AgentVersion), $this->describe($report));
+        self::assertFalse($report->isUsable());
+        self::assertSame(
+            sprintf('Codex CLI 0.39.0 is older than the required %s', CodexAdapter::MINIMUM_VERSION),
+            $this->summary($report, CheckId::AgentVersion),
+        );
+
+        $hints = implode("\n", $this->hints($report, CheckId::AgentVersion));
+        self::assertStringContainsString('Upgrade the Codex CLI', $hints);
+        self::assertStringContainsString('agents.codex.executable', $hints);
+        self::assertStringContainsString('Ralph PHP does not run a different agent in its place.', $hints);
+    }
+
+    #[Test]
+    public function a_cli_newer_than_the_minimum_is_not_refused_for_being_ahead(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        // A minimum is a floor. Everything above it passes, including the
+        // build suffixes CLIs add, which version_compare() would otherwise
+        // read as pre-release markers and judge older than the release.
+        $report = $this->report(['agents' => ['codex' => ['executable' => $this->agentProgram('codex-cli 0.44.0-nightly')]]]);
+
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::AgentVersion), $this->describe($report));
+        self::assertSame('Codex CLI 0.44.0', $this->summary($report, CheckId::AgentVersion));
+        self::assertStringContainsString(
+            'requires Codex CLI ' . CodexAdapter::MINIMUM_VERSION . ' or newer',
+            implode("\n", $this->details($report, CheckId::AgentVersion)),
+        );
+    }
+
+    #[Test]
+    public function a_version_that_cannot_be_established_warns_rather_than_stopping_the_run(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        // An answer with no version number in it. The agent executable may be
+        // a wrapper somebody wrote, and refusing to start because it answers
+        // oddly would be a worse failure than the one the check prevents.
+        $unreadable = $this->report(['agents' => ['codex' => ['executable' => $this->agentProgram('Codex, the coding agent')]]]);
+
+        self::assertSame(CheckOutcome::Warning, $this->outcome($unreadable, CheckId::AgentVersion), $this->describe($unreadable));
+        self::assertTrue($unreadable->isUsable(), $this->describe($unreadable));
+        self::assertStringContainsString('holds no version number', $this->summary($unreadable, CheckId::AgentVersion));
+        self::assertStringContainsString(
+            'reported: Codex, the coding agent',
+            implode("\n", $this->details($unreadable, CheckId::AgentVersion)),
+        );
+
+        // A query that failed says so, with what the program printed.
+        $failed = $this->report(['agents' => ['codex' => [
+            'executable' => $this->agentProgram('codex: unknown option --version', status: 3),
+        ]]]);
+
+        self::assertSame(CheckOutcome::Warning, $this->outcome($failed, CheckId::AgentVersion), $this->describe($failed));
+        self::assertTrue($failed->isUsable(), $this->describe($failed));
+        self::assertStringContainsString('it exited with status 3', $this->summary($failed, CheckId::AgentVersion));
+        self::assertStringContainsString(
+            'Ralph PHP does not run a different agent in its place.',
+            implode("\n", $this->hints($failed, CheckId::AgentVersion)),
+        );
+    }
+
+    #[Test]
+    public function the_version_is_not_asked_for_when_the_agent_cannot_be_run(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $report = $this->report(['agents' => ['codex' => ['executable' => 'ralph-no-such-agent']]]);
+
+        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Agent));
+        self::assertSame(CheckOutcome::Skipped, $this->outcome($report, CheckId::AgentVersion));
+        self::assertStringContainsString(
+            'not checked, because the "agent" check failed',
+            $this->summary($report, CheckId::AgentVersion),
+        );
+    }
+
+    #[Test]
+    public function the_agent_is_asked_for_its_version_and_for_nothing_else(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $report = $this->report();
+
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::AgentVersion), $this->describe($report));
+
+        // No session, no task, no prompt: one query, with the arguments the
+        // adapter named and nothing added to them, in the project it is about
+        // rather than wherever this process happens to be.
+        self::assertSame(['--version'], $this->invocations());
+        self::assertSame([$this->project->root()], $this->invocationDirectories());
+    }
+
+    #[Test]
+    public function the_version_is_read_from_the_program_the_agent_check_resolved(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        // Configured as a bare name, as a user who installed the CLI normally
+        // would write it: what runs is the program found on PATH, and the
+        // report names it so that a machine with two installations shows which
+        // one answered.
+        $installed = $this->agentProgram(relative: 'tools/ralph-fake-codex');
+        $this->environment->set('PATH', dirname($installed) . PATH_SEPARATOR . (string) getenv('PATH'));
+
+        $report = $this->report(['agents' => ['codex' => ['executable' => 'ralph-fake-codex']]]);
+
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::AgentVersion), $this->describe($report));
+        self::assertStringContainsString(
+            'asked: ' . $installed . ' --version',
+            implode("\n", $this->details($report, CheckId::AgentVersion)),
+        );
+    }
+
+    #[Test]
+    public function the_version_required_is_the_selected_adapter_s_own(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $settings = ['agents' => [
+            'codex' => ['executable' => $this->agentProgram('codex-cli ' . self::NEW_ENOUGH)],
+            'claude' => ['executable' => $this->agentProgram('1.0.119 (Claude Code)', 'tools/claude')],
+        ]];
+
+        self::assertSame(CheckOutcome::Passed, $this->outcome($this->report($settings), CheckId::AgentVersion));
+
+        // The same machine, the same repository, a different adapter: Claude
+        // Code answers in its own format and is measured against its own floor.
+        $claude = $this->report($settings, 'claude');
+
+        self::assertSame(CheckOutcome::Failed, $this->outcome($claude, CheckId::AgentVersion), $this->describe($claude));
+        self::assertSame(
+            sprintf('Claude Code 1.0.119 is older than the required %s', ClaudeAdapter::MINIMUM_VERSION),
+            $this->summary($claude, CheckId::AgentVersion),
+        );
+    }
+
+    #[Test]
+    public function an_adapter_the_project_registered_is_checked_rather_than_called_unsupported(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $this->project->write(
+            Defaults::ADAPTERS_FILE,
+            "<?php\n\nreturn [new \\" . NamedAdapterProvider::class . "('acme')];\n",
+        );
+
+        $report = $this->report([
+            'agent' => 'mine',
+            'agents' => ['mine' => [
+                'adapter' => 'acme',
+                'executable' => $this->agentProgram(relative: 'tools/acme-cli'),
+            ]],
+        ]);
+
+        self::assertTrue($report->isUsable(), $this->describe($report));
+        self::assertSame('acme', $report->agent()->adapter());
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Agent), $this->describe($report));
+
+        // An adapter with no version to speak of — an agent reached over HTTP,
+        // a wrapper a project maintains — is reported as having stated no
+        // requirement, and nothing is run for it.
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::AgentVersion), $this->describe($report));
+        self::assertStringContainsString(
+            'the adapter "acme" states no version requirement',
+            $this->summary($report, CheckId::AgentVersion),
+        );
+        self::assertSame([], $this->invocations());
+    }
+
+    #[Test]
+    public function an_adapter_registered_nowhere_is_refused_without_a_substitute(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        try {
+            $this->report([
+                'agent' => 'mine',
+                'agents' => ['mine' => ['adapter' => 'gemini', 'executable' => $this->agentProgram()]],
+            ]);
+
+            self::fail('An agent naming an adapter nothing implements was accepted.');
+        } catch (ConfigurationException $refusal) {
+            self::assertSame(
+                'The agent "mine" names the unsupported adapter "gemini".',
+                $refusal->getMessage(),
+            );
+            self::assertStringContainsString('Available adapters: "codex", "claude".', implode("\n", $refusal->hints()));
+        }
+
+        // Refused rather than quietly run under one of the adapters that does
+        // exist: the agent is what a run's commits and cost are attributed to.
+        self::assertSame([], $this->invocations());
     }
 
     #[Test]
@@ -615,7 +853,7 @@ final class PreflightTest extends TestCase
      */
     private function configuration(array $settings): Configuration
     {
-        $settings['agents'] ??= ['codex' => ['executable' => $this->writeProgram('tools/codex')]];
+        $settings['agents'] ??= ['codex' => ['executable' => $this->agentProgram()]];
         $settings['checks'] ??= [['name' => 'tests', 'command' => [PHP_BINARY, '-v']]];
 
         return (new ConfigurationLoader())->fromArray(
@@ -668,6 +906,70 @@ final class PreflightTest extends TestCase
         }
 
         return implode("\n", $lines);
+    }
+
+    /**
+     * A stand-in for an agent CLI.
+     *
+     * It answers any invocation with what the test says and appends the
+     * arguments it was given to one file, so a test can assert both what
+     * preflight concluded about the version and that asking for it was the
+     * only thing preflight did with the agent.
+     */
+    private function agentProgram(
+        string $prints = 'codex-cli ' . self::NEW_ENOUGH,
+        string $relative = 'tools/codex',
+        int $status = 0,
+    ): string {
+        return $this->writeProgram($relative, implode("\n", [
+            '#!/bin/sh',
+            'printf \'%s\\t%s\\n\' "$PWD" "$*" >> ' . escapeshellarg($this->project->path(self::INVOCATIONS)),
+            'printf \'%s\\n\' ' . escapeshellarg($prints),
+            'exit ' . $status,
+        ]) . "\n");
+    }
+
+    /**
+     * The arguments of every invocation the fake agent received, in order.
+     *
+     * @return list<string>
+     */
+    private function invocations(): array
+    {
+        return array_map(
+            static fn (array $parts): string => $parts[1] ?? '',
+            $this->invocationRecords(),
+        );
+    }
+
+    /**
+     * The working directory of every invocation the fake agent received.
+     *
+     * @return list<string>
+     */
+    private function invocationDirectories(): array
+    {
+        return array_map(
+            static fn (array $parts): string => $parts[0],
+            $this->invocationRecords(),
+        );
+    }
+
+    /**
+     * @return list<list<string>>
+     */
+    private function invocationRecords(): array
+    {
+        $path = $this->project->path(self::INVOCATIONS);
+
+        if (!is_file($path)) {
+            return [];
+        }
+
+        return array_values(array_map(
+            static fn (string $line): array => explode("\t", $line),
+            array_filter(explode("\n", (string) file_get_contents($path))),
+        ));
     }
 
     /**

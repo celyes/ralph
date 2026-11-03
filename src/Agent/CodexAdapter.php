@@ -80,10 +80,13 @@ use Celyes\RalphPhp\Process\ProcessResult;
  * agent itself spawned is section H, item 4, where interruption is handled for
  * every command the package runs.
  *
- * The invocation targets the Codex CLI's `exec` subcommand as it stands in the
- * 0.4x releases. Refusing a CLI too old to have it is section E, item 9.
+ * **Which Codex this is written for.** The invocation targets the `exec`
+ * subcommand as it stands in the 0.4x releases, and {@see self::MINIMUM_VERSION}
+ * states that floor so an installation older than it is refused before a run
+ * starts rather than discovered from a usage message in an attempt's log
+ * (section E, item 9).
  */
-final class CodexAdapter extends ProcessAdapter
+final class CodexAdapter extends ProcessAdapter implements VersionedAdapter
 {
     /**
      * The non-interactive subcommand.
@@ -100,9 +103,40 @@ final class CodexAdapter extends ProcessAdapter
      */
     public const string SANDBOX = 'workspace-write';
 
+    /**
+     * The CLI's name in a report a person reads.
+     */
+    public const string CLI = 'Codex CLI';
+
+    /**
+     * The oldest Codex release this invocation is written for.
+     *
+     * The floor of the 0.4x series the class description names, rather than
+     * the exact version it was exercised at: an operator running something
+     * newer must never be refused for being ahead, and a floor is the only
+     * form of that statement which stays true as the CLI moves. It is a floor
+     * with content — `exec` taking its prompt from standard input, `--cd` and
+     * `--sandbox workspace-write` are this series' spellings — so a 0.3x
+     * installation is refused rather than left to fail per attempt.
+     */
+    public const string MINIMUM_VERSION = '0.40.0';
+
     public function name(): string
     {
         return BuiltInAdapters::CODEX;
+    }
+
+    /**
+     * `codex --version`, measured against {@see self::MINIMUM_VERSION}.
+     *
+     * The bare executable rather than `exec --version`: the subcommand is
+     * exactly what an installation too old to be supported does not have, so
+     * asking through it would answer with a usage message instead of a
+     * version.
+     */
+    public function versionRequirement(): VersionRequirement
+    {
+        return VersionRequirement::of(self::CLI, self::MINIMUM_VERSION);
     }
 
     /**

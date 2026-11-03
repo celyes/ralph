@@ -58,6 +58,12 @@ enum CheckId: string
     case Agent = 'agent';
 
     /**
+     * That the installed CLI is a release the selected adapter's invocation
+     * was written for.
+     */
+    case AgentVersion = 'agent-version';
+
+    /**
      * That every configured verification command names a program that could
      * run.
      */
@@ -85,6 +91,7 @@ enum CheckId: string
         return match ($this) {
             self::Repository, self::Identity => [self::Git],
             self::BaseReference => [self::Git, self::Repository],
+            self::AgentVersion => [self::Agent],
             default => [],
         };
     }

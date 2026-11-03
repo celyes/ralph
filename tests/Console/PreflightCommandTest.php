@@ -51,7 +51,7 @@ final class PreflightCommandTest extends TestCase
         self::assertStringContainsString('Preflight checks for ' . $this->project->root(), $result->standardOutput);
         self::assertStringContainsString('agent          codex (adapter "codex"', $result->standardOutput);
 
-        foreach (['php', 'extensions', 'git', 'repository', 'base', 'identity', 'agent', 'checks'] as $check) {
+        foreach (['php', 'extensions', 'git', 'repository', 'base', 'identity', 'agent', 'agent-version', 'checks'] as $check) {
             self::assertMatchesRegularExpression(
                 '/^  pass  ' . $check . ' /m',
                 $result->standardOutput,
@@ -145,7 +145,8 @@ final class PreflightCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertStringContainsString('Usage: ralph preflight [--agent NAME]', $result->standardOutput);
         self::assertStringContainsString('--agent NAME', $result->standardOutput);
-        self::assertStringContainsString('Nothing is executed and nothing is written', $result->standardOutput);
+        self::assertStringContainsString('no agent session is started', $result->standardOutput);
+        self::assertStringContainsString('agent-version', $result->standardOutput);
         self::assertStringContainsString('78', $result->standardOutput);
     }
 
@@ -171,7 +172,10 @@ final class PreflightCommandTest extends TestCase
         Git::setIdentity($this->project->root());
         Git::commit($this->project->root());
 
-        $agent = $this->project->write('tools/codex', "#!/bin/sh\nexit 0\n");
+        // It answers "--version" with a release newer than any adapter
+        // minimum, because preflight asks: an agent that could not say what it
+        // is would warn, and this project is meant to be entirely ready.
+        $agent = $this->project->write('tools/codex', "#!/bin/sh\nprintf 'codex-cli 9.9.9\\n'\nexit 0\n");
         chmod($agent, 0o700);
 
         $this->project->writeConfigArray([

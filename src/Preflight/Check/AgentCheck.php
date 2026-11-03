@@ -27,12 +27,31 @@ use Celyes\RalphPhp\Process\ExecutableFinder;
  * not something this check can detect. What it does instead is make the
  * declaration useful to whoever does authenticate by variable.
  *
- * Whether the installed CLI is a version its adapter supports is a separate
- * question, answered by the adapters themselves (PROJECT.md section E): it
- * needs knowledge of each agent's version output, which only the adapter has.
+ * Whether the installed CLI is a *version* its adapter supports is the
+ * separate question {@see AgentVersionCheck} answers, which this check is what
+ * makes answerable: it resolves the executable, remembers it under
+ * {@see self::EXECUTABLE}, and a failure here skips the version query rather
+ * than reporting twice that an agent nobody can find also has no version.
+ *
+ * Neither failure is ever resolved by running something else. The hints say so
+ * in as many words, because "no agent found" is the one moment a tool could
+ * plausibly be expected to reach for whatever else is installed, and a run
+ * whose commits were made by an agent the user did not choose is worse than no
+ * run (PROJECT.md section E, item 9).
  */
 final class AgentCheck implements PreflightCheck
 {
+    /**
+     * Key the resolved executable is remembered under, for
+     * {@see AgentVersionCheck}.
+     *
+     * Remembered rather than searched for twice so the program whose version
+     * is read is certainly the one this check passed on: between two searches
+     * sits a PATH that a shell profile, a version manager or a test may have
+     * changed.
+     */
+    public const string EXECUTABLE = 'agent.executable';
+
     public function __construct(private readonly ExecutableFinder $executables = new ExecutableFinder())
     {
     }
@@ -75,6 +94,8 @@ final class AgentCheck implements PreflightCheck
         $details = $this->details($definition, $executable);
 
         if ($problems !== []) {
+            $hints[] = 'Ralph PHP does not run a different agent in its place.';
+
             return CheckResult::failed(
                 $this->id(),
                 sprintf('the agent "%s" cannot be run: %s', $agent->name(), implode('; ', $problems)),
@@ -82,6 +103,14 @@ final class AgentCheck implements PreflightCheck
                 $hints,
             );
         }
+
+        // Only once both halves are satisfied, because a failed check has not
+        // established an executable worth passing on. What actually keeps the
+        // version query from starting an agent that cannot be run is the
+        // dependency {@see CheckId::dependencies()} declares on this check,
+        // which skips it outright; this is only about not leaving a half-true
+        // fact behind for it.
+        $context->remember(self::EXECUTABLE, (string) $executable);
 
         return CheckResult::passed(
             $this->id(),
