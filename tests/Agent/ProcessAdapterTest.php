@@ -53,6 +53,12 @@ final class ProcessAdapterTest extends TestCase
     private const string DESCRIPTION = 'Add a --dry-run option to the import command';
 
     /**
+     * A credential value no other part of the suite could produce by accident,
+     * so that a test failing because it leaked says so unmistakably.
+     */
+    private const string SECRET = 'sk-ralph-test-value-must-never-be-printed';
+
+    /**
      * The task's own workspace: the directory the agent must run in.
      */
     private string $workspace;
@@ -453,6 +459,203 @@ final class ProcessAdapterTest extends TestCase
     }
 
     /**
+     * Section E, item 8's environment-based authentication, against a real
+     * child process: the variables an agent's configuration declares are the
+     * ones it receives, and the package does not have to be trusted about it —
+     * the agent here prints what it was given.
+     */
+    #[Test]
+    public function a_declared_authentication_variable_reaches_the_agent(): void
+    {
+        $this->environment->set('RALPH_TEST_AGENT_KEY', self::SECRET);
+
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo getenv("RALPH_TEST_AGENT_KEY");']);
+
+        $result = $adapter->execute($this->request(
+            definition: $this->authenticating(['RALPH_TEST_AGENT_KEY']),
+        ));
+
+        self::assertSame(self::SECRET, $result->claim()->text());
+    }
+
+    /**
+     * What the explicit pass is *for*, and the one assertion that distinguishes
+     * it from inheritance: a child inherits the runner's environment either
+     * way, so the declared variables arriving is not by itself evidence that
+     * the adapter passed them. The padding is, because only the resolved copy
+     * is trimmed — and a key with the newline `$(cat key.txt)` left on it is a
+     * correct key the agent rejects as invalid.
+     */
+    #[Test]
+    public function the_agent_is_handed_the_declared_variable_rather_than_the_inherited_one(): void
+    {
+        $this->environment->set('RALPH_TEST_AGENT_KEY', "\t" . self::SECRET . "\n");
+
+        $adapter = new ScriptedProcessAdapter(
+            ['-r', 'echo json_encode(getenv("RALPH_TEST_AGENT_KEY"));'],
+        );
+
+        $result = $adapter->execute($this->request(
+            definition: $this->authenticating(['RALPH_TEST_AGENT_KEY']),
+        ));
+
+        self::assertSame('"' . self::SECRET . '"', $result->claim()->text());
+    }
+
+    /**
+     * The trimming is scoped to what the agent declares. An undeclared variable
+     * is inherited untouched, because this package has no business tidying an
+     * environment it was not told about.
+     */
+    #[Test]
+    public function an_undeclared_variable_is_inherited_exactly_as_it_was_set(): void
+    {
+        $this->environment->set('RALPH_TEST_AGENT_OTHER', " padded \n");
+
+        $adapter = new ScriptedProcessAdapter(
+            ['-r', 'echo json_encode(getenv("RALPH_TEST_AGENT_OTHER"));'],
+        );
+
+        $result = $adapter->execute($this->request());
+
+        self::assertSame('" padded \n"', $result->claim()->text());
+    }
+
+    /**
+     * Thrown rather than returned, for the reason a missing executable is: an
+     * unset key is a setup problem a retry would hit identically, and starting
+     * the agent anyway spends the attempt's whole budget to be told "invalid
+     * API key" in prose.
+     */
+    #[Test]
+    public function an_unset_authentication_variable_stops_the_run_before_the_agent_starts(): void
+    {
+        $this->environment->remove('RALPH_TEST_AGENT_KEY');
+
+        $adapter = new ScriptedProcessAdapter(
+            ['-r', 'file_put_contents("agent-was-here.txt", "started");'],
+        );
+
+        try {
+            $adapter->execute($this->request(
+                definition: $this->authenticating(['RALPH_TEST_AGENT_KEY']),
+            ));
+            self::fail('Expected a ProcessException.');
+        } catch (ProcessException $exception) {
+            self::assertStringContainsString('RALPH_TEST_AGENT_KEY', $exception->getMessage());
+            self::assertStringContainsString('is not set', $exception->getMessage());
+            self::assertStringContainsString('scripted', $exception->getMessage());
+            self::assertStringContainsString(
+                'does not run a different agent',
+                implode(' ', $exception->hints()),
+            );
+        }
+
+        self::assertFileDoesNotExist($this->workspace . '/agent-was-here.txt');
+        self::assertSame(0, $adapter->interpretations);
+    }
+
+    /**
+     * An exported but empty variable is how an unset one looks in a shell
+     * profile or a CI configuration, and no agent would accept it.
+     */
+    #[Test]
+    public function an_empty_authentication_variable_is_refused_like_an_unset_one(): void
+    {
+        $this->environment->set('RALPH_TEST_AGENT_KEY', '');
+
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo "never";']);
+
+        $this->expectException(ProcessException::class);
+        $this->expectExceptionMessage('RALPH_TEST_AGENT_KEY');
+
+        $adapter->execute($this->request(definition: $this->authenticating(['RALPH_TEST_AGENT_KEY'])));
+    }
+
+    #[Test]
+    public function several_unset_variables_are_reported_together(): void
+    {
+        $this->environment->remove('RALPH_TEST_AGENT_KEY');
+        $this->environment->remove('RALPH_TEST_AGENT_URL');
+
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo "never";']);
+
+        try {
+            $adapter->execute($this->request(
+                definition: $this->authenticating(['RALPH_TEST_AGENT_KEY', 'RALPH_TEST_AGENT_URL']),
+            ));
+            self::fail('Expected a ProcessException.');
+        } catch (ProcessException $exception) {
+            self::assertStringContainsString(
+                'RALPH_TEST_AGENT_KEY, RALPH_TEST_AGENT_URL',
+                $exception->getMessage(),
+            );
+            self::assertStringContainsString('are not set', $exception->getMessage());
+        }
+    }
+
+    /**
+     * The other half of item 8's sentence. The log is a file inside the user's
+     * repository and the terminal is wherever the output was pasted, so the
+     * note says which variables were in play and nothing about what they hold
+     * — including in the failure, where the temptation to show the value the
+     * agent "received" is strongest.
+     */
+    #[Test]
+    public function the_log_names_the_authentication_variables_and_never_their_values(): void
+    {
+        $this->environment->set('RALPH_TEST_AGENT_KEY', self::SECRET);
+
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo "done";']);
+
+        $adapter->execute($this->request(
+            definition: $this->authenticating(['RALPH_TEST_AGENT_KEY']),
+            output: $sink,
+        ));
+
+        self::assertSame(
+            'scripted authenticating with RALPH_TEST_AGENT_KEY (value set)',
+            $sink->notes[1],
+        );
+        self::assertStringNotContainsString(self::SECRET, implode("\n", $sink->notes));
+    }
+
+    /**
+     * Both built-in CLIs can be authenticated by an interactive login, so the
+     * declared list is usually empty — and a line saying so on every attempt of
+     * every task would be noise in the log that matters.
+     */
+    #[Test]
+    public function an_agent_that_declares_no_variables_adds_no_note(): void
+    {
+        $sink = new RecordingSink();
+        $adapter = new ScriptedProcessAdapter(['-r', 'echo "done";']);
+
+        $adapter->execute($this->request(output: $sink));
+
+        self::assertCount(3, $sink->notes);
+        self::assertStringNotContainsString('authenticating', implode("\n", $sink->notes));
+    }
+
+    /**
+     * The settings persisted with a run and shown in status are the
+     * definition's own, which carry variable *names*: a credential in the
+     * state store would outlive the run that read it.
+     */
+    #[Test]
+    public function the_persisted_agent_settings_carry_the_variable_name_and_not_its_value(): void
+    {
+        $this->environment->set('RALPH_TEST_AGENT_KEY', self::SECRET);
+
+        $request = $this->request(definition: $this->authenticating(['RALPH_TEST_AGENT_KEY']));
+        $recorded = (string) json_encode($request->agent()->toArray(), JSON_THROW_ON_ERROR);
+
+        self::assertStringContainsString('RALPH_TEST_AGENT_KEY', $recorded);
+        self::assertStringNotContainsString(self::SECRET, $recorded);
+    }
+
+    /**
      * The command is noted as the resolved program and separate arguments, not
      * as a shell line: a log that showed a composed command line would invite a
      * reader to paste it into a shell, which is the one thing this adapter
@@ -806,6 +1009,16 @@ final class ProcessAdapterTest extends TestCase
                 $status,
             ),
         ];
+    }
+
+    /**
+     * An agent that authenticates by environment variable.
+     *
+     * @param list<string> $environment
+     */
+    private function authenticating(array $environment): AgentDefinition
+    {
+        return new AgentDefinition('scripted', 'scripted', PHP_BINARY, null, [], $environment);
     }
 
     private function request(

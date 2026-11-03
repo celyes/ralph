@@ -58,6 +58,17 @@ use Celyes\RalphPhp\State\FailureEvidence;
  * the timeout that stopped it. They are marked as Ralph PHP's own, because the
  * output between them is an agent's and may say anything about itself.
  *
+ * **Per-agent settings are honoured here where they are agent-independent.**
+ * The configured executable is what gets resolved and run
+ * ({@see self::resolve()}), and the declared authentication variables are
+ * resolved and passed to the child ({@see self::authenticate()}), because
+ * neither depends on which CLI this is. The optional model and the extra
+ * argument array are left to the subclass, since where a `--model` goes in a
+ * command line is something only that agent's CLI knows. Together that is
+ * PROJECT.md section E, item 8 — and the credential half of it is structural:
+ * values live in {@see AgentEnvironment} and reach `proc_open`, while
+ * everything this class writes to a log or hands upward is variable names.
+ *
  * **Telling the three outcomes apart is offered, not left to each adapter.**
  * Item 5 — a candidate implementation, a request for human input, an execution
  * error, and a refusal of output that is absent or malformed — is
@@ -77,10 +88,11 @@ abstract class ProcessAdapter implements ExecutionAdapter
     /**
      * Run the agent once, inside the workspace and inside the budget.
      *
-     * @throws ProcessException when the configured executable cannot be found
-     *         or the process cannot be started — a setup problem that a retry
-     *         would hit identically, which is why the interface has it throw
-     *         rather than return. No other agent is tried (section E, item 9).
+     * @throws ProcessException when the configured executable cannot be found,
+     *         a declared authentication variable is not set, or the process
+     *         cannot be started — setup problems that a retry would hit
+     *         identically, which is why the interface has it throw rather than
+     *         return. No other agent is tried (section E, item 9).
      */
     final public function execute(ExecutionRequest $request): ExecutionResult
     {
@@ -92,6 +104,7 @@ abstract class ProcessAdapter implements ExecutionAdapter
         $output->note($request->summary());
 
         $invocation = $invocation->at($this->resolve($request, $invocation));
+        $environment = $this->authenticate($request);
         $output->note('running ' . $invocation->describe());
 
         $result = $this->processes->run(
@@ -102,7 +115,9 @@ abstract class ProcessAdapter implements ExecutionAdapter
             // The lesser of the task timeout and the run's remaining time,
             // computed by ExecutionBudget so that no adapter decides it.
             $request->seconds(),
-            [],
+            // The declared authentication variables, resolved above. Values
+            // reach the child here and nowhere else (section E, item 8).
+            $environment->forProcess(),
             $invocation->input(),
             // The terminal and the attempt's log. Not closed here: the
             // verification commands of section G write into the same log after
@@ -373,6 +388,75 @@ abstract class ProcessAdapter implements ExecutionAdapter
         }
 
         return FailureEvidence::of($label, 'The agent printed nothing.');
+    }
+
+    /**
+     * The authentication this agent is started with.
+     *
+     * PROJECT.md section E, item 8's environment-based authentication, resolved
+     * here rather than in each adapter because an agent's credentials have
+     * nothing to do with which flags its CLI takes, and because there must be
+     * exactly one place in this package that holds a credential value.
+     * {@see AgentEnvironment} is that place; what comes back here is names.
+     *
+     * **A declared variable that is not set refuses the attempt.** Preflight
+     * reports the same condition as a failed check before a run starts
+     * ({@see \Celyes\RalphPhp\Preflight\Check\AgentCheck}), and this is the
+     * same question asked at the moment it matters — a run may reach an adapter
+     * without preflight having been asked, and an agent started without its key
+     * spends the attempt's whole budget to fail with "invalid API key" in prose
+     * that only {@see self::reported()} would then have to interpret. Thrown
+     * rather than returned, like a missing executable: it is a setup problem a
+     * retry would hit identically, and no other agent is tried in its place.
+     *
+     * **The message names variables, never values.** A hint telling the user to
+     * export `ANTHROPIC_API_KEY` is actionable; one echoing what the variable
+     * currently holds is a credential in a terminal, a log file and whatever
+     * issue tracker the output is pasted into.
+     *
+     * @throws ProcessException when a declared variable is unset or empty
+     */
+    private function authenticate(ExecutionRequest $request): AgentEnvironment
+    {
+        $agent = $request->agent();
+        $environment = AgentEnvironment::of($agent->definition());
+
+        if (!$environment->isComplete()) {
+            $missing = $environment->missing();
+
+            throw new ProcessException(
+                sprintf(
+                    'The agent "%s" declares %s for authentication, which %s not set.',
+                    $agent->name(),
+                    implode(', ', $missing),
+                    count($missing) === 1 ? 'is' : 'are',
+                ),
+                [
+                    sprintf(
+                        'Export %s before running ralph. Ralph PHP reads %s from the environment when it '
+                            . 'starts the agent, so no credential is written into the configuration or the '
+                            . 'state store.',
+                        count($missing) === 1 ? 'it' : 'them',
+                        count($missing) === 1 ? 'it' : 'them',
+                    ),
+                    sprintf(
+                        'A variable exported as the empty string counts as not set; "agents.%s.environment" '
+                            . 'lists the names this agent needs.',
+                        $agent->name(),
+                    ),
+                    'Ralph PHP does not run a different agent in its place.',
+                ],
+            );
+        }
+
+        // Only when the agent authenticates this way, so that the common case —
+        // both built-in CLIs can be logged in interactively — adds no noise to
+        // every attempt's log.
+        if ($environment->isDeclared()) {
+            $request->output()->note(sprintf('%s %s', $agent->name(), $environment->describe()));
+        }
+
+        return $environment;
     }
 
     /**
