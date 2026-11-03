@@ -45,12 +45,12 @@ use Celyes\RalphPhp\Support\Suggestions;
  * Codex did work Codex never did. Section E, item 9's rule that no agent is
  * silently substituted for another is the same rule read from the other end.
  *
- * A default registry holds the adapters that exist: Codex (section E, item 6)
- * and, once item 7 lands, Claude Code. A registry's answers are its
- * registrations and it does not claim an implementation exists before one does,
- * so {@see BuiltInAdapters} remains the declared name list agent selection uses
- * — selection accepts a configured `claude` agent, and {@see self::create()} is
- * where an adapter that is declared but not yet registered is reported.
+ * A default registry holds the adapters the package ships: Codex (section E,
+ * item 6) and Claude Code (item 7). A registry's answers are its registrations
+ * and nothing else — it does not claim an implementation exists before one
+ * does — so {@see self::create()} stays the place where a name that is declared
+ * but registered nowhere is reported, which is what a project's own adapter
+ * reaches when its `.ralph/adapters.php` was never read.
  */
 final class AdapterRegistry implements AdapterCatalog
 {
@@ -106,9 +106,11 @@ final class AdapterRegistry implements AdapterCatalog
 
         // Before the already-registered check below, so that a name the
         // package ships is refused as reserved whether or not its provider has
-        // been added yet. The alternative is a message that changes as the
-        // built-in adapters land — "already registered" for Codex and
-        // "reserved" for Claude Code — for two attempts at the same mistake.
+        // been added yet. The alternative is a message that depends on how far
+        // the package has got through section E — "already registered" for an
+        // adapter that has landed, "reserved" for one only declared — for two
+        // attempts at the same mistake, and only the reserved message explains
+        // the attribution problem that is the actual reason for the refusal.
         if ((new BuiltInAdapters())->has($name)) {
             throw new ConfigurationException(
                 sprintf('The adapter name "%s" is reserved for the adapter Ralph PHP ships.', $name),

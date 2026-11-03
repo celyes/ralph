@@ -11,11 +11,12 @@ namespace Celyes\RalphPhp\Agent;
  * user-chosen labels and several may share one adapter (two Codex entries on
  * different models, say), while these names identify the invocation code.
  *
- * The implementations themselves arrive with PROJECT.md section E, items 6 and
- * 7, as the providers {@see self::providers()} returns. Listing the names here
- * now is what lets agent selection reject an unsupported adapter before a run
- * starts instead of failing at execution time, and holding both the names and
- * the providers in one class is what keeps the two from drifting apart.
+ * The implementations are the providers {@see self::providers()} returns —
+ * PROJECT.md section E, items 6 and 7. Holding the names and the providers in
+ * one class is what keeps the two from drifting apart: agent selection rejects
+ * an unsupported adapter from this list before a run starts rather than failing
+ * at execution time, and a name that named nothing buildable would be a run
+ * accepted and then abandoned.
  */
 final class BuiltInAdapters implements AdapterCatalog
 {
@@ -52,17 +53,16 @@ final class BuiltInAdapters implements AdapterCatalog
      * PROJECT.md section E, item 3 the real one rather than a second-class
      * route around the built-ins.
      *
-     * Codex is here (item 6); Claude Code arrives with item 7. A registry does
-     * not claim an implementation exists before one does, so until then a
-     * default registry provides the Codex adapter alone, while both names
-     * above stay declared and agent selection keeps accepting `claude` as a
-     * configured adapter it will be able to build. A test holds every provider
-     * listed here to one of those names.
+     * Both shipped adapters are here: Codex (item 6) and Claude Code (item 7),
+     * in the order the names above declare them, which is the order a default
+     * registry reports and `status` shows. A test holds every provider listed
+     * here to one of those declared names, so a third implementation cannot
+     * arrive under a name selection does not know about.
      *
      * @return list<AdapterProvider>
      */
     public static function providers(): array
     {
-        return [new CodexAdapterProvider()];
+        return [new CodexAdapterProvider(), new ClaudeAdapterProvider()];
     }
 }
