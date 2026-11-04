@@ -177,7 +177,11 @@ abstract class ProcessAdapter implements ExecutionAdapter
      * Both built-in adapters answer onto the same few cases so that
      * verification and Git behaviour stay agent-independent (section E, item
      * 10), and an adapter that cannot read its agent's output says so with
-     * {@see ExecutionResult::error()} instead of claiming a candidate.
+     * {@see ExecutionResult::error()} instead of claiming a candidate. That the
+     * shipped adapters agree is not left to inspection: one scripted agent
+     * session is read by every adapter the package ships and the results are
+     * compared field by field, which is what a third built-in adapter would be
+     * held to as well.
      *
      * {@see self::reported()} is the common reading of the result block the
      * briefing asks for, and is what an adapter returns when its CLI reports
