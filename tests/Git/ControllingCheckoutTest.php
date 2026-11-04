@@ -596,6 +596,32 @@ final class ControllingCheckoutTest extends TestCase
         Git::commit($this->project->root(), 'Initial commit');
     }
 
+    #[Test]
+    public function a_command_that_writes_a_tree_may_be_given_longer_than_a_question(): void
+    {
+        $this->givenACommittedProject();
+
+        // Checking a worktree out copies a whole tree, which can outlast a
+        // limit chosen for a rev-parse.
+        $result = $this->repository()->runWithin(120, 'rev-parse', 'HEAD');
+
+        self::assertTrue($result->succeeded());
+        self::assertSame(40, strlen($result->trimmedOutput()));
+    }
+
+    #[Test]
+    public function a_timeout_that_is_not_a_limit_is_refused(): void
+    {
+        $this->givenACommittedProject();
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('positive timeout');
+
+        // Zero means "no limit" to one process runner and "already expired" to
+        // another, and neither is what a caller asking for longer meant.
+        $this->repository()->runWithin(0, 'rev-parse', 'HEAD');
+    }
+
     /**
      * @param array<string, mixed> $settings
      */

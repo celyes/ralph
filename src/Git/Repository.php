@@ -124,6 +124,31 @@ final class Repository
     }
 
     /**
+     * Run a Git command that may legitimately take longer than
+     * {@see self::TIMEOUT_SECONDS}.
+     *
+     * Checking out a worktree copies a whole tree, and pushing talks to a
+     * remote; both can exceed a limit chosen for a `rev-parse`. The timeout is
+     * passed rather than widened for everything, so that a `status` on an
+     * unresponsive mount still fails in twenty seconds.
+     *
+     * @throws InvalidArgumentException when the timeout is not positive, which
+     *                                 would mean either no limit or an expired
+     *                                 one depending on the runner
+     */
+    public function runWithin(int $seconds, string ...$arguments): ProcessResult
+    {
+        if ($seconds <= 0) {
+            throw new InvalidArgumentException(sprintf(
+                'A Git command needs a positive timeout; %d is not one.',
+                $seconds,
+            ));
+        }
+
+        return $this->execute(self::listOf($arguments), $seconds);
+    }
+
+    /**
      * Ask the repository a question without disturbing it.
      *
      * Identical to {@see self::run()} except for {@see self::NO_OPTIONAL_LOCKS},

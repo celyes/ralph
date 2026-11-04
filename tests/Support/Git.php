@@ -60,6 +60,13 @@ final class Git
         $arguments[] = '.';
 
         self::run($directory, ...$arguments);
+
+        // A developer with core.autocrlf set — the default on Windows and
+        // common in WSL — would otherwise get CRLF whenever Git checks a file
+        // out, which is exactly what creating a task worktree does. Pinning it
+        // per repository keeps "the worktree holds the base commit's files"
+        // from being a claim about the machine.
+        self::run($directory, 'config', 'core.autocrlf', 'false');
     }
 
     /**
