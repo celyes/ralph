@@ -18,10 +18,12 @@ use Celyes\RalphPhp\Process\ProcessResult;
  * {@see ProcessAdapter} — the working directory the process got, the timeout it
  * was held to, the arguments it was started with.
  *
- * Not the deterministic fixture worker of PROJECT.md section E, item 12. That
- * one is a *program* the tests run, with modes for success, failure, blocking,
- * slow execution and interruption, and it is built once there is a real adapter
- * to point it at. This is a subclass, in a test.
+ * Not the deterministic fixture worker of PROJECT.md section E, item 12 —
+ * that one is {@see \Celyes\RalphPhp\Tests\Fixture\FixtureWorker}, a
+ * *program* the tests run, with modes for success, failure, blocking, slow
+ * execution and interruption. This is a subclass, in a test: a test about a
+ * command line asks this one what was run, and a test about the loop asks the
+ * worker what was done to it.
  */
 final class ScriptedProcessAdapter extends ProcessAdapter
 {
