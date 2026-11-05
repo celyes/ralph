@@ -45,6 +45,23 @@ final class WorkingTreeStatus
     public const array COMMAND = ['status', '--porcelain=v1', '-z', '--untracked-files=normal'];
 
     /**
+     * The same reading, with every untracked file named individually.
+     *
+     * {@see self::COMMAND} accepts Git's summary of a wholly untracked
+     * directory as a single entry, because the question it answers is whether
+     * something of the user's is in the way and a user knows what is in their
+     * own directory. Staging asks a different question — which paths go into
+     * this commit — and the summary cannot answer it: a directory reported as
+     * `config/` may hold both the file the agent wrote and a copied `.env`,
+     * and staging the entry whole would commit the credential along with the
+     * work. So a workspace is read file by file, where every exclusion is a
+     * path that can actually be excluded.
+     *
+     * @var list<string>
+     */
+    public const array COMMAND_ALL_UNTRACKED = ['status', '--porcelain=v1', '-z', '--untracked-files=all'];
+
+    /**
      * Characters whose presence on either side means a second path follows.
      *
      * @var list<string>

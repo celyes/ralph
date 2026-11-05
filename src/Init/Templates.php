@@ -137,6 +137,14 @@ final class Templates
         `workspace.copy` lists the files taken from your own checkout, such as a local
         `.env`. Mention here anything a person would still have to do by hand.
 
+        A `workspace.copy` file is also kept out of the task's commit, because the
+        setting's own definition is a file that exists on this machine and in no commit:
+        list a credential there and it reaches the agent without reaching the branch.
+        {$name}'s own files are excluded from a commit too, as is anything your
+        `.gitignore` covers — so a build directory that is *not* ignored will be
+        committed, and the staged file list printed before each commit is where to
+        notice it.
+
         ## Conventions
 
         Code style, directory layout, naming, how errors are handled, how tests are
