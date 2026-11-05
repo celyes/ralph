@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Git;
 
+use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Process\ProcessResult;
 use Celyes\RalphPhp\Process\ProcessRunner;
 use InvalidArgumentException;
@@ -149,6 +150,52 @@ final class Repository
     }
 
     /**
+     * Run a Git command that talks to a remote.
+     *
+     * Separate from {@see self::runWithin()} because of what a network command
+     * does when nobody is watching it. Git asks for a credential by prompting,
+     * and there is no terminal here to answer on, so a push to a remote whose
+     * password is not cached would sit on an unanswerable question for the
+     * whole timeout and report nothing useful afterwards. Two variables turn
+     * that into an immediate, explainable failure:
+     *
+     *  - `GIT_TERMINAL_PROMPT=0` makes Git refuse to prompt at all, with a
+     *    message that says so.
+     *  - `GIT_ASKPASS` is set to the empty string, which Git reads as "no
+     *    helper" while still taking precedence over a `core.askPass` the
+     *    repository may configure. Without it a run on a desktop could open a
+     *    graphical password dialog nobody is sitting in front of.
+     *
+     * What this cannot cover is `ssh` asking for a key passphrase: `ssh` reads
+     * from `/dev/tty` rather than from standard input, so it is not stopped by
+     * either variable, and the timeout is what bounds it. A run that pushes
+     * over SSH needs an agent, or a key with no passphrase.
+     *
+     * The sink is optional and is the reason this takes one at all: a push is
+     * the one Git command in this package that can legitimately run for
+     * minutes, and its progress is worth showing as it happens rather than
+     * after.
+     *
+     * @throws InvalidArgumentException when the timeout is not positive
+     */
+    public function runRemote(int $seconds, ?OutputSink $sink, string ...$arguments): ProcessResult
+    {
+        if ($seconds <= 0) {
+            throw new InvalidArgumentException(sprintf(
+                'A Git command needs a positive timeout; %d is not one.',
+                $seconds,
+            ));
+        }
+
+        return $this->execute(
+            self::listOf($arguments),
+            $seconds,
+            ['GIT_TERMINAL_PROMPT' => '0', 'GIT_ASKPASS' => ''],
+            $sink,
+        );
+    }
+
+    /**
      * Ask the repository a question without disturbing it.
      *
      * Identical to {@see self::run()} except for {@see self::NO_OPTIONAL_LOCKS},
@@ -166,14 +213,22 @@ final class Repository
 
     /**
      * @param list<string> $arguments
+     * @param array<string, string|false> $environment variables added to, or
+     *        with `false` removed from, the two this always removes
      */
-    private function execute(array $arguments, int $timeout): ProcessResult
-    {
+    private function execute(
+        array $arguments,
+        int $timeout,
+        array $environment = [],
+        ?OutputSink $sink = null,
+    ): ProcessResult {
         return $this->processes->run(
             [$this->executable, ...$arguments],
             $this->workingTree,
             $timeout,
-            ['GIT_DIR' => false, 'GIT_WORK_TREE' => false],
+            ['GIT_DIR' => false, 'GIT_WORK_TREE' => false, ...$environment],
+            null,
+            $sink,
         );
     }
 
