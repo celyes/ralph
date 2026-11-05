@@ -31,6 +31,7 @@ final class Configuration
         private readonly string $defaultAgent,
         private readonly array $agents,
         private readonly array $checks,
+        private readonly WorkspaceSettings $workspace,
         private readonly GitSettings $git,
         private readonly Limits $limits,
     ) {
@@ -130,6 +131,15 @@ final class Configuration
         return $this->checks;
     }
 
+    /**
+     * What a newly created task worktree needs before the project can be
+     * built, tested or worked on in it.
+     */
+    public function workspace(): WorkspaceSettings
+    {
+        return $this->workspace;
+    }
+
     public function git(): GitSettings
     {
         return $this->git;
@@ -164,6 +174,7 @@ final class Configuration
                 static fn (VerificationCommand $check): array => $check->toArray(),
                 $this->checks,
             ),
+            'workspace' => $this->workspace->toArray(),
             'git' => $this->git->toArray(),
             'limits' => $this->limits->toArray(),
         ];

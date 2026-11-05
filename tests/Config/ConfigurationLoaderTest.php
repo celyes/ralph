@@ -73,6 +73,13 @@ final class ConfigurationLoaderTest extends TestCase
 
         self::assertCount(1, $config->checks());
         self::assertSame(['composer', 'test'], $config->checks()[0]->command());
+
+        $workspace = $config->workspace();
+        self::assertCount(1, $workspace->prepare());
+        self::assertSame(['composer', 'install', '--no-interaction'], $workspace->prepare()[0]->command());
+        self::assertSame(Defaults::PREPARE_TIMEOUT_SECONDS, $workspace->prepare()[0]->timeout());
+        self::assertSame([], $workspace->copy());
+        self::assertFalse($workspace->isEmpty());
     }
 
     #[Test]
@@ -94,6 +101,13 @@ final class ConfigurationLoaderTest extends TestCase
             'checks' => [
                 ['name' => 'unit', 'command' => ['vendor/bin/phpunit', '--testsuite', 'unit'], 'timeout' => 120],
                 ['command' => 'phpstan'],
+            ],
+            'workspace' => [
+                'prepare' => [
+                    ['name' => 'dependencies', 'command' => ['composer', 'install'], 'timeout' => 300],
+                    ['command' => 'npm'],
+                ],
+                'copy' => ['phpunit.xml', 'config/local.php'],
             ],
             'git' => [
                 'base' => 'origin/main',
@@ -142,6 +156,19 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(['phpstan'], $config->checks()[1]->command());
         self::assertSame('phpstan', $config->checks()[1]->name());
         self::assertSame(Defaults::CHECK_TIMEOUT_SECONDS, $config->checks()[1]->timeout());
+
+        $workspace = $config->workspace();
+        self::assertCount(2, $workspace->prepare());
+        self::assertSame('dependencies', $workspace->prepare()[0]->name());
+        self::assertSame(['composer', 'install'], $workspace->prepare()[0]->command());
+        self::assertSame(300, $workspace->prepare()[0]->timeout());
+
+        // A preparation command takes the same shorthand a check does.
+        self::assertSame(['npm'], $workspace->prepare()[1]->command());
+        self::assertSame('npm', $workspace->prepare()[1]->name());
+        self::assertSame(Defaults::PREPARE_TIMEOUT_SECONDS, $workspace->prepare()[1]->timeout());
+
+        self::assertSame(['phpunit.xml', 'config/local.php'], $workspace->copy());
     }
 
     #[Test]
@@ -216,6 +243,43 @@ final class ConfigurationLoaderTest extends TestCase
 
         self::assertCount(1, $config->checks());
         self::assertSame('make ci', $config->checks()[0]->describe());
+    }
+
+    #[Test]
+    public function configured_preparation_commands_replace_the_defaults_rather_than_adding_to_them(): void
+    {
+        $this->project->writeConfigArray(['workspace' => ['prepare' => [['command' => ['make', 'setup']]]]]);
+
+        $config = (new ConfigurationLoader())->load($this->project->root());
+
+        self::assertCount(1, $config->workspace()->prepare());
+        self::assertSame('make setup', $config->workspace()->prepare()[0]->describe());
+    }
+
+    #[Test]
+    public function an_empty_prepare_list_is_how_a_project_says_a_plain_checkout_is_usable(): void
+    {
+        // Distinct from omitting the setting, which gets the default install.
+        $this->project->writeConfigArray(['workspace' => ['prepare' => []]]);
+
+        $config = (new ConfigurationLoader())->load($this->project->root());
+
+        self::assertSame([], $config->workspace()->prepare());
+        self::assertTrue($config->workspace()->isEmpty());
+    }
+
+    #[Test]
+    public function an_unknown_workspace_setting_is_reported_with_its_section(): void
+    {
+        $this->project->writeConfigArray(['workspace' => ['copies' => ['.env']]]);
+
+        $exception = $this->loadFailure();
+
+        self::assertStringContainsString('unknown setting "workspace.copies"', $exception->getMessage());
+        self::assertStringContainsString(
+            'Settings recognised in "workspace": prepare, copy.',
+            implode("\n", $exception->hints()),
+        );
     }
 
     #[Test]

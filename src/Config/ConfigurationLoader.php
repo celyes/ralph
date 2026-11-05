@@ -34,7 +34,16 @@ final class ConfigurationLoader
      *
      * @var list<string>
      */
-    private const array KNOWN_KEYS = ['tasks', 'context', 'agent', 'agents', 'checks', 'git', 'limits'];
+    private const array KNOWN_KEYS = [
+        'tasks',
+        'context',
+        'agent',
+        'agents',
+        'checks',
+        'workspace',
+        'git',
+        'limits',
+    ];
 
     /**
      * Path of the configuration file for a project.
@@ -134,6 +143,7 @@ final class ConfigurationLoader
             $raw->string('agent', Defaults::AGENT),
             $this->agents($raw),
             $this->checks($raw),
+            WorkspaceSettings::fromRaw($raw->section('workspace')),
             GitSettings::fromRaw($raw->section('git')),
             Limits::fromRaw($raw->section('limits')),
         ));

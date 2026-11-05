@@ -51,7 +51,9 @@ final class PreflightCommandTest extends TestCase
         self::assertStringContainsString('Preflight checks for ' . $this->project->root(), $result->standardOutput);
         self::assertStringContainsString('agent          codex (adapter "codex"', $result->standardOutput);
 
-        foreach (['php', 'extensions', 'git', 'repository', 'base', 'identity', 'agent', 'agent-version', 'checks'] as $check) {
+        $expected = ['php', 'extensions', 'git', 'repository', 'base', 'identity', 'agent', 'agent-version', 'workspace', 'checks'];
+
+        foreach ($expected as $check) {
             self::assertMatchesRegularExpression(
                 '/^  pass  ' . $check . ' /m',
                 $result->standardOutput,
@@ -187,6 +189,11 @@ final class PreflightCommandTest extends TestCase
                 'claude' => ['executable' => 'ralph-no-such-agent'],
             ],
             'checks' => [['name' => 'tests', 'command' => [PHP_BINARY, '-v']]],
+            // A preparation command this machine certainly has, for the same
+            // reason the check is PHP's own binary: the default "composer
+            // install" would report a project with no composer.json, and this
+            // project is meant to be entirely ready.
+            'workspace' => ['prepare' => [['name' => 'dependencies', 'command' => [PHP_BINARY, '-v']]]],
         ]);
     }
 }

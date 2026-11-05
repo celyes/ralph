@@ -19,6 +19,7 @@ use Celyes\RalphPhp\Preflight\Check\IdentityCheck;
 use Celyes\RalphPhp\Preflight\Check\PhpCheck;
 use Celyes\RalphPhp\Preflight\Check\RepositoryCheck;
 use Celyes\RalphPhp\Preflight\Check\VerificationCheck;
+use Celyes\RalphPhp\Preflight\Check\WorkspaceCheck;
 use Celyes\RalphPhp\Process\ExecutableFinder;
 use Celyes\RalphPhp\Process\ProcessRunner;
 
@@ -165,6 +166,7 @@ final class Preflight
             new IdentityCheck($git),
             new AgentCheck($executables),
             new AgentVersionCheck(),
+            new WorkspaceCheck($executables),
             new VerificationCheck($executables),
         ];
     }

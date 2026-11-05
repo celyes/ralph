@@ -56,6 +56,116 @@ final class ConfigurationValidatorTest extends TestCase
 
         self::assertSame($defaults->toArray(), $written->toArray());
         self::assertNotSame([], $defaults->checks());
+        self::assertNotSame([], $defaults->workspace()->prepare());
+    }
+
+    #[Test]
+    public function a_preparation_command_must_not_be_empty(): void
+    {
+        $exception = $this->failure(['workspace' => ['prepare' => [['command' => []]]]]);
+
+        self::assertStringContainsString('"workspace.prepare.0.command" must not be empty.', $exception->getMessage());
+        self::assertStringContainsString('["composer", "install"]', implode("\n", $exception->hints()));
+    }
+
+    #[Test]
+    public function a_preparation_command_must_allow_at_least_a_second_to_run(): void
+    {
+        $exception = $this->failure([
+            'workspace' => ['prepare' => [['command' => ['composer', 'install'], 'timeout' => 0]]],
+        ]);
+
+        self::assertStringContainsString('"workspace.prepare.0.timeout" must be at least 1 second', $exception->getMessage());
+    }
+
+    #[Test]
+    public function two_preparation_commands_must_not_share_a_name(): void
+    {
+        $exception = $this->failure([
+            'workspace' => [
+                'prepare' => [
+                    ['name' => 'setup', 'command' => ['composer', 'install']],
+                    ['name' => 'setup', 'command' => ['npm', 'ci']],
+                ],
+            ],
+        ]);
+
+        self::assertStringContainsString(
+            '"workspace.prepare.1.name" repeats the name "setup", already used by workspace.prepare.0.',
+            $exception->getMessage(),
+        );
+    }
+
+    #[Test]
+    public function a_preparation_name_must_not_contain_a_path_separator(): void
+    {
+        $exception = $this->failure([
+            'workspace' => ['prepare' => [['name' => 'deps/install', 'command' => ['composer', 'install']]]],
+        ]);
+
+        self::assertStringContainsString('"workspace.prepare.0.name" must not contain a path separator', $exception->getMessage());
+    }
+
+    #[Test]
+    public function a_copied_file_must_be_relative_to_the_project_root(): void
+    {
+        // The setting names one path in two checkouts, so an absolute path has
+        // no meaning in the second.
+        $exception = $this->failure(['workspace' => ['copy' => ['/etc/passwd']]]);
+
+        self::assertStringContainsString('"workspace.copy.0" must be relative to the project root', $exception->getMessage());
+    }
+
+    #[Test]
+    public function a_copied_file_must_be_inside_the_project(): void
+    {
+        $exception = $this->failure(['workspace' => ['copy' => ['../secrets.env']]]);
+
+        self::assertStringContainsString('"workspace.copy.0" must name a file inside the project', $exception->getMessage());
+        self::assertStringContainsString('resolves to ' . dirname($this->project->root()), $exception->getMessage());
+    }
+
+    #[Test]
+    public function a_copied_file_must_not_be_the_project_directory_itself(): void
+    {
+        $exception = $this->failure(['workspace' => ['copy' => ['.']]]);
+
+        self::assertStringContainsString('"workspace.copy.0" must name a file inside the project', $exception->getMessage());
+    }
+
+    #[Test]
+    public function a_copied_file_must_not_come_from_the_runtime_directory(): void
+    {
+        $exception = $this->failure(['workspace' => ['copy' => [Defaults::RUNTIME_DIRECTORY . '/state.sqlite']]]);
+
+        self::assertStringContainsString(
+            '"workspace.copy.0" must not be inside the runtime directory',
+            $exception->getMessage(),
+        );
+    }
+
+    #[Test]
+    public function a_copied_file_must_not_come_from_the_git_directory(): void
+    {
+        // A task workspace is a linked worktree: its .git is a file Git
+        // maintains, and writing over it would break the link.
+        $exception = $this->failure(['workspace' => ['copy' => ['.git/config']]]);
+
+        self::assertStringContainsString(
+            '"workspace.copy.0" must not be inside the repository\'s own .git directory',
+            $exception->getMessage(),
+        );
+    }
+
+    #[Test]
+    public function the_same_copied_file_must_not_be_listed_twice(): void
+    {
+        $exception = $this->failure(['workspace' => ['copy' => ['.env', './.env']]]);
+
+        self::assertStringContainsString(
+            '"workspace.copy.1" repeats the file already listed by workspace.copy.0.',
+            $exception->getMessage(),
+        );
     }
 
     /**

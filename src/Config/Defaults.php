@@ -131,6 +131,16 @@ final class Defaults
     public const int CHECK_TIMEOUT_SECONDS = 600;
 
     /**
+     * Seconds a single workspace preparation command may run.
+     *
+     * Longer than a verification command, and for a different kind of work: an
+     * install in a new worktree has a cold Composer cache and goes to the
+     * network, where a check is the project's own suite on dependencies that
+     * are already there.
+     */
+    public const int PREPARE_TIMEOUT_SECONDS = 900;
+
+    /**
      * Built-in agent definitions.
      *
      * Both ship with the adapter and executable named after the agent and no
@@ -182,6 +192,43 @@ final class Defaults
     }
 
     /**
+     * Commands assumed to prepare a new task worktree.
+     *
+     * `composer install` for the same reason `composer test` is the default
+     * check: it is what a PHP package needs, and a linked worktree never has a
+     * `vendor/` of its own. `--no-interaction` because nothing the package runs
+     * has a terminal to answer a prompt on. Preflight reports a project with no
+     * `composer.json`, which is a clearer failure than a first task whose
+     * workspace silently cannot run its tests.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function prepare(): array
+    {
+        return [
+            [
+                'name' => 'dependencies',
+                'command' => ['composer', 'install', '--no-interaction'],
+                'timeout' => self::PREPARE_TIMEOUT_SECONDS,
+            ],
+        ];
+    }
+
+    /**
+     * Files copied into a new task worktree from the controlling checkout.
+     *
+     * Empty: a copied file is one that exists on this machine and in no commit,
+     * so only the project knows whether it has any, and guessing at `.env`
+     * would make a run depend on a file the package invented a need for.
+     *
+     * @return list<string>
+     */
+    public static function copies(): array
+    {
+        return [];
+    }
+
+    /**
      * The complete default configuration, in the file's own layout.
      *
      * @return array<string, mixed>
@@ -194,6 +241,10 @@ final class Defaults
             'agent' => self::AGENT,
             'agents' => self::agents(),
             'checks' => self::checks(),
+            'workspace' => [
+                'prepare' => self::prepare(),
+                'copy' => self::copies(),
+            ],
             'git' => [
                 'base' => self::BASE_REFERENCE,
                 'branch_prefix' => self::BRANCH_PREFIX,

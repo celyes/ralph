@@ -19,6 +19,7 @@ use Celyes\RalphPhp\Preflight\Check\IdentityCheck;
 use Celyes\RalphPhp\Preflight\Check\PhpCheck;
 use Celyes\RalphPhp\Preflight\Check\RepositoryCheck;
 use Celyes\RalphPhp\Preflight\Check\VerificationCheck;
+use Celyes\RalphPhp\Preflight\Check\WorkspaceCheck;
 use Celyes\RalphPhp\Preflight\CheckId;
 use Celyes\RalphPhp\Preflight\CheckOutcome;
 use Celyes\RalphPhp\Preflight\CheckResult;
@@ -55,6 +56,7 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(AgentCheck::class)]
 #[CoversClass(AgentVersionCheck::class)]
 #[CoversClass(VerificationCheck::class)]
+#[CoversClass(WorkspaceCheck::class)]
 final class PreflightTest extends TestCase
 {
     /**
@@ -794,6 +796,133 @@ final class PreflightTest extends TestCase
         self::assertFileDoesNotExist($marker, 'preflight executed a verification command');
     }
 
+    #[Test]
+    public function a_preparation_command_whose_program_is_missing_fails(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $report = $this->report(['workspace' => ['prepare' => [
+            ['name' => 'dependencies', 'command' => [$this->writeProgram('tools/install'), '--frozen']],
+            ['name' => 'assets', 'command' => ['ralph-no-such-bundler', 'build']],
+        ]]]);
+
+        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Workspace));
+        self::assertStringContainsString(
+            '1 of the "workspace" setting cannot be used: assets',
+            $this->summary($report, CheckId::Workspace),
+        );
+
+        $details = implode("\n", $this->details($report, CheckId::Workspace));
+        self::assertStringContainsString('assets: "ralph-no-such-bundler build" cannot run', $details);
+        self::assertStringContainsString('dependencies: "' . $this->project->path('tools/install'), $details);
+        self::assertStringContainsString(
+            'Install "ralph-no-such-bundler"',
+            implode("\n", $this->hints($report, CheckId::Workspace)),
+        );
+    }
+
+    #[Test]
+    public function the_default_installation_is_measured_against_the_project_s_composer_json(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $settings = ['workspace' => ['prepare' => [[
+            'name' => 'dependencies',
+            'command' => [$this->writeProgram('tools/composer'), 'install', '--no-interaction'],
+        ]]]];
+
+        // A project with no composer.json: the install would resolve here and
+        // then fail in every task workspace it was sent to.
+        $report = $this->report($settings);
+        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Workspace));
+        self::assertStringContainsString(
+            'there is no composer.json',
+            implode("\n", $this->details($report, CheckId::Workspace)),
+        );
+        self::assertStringContainsString(
+            'never has a "vendor" of its own',
+            implode("\n", $this->hints($report, CheckId::Workspace)),
+        );
+
+        $this->project->write(
+            'composer.json',
+            (string) json_encode(['name' => 'acme/project'], JSON_THROW_ON_ERROR),
+        );
+
+        // "install" is Composer's own command rather than a script, so having
+        // the file is the whole of what can be established without running it.
+        $report = $this->report($settings);
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Workspace));
+        self::assertStringContainsString(
+            '1 preparation command can run',
+            $this->summary($report, CheckId::Workspace),
+        );
+    }
+
+    #[Test]
+    public function a_file_a_workspace_would_be_given_is_reported_when_it_is_not_here_to_give(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $this->project->write('.env', "APP_ENV=local\n");
+        $this->project->write('config/local.php', "<?php return [];\n");
+        symlink($this->project->path('.env'), $this->project->path('.env.local'));
+
+        $report = $this->report(['workspace' => [
+            'prepare' => [],
+            'copy' => ['.env', 'auth.json', 'config', '.env.local'],
+        ]]);
+
+        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Workspace));
+        self::assertStringContainsString(
+            '3 of the "workspace" settings cannot be used: auth.json, config, .env.local',
+            $this->summary($report, CheckId::Workspace),
+        );
+
+        $details = implode("\n", $this->details($report, CheckId::Workspace));
+        self::assertStringContainsString('copies .env', $details);
+        self::assertStringContainsString('there is no auth.json in ' . $this->project->root(), $details);
+        self::assertStringContainsString($this->project->path('config') . ' is a directory', $details);
+        self::assertStringContainsString($this->project->path('.env.local') . ' is a symbolic link', $details);
+    }
+
+    #[Test]
+    public function a_project_whose_checkout_is_already_usable_has_nothing_to_prepare(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        $report = $this->report(['workspace' => ['prepare' => [], 'copy' => []]]);
+
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Workspace));
+        self::assertSame(
+            'task workspaces need no preparation',
+            $this->summary($report, CheckId::Workspace),
+        );
+    }
+
+    #[Test]
+    public function the_preparation_commands_are_resolved_and_not_run(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        // Running an install here would be minutes of network work in the one
+        // directory preparation must never write to: the user's own checkout.
+        $marker = $this->project->path('the-preparation-ran');
+        $program = $this->writeProgram('tools/prepare', "#!/bin/sh\ntouch '" . $marker . "'\n");
+
+        $report = $this->report(['workspace' => [
+            'prepare' => [['name' => 'dependencies', 'command' => [$program]]],
+        ]]);
+
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Workspace));
+        self::assertFileDoesNotExist($marker, 'preflight executed a workspace preparation command');
+    }
+
     /**
      * A repository at the project root, with the identity configured unless the
      * test is about its absence.
@@ -845,9 +974,11 @@ final class PreflightTest extends TestCase
     }
 
     /**
-     * The settings a test gave, with an installed agent and a runnable check
-     * filled in: a test about the base reference should not have to configure
-     * either, and must not fail because this machine has no Codex.
+     * The settings a test gave, with an installed agent, a runnable check and a
+     * runnable workspace preparation filled in: a test about the base reference
+     * should not have to configure any of them, and must not fail because this
+     * machine has no Codex — or, for the two that default to Composer, because
+     * a temporary directory has no composer.json.
      *
      * @param array<string, mixed> $settings
      */
@@ -855,6 +986,7 @@ final class PreflightTest extends TestCase
     {
         $settings['agents'] ??= ['codex' => ['executable' => $this->agentProgram()]];
         $settings['checks'] ??= [['name' => 'tests', 'command' => [PHP_BINARY, '-v']]];
+        $settings['workspace'] ??= ['prepare' => [['name' => 'dependencies', 'command' => [PHP_BINARY, '-v']]]];
 
         return (new ConfigurationLoader())->fromArray(
             $settings,

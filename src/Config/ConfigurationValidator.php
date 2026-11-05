@@ -66,6 +66,7 @@ final class ConfigurationValidator
         $this->validatePaths($source, $configuration);
         $this->validateAgents($source, $configuration);
         $this->validateChecks($source, $configuration);
+        $this->validateWorkspace($source, $configuration);
         $this->validateGit($source, $configuration->git());
         $this->validateLimits($source, $configuration->limits());
 
@@ -273,6 +274,139 @@ final class ConfigurationValidator
             if ($check->timeout() < 1) {
                 $this->rejectNonpositive($source, $setting . '.timeout', $check->timeout(), 'seconds');
             }
+        }
+    }
+
+    /**
+     * The `workspace` section: the commands that prepare a new task worktree,
+     * and the files copied into it.
+     *
+     * Unlike `checks`, an empty `prepare` is allowed: a project whose checkout
+     * works as Git leaves it has nothing to prepare, and saying so explicitly
+     * is how it opts out of the default `composer install`.
+     *
+     * A copied path is held to the rule the task checklist is held to — it must
+     * name a file inside the project — and to two more that only apply to a
+     * copy. It must be relative, because the source and the destination are the
+     * *same* path in two checkouts and an absolute path has no meaning in the
+     * second. And it must not be a path the package or Git owns: copying the
+     * runtime directory would carry the state database into a workspace, and
+     * copying out of `.git` would overwrite the administrative file that makes
+     * the workspace a linked worktree at all.
+     */
+    private function validateWorkspace(string $source, Configuration $configuration): void
+    {
+        $workspace = $configuration->workspace();
+        $root = $configuration->projectRoot();
+        $runtime = Path::normalize($root . '/' . Defaults::RUNTIME_DIRECTORY);
+
+        $seen = [];
+
+        foreach ($workspace->prepare() as $index => $command) {
+            $setting = 'workspace.prepare.' . $index;
+
+            if ($command->command() === []) {
+                $this->reject(
+                    $source,
+                    $setting . '.command',
+                    'must not be empty.',
+                    'A command is an executable followed by its arguments, such as ["composer", "install"].',
+                );
+            }
+
+            foreach ($command->command() as $position => $argument) {
+                $this->requireText(
+                    $source,
+                    $setting . '.command.' . $position,
+                    $argument,
+                    $position === 0 ? 'the executable to run' : 'one argument of the command',
+                );
+            }
+
+            $this->requireText($source, $setting . '.name', $command->name(), 'a label for this command');
+
+            if (preg_match('#[/\\\\]#', $command->name()) === 1) {
+                $this->reject(
+                    $source,
+                    $setting . '.name',
+                    sprintf('must not contain a path separator, "%s" given.', $command->name()),
+                    'Preparation names label status output and log files.',
+                );
+            }
+
+            if (isset($seen[$command->name()])) {
+                $this->reject(
+                    $source,
+                    $setting . '.name',
+                    sprintf('repeats the name "%s", already used by %s.', $command->name(), $seen[$command->name()]),
+                    'Preparation names identify a command in status output and in its logs, so they must differ.',
+                );
+            }
+
+            $seen[$command->name()] = 'workspace.prepare.' . $index;
+
+            if ($command->timeout() < 1) {
+                $this->rejectNonpositive($source, $setting . '.timeout', $command->timeout(), 'seconds');
+            }
+        }
+
+        $copied = [];
+
+        foreach ($workspace->copy() as $index => $path) {
+            $setting = 'workspace.copy.' . $index;
+
+            $this->requireText($source, $setting, $path, 'a path to a file inside the project, relative to its root');
+
+            if (Path::isAbsolute($path)) {
+                $this->reject(
+                    $source,
+                    $setting,
+                    sprintf('must be relative to the project root, "%s" given.', $path),
+                    'A copied file is read at that path in your checkout and written at the same path in the '
+                        . 'task workspace, so the setting names one path in two places.',
+                );
+            }
+
+            $resolved = Path::normalize($root . '/' . $path);
+
+            if ($resolved === $root || !Path::isInside($root, $resolved)) {
+                $this->reject(
+                    $source,
+                    $setting,
+                    sprintf('must name a file inside the project: "%s" resolves to %s.', $path, $resolved),
+                    sprintf('The project is %s.', $root),
+                    'Ralph PHP only reads and writes files in the repository it is working on.',
+                );
+            }
+
+            if (Path::isInside($runtime, $resolved)) {
+                $this->reject(
+                    $source,
+                    $setting,
+                    sprintf('must not be inside the runtime directory %s.', Defaults::RUNTIME_DIRECTORY),
+                    'That directory holds the state database, the logs and the task workspaces themselves.',
+                );
+            }
+
+            if (Path::isInside(Path::normalize($root . '/.git'), $resolved)) {
+                $this->reject(
+                    $source,
+                    $setting,
+                    sprintf('must not be inside the repository\'s own .git directory, "%s" given.', $path),
+                    'A task workspace is a linked worktree: its .git is maintained by Git, and writing into '
+                        . 'it would break the link to this repository.',
+                );
+            }
+
+            if (isset($copied[$resolved])) {
+                $this->reject(
+                    $source,
+                    $setting,
+                    sprintf('repeats the file already listed by %s.', $copied[$resolved]),
+                );
+            }
+
+            $copied[$resolved] = $setting;
         }
     }
 

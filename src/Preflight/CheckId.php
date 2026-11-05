@@ -13,8 +13,8 @@ namespace Celyes\RalphPhp\Preflight;
  *
  * The order is the order of dependency: the runtime before the tools, the tools
  * before the repository, the repository before what is read out of it, and the
- * agent and the verification commands last, as the two things a run cannot
- * substitute for.
+ * agent last, with the two things a run cannot substitute for — the workspace a
+ * task is implemented in, and the commands that decide whether it worked.
  */
 enum CheckId: string
 {
@@ -62,6 +62,13 @@ enum CheckId: string
      * was written for.
      */
     case AgentVersion = 'agent-version';
+
+    /**
+     * That a new task worktree could be prepared: the `workspace.prepare`
+     * commands name programs that exist, and the files `workspace.copy` lists
+     * are on this machine to be copied.
+     */
+    case Workspace = 'workspace';
 
     /**
      * That every configured verification command names a program that could

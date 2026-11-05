@@ -130,6 +130,13 @@ final class Templates
         `{$config}`; this section is for what a human or an agent needs to know
         around them.
 
+        Each task is implemented in its own linked worktree, which Git creates with the
+        project's tracked files and nothing else — no `vendor/`, and none of the local
+        files no commit carries. `workspace.prepare` in `{$config}` lists the
+        commands that close that gap, `composer install` by default, and
+        `workspace.copy` lists the files taken from your own checkout, such as a local
+        `.env`. Mention here anything a person would still have to do by hand.
+
         ## Conventions
 
         Code style, directory layout, naming, how errors are handled, how tests are
