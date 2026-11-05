@@ -333,6 +333,7 @@ final class ConfigurationValidatorTest extends TestCase
             'space' => ['ralph branches/', 'must not contain a space or any of ~ ^ : ? * [ \\'],
             'colon' => ['ralph:', 'must not contain a space or any of ~ ^ : ? * [ \\'],
             'double dot' => ['ralph../', 'must not contain ".."'],
+            'reflog entry' => ['ralph@{1}/', 'must not contain "@{"'],
             'leading slash' => ['/ralph/', 'must not contain an empty path segment'],
             'empty segment' => ['ralph//task-', 'must not contain an empty path segment'],
             'leading dash' => ['-ralph/', 'must not start with "-"'],

@@ -280,8 +280,14 @@ final class ConfigurationValidator
      * The base reference, the branch prefix and the push remote.
      *
      * The prefix is checked against the reference-name rules Git applies to the
-     * part of a branch name it will form; whether the whole generated name is
-     * valid is checked when the task ID is appended to it.
+     * part of a branch name it will form. The rules are repeated here rather
+     * than taken from {@see \Celyes\RalphPhp\Git\BranchName}, which judges whole
+     * names: a prefix ends in a separator — `ralph/` is the default — and a
+     * whole name may not, so asking that type about a prefix would reject the
+     * ordinary case. {@see \Celyes\RalphPhp\Git\BranchNamer} checks the complete
+     * name it assembles and reports a failure back against this setting, so a
+     * rule missing here surfaces later with the same remedy rather than as a
+     * Git error.
      */
     private function validateGit(string $source, GitSettings $git): void
     {
@@ -339,6 +345,10 @@ final class ConfigurationValidator
 
         if (str_contains($prefix, '..')) {
             return 'must not contain ".."';
+        }
+
+        if (str_contains($prefix, '@{')) {
+            return 'must not contain "@{"';
         }
 
         if (str_starts_with($prefix, '/') || str_contains($prefix, '//')) {
