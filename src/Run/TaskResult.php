@@ -148,6 +148,31 @@ final class TaskResult
     }
 
     /**
+     * Whether another attempt at this task would have something to act on.
+     *
+     * True for exactly one outcome: a candidate implementation the configured
+     * checks decided against. That is the case PROJECT.md section G, item 4
+     * names, and it is the only one where the runner itself holds evidence of
+     * what is wrong — a failing command, its status and its output — which is
+     * what makes a second attempt a different attempt rather than the same one
+     * again.
+     *
+     * Deliberately false for everything else. An agent that stopped to ask a
+     * question is waiting on a person, and asking it again is not an answer. An
+     * execution error, a refused branch or drift the auditor would not put back
+     * left nothing to act on and will fail the same way. A commit the remote
+     * would not take is already implemented, and repeating the implementation
+     * is the one thing resume must not do (section H, item 7).
+     */
+    public function invitesAnotherAttempt(): bool
+    {
+        return $this->isFailure()
+            && $this->verification !== null
+            && $this->verification->failed()
+            && $this->commitSha() === null;
+    }
+
+    /**
      * The checks as they decided this pass, or null when they never ran.
      */
     public function verification(): ?VerificationReport

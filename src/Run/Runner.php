@@ -61,6 +61,14 @@ use Throwable;
  * independent work. A task that stopped to ask a question is waiting on a
  * person, and handing the next task to the same agent would be answering it by
  * ignoring it.
+ *
+ * **Retrying is the pass's business, not the loop's.** A task whose checks fail
+ * is attempted again inside {@see TaskPass} while its attempt budget holds
+ * (section G, item 4), so a result arriving here has already been tried as often
+ * as the configuration allows. The loop counts one iteration per task however
+ * many attempts that took: the iteration limit bounds how much of the checklist
+ * a run works through, and the attempt limit bounds how long it stays on one
+ * item.
  */
 final class Runner
 {
@@ -183,6 +191,7 @@ final class Runner
             $base,
             $checks,
             $this->terminal,
+            $this->clock,
         );
 
         $limit = $this->configuration->limits()->iterations();

@@ -127,6 +127,28 @@ final class FailureEvidence
     }
 
     /**
+     * This evidence, also answering for observations something else left out.
+     *
+     * Needed where evidence is assembled out of evidence that was already
+     * bounded — {@see EvidenceTrail} reading several attempts' stored
+     * observations — because the count a stored set carries is as much a part
+     * of it as its entries. Without this, a set that honestly said "and four
+     * more" would be folded into one that says nothing of the kind, and the
+     * second bound would hide what the first one disclosed.
+     *
+     * A count of zero or less adds nothing, so a caller folding an unbounded
+     * set does not have to check first.
+     */
+    public function alsoOmitted(int $count): self
+    {
+        if ($count < 1) {
+            return $this;
+        }
+
+        return new self($this->entries, $this->omitted + $count);
+    }
+
+    /**
      * Read the column back.
      *
      * @throws InvalidArgumentException when a present value holds no readable

@@ -302,7 +302,12 @@ final class RunnerTest extends TestCase
     }
 
     /**
-     * The next attempt is told what the last one ran into.
+     * The next attempt is told what the last one ran into, across runs.
+     *
+     * The attempt counter survives the first run ending, so a task with two
+     * attempts to its name gets its second from the run after the one that
+     * spent the first — and that attempt reads the failure out of the state
+     * store rather than out of a loop variable that died with the process.
      */
     #[Test]
     public function a_second_run_continues_the_pass_and_tells_the_agent_what_failed(): void
@@ -313,10 +318,17 @@ final class RunnerTest extends TestCase
             FixtureStep::success(['src/Import.php' => "<?php\n\n// second try\n"]),
         ]);
 
-        $first = $this->loopOver(ScriptedVerifier::failing());
+        // One attempt per task for the first run, which its failing check
+        // spends; then the limit is raised, as a user who looked at the failure
+        // would raise it, and the second run makes the attempt that is now
+        // allowed. The lever is the configuration rather than the loop, because
+        // what this case is about is the counter and the evidence outliving a
+        // process — within one run, the retrying above covers it.
+        $first = $this->loopOver(ScriptedVerifier::failing(), ['limits' => ['attempts_per_task' => 1]]);
         self::assertTrue($first->results()[0]->isFailure());
+        self::assertSame(1, $first->results()[0]->attempts());
 
-        $second = $this->loopOver(ScriptedVerifier::passing());
+        $second = $this->loopOver(ScriptedVerifier::passing(), ['limits' => ['attempts_per_task' => 2]]);
         $result = $second->results()[0];
 
         // The same pass, continued: one generation, two attempts, one commit.
@@ -330,6 +342,112 @@ final class RunnerTest extends TestCase
         self::assertCount(2, $attempts);
         self::assertStringNotContainsString('Failed asserting', $attempts[0]->briefing());
         self::assertStringContainsString('Failed asserting', $attempts[1]->briefing());
+    }
+
+    /**
+     * A failing check is tried again in the same run, and the attempt that
+     * follows is told what the last one ran into.
+     *
+     * PROJECT.md section G, item 4, in the case it exists for. The first
+     * attempt's work is kept rather than thrown away, the agent is handed the
+     * failing check's output as the package's own observation, and the box is
+     * ticked only once something passes.
+     */
+    #[Test]
+    public function a_failing_check_is_tried_again_with_the_failure_as_evidence(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $worker = $this->givenAWorker([
+            FixtureStep::success(['src/Import.php' => "<?php\n\n// first try\n"]),
+            FixtureStep::success(['src/DryRun.php' => "<?php\n\n// second try\n"]),
+        ]);
+        $terminal = new CapturingOutput();
+
+        $report = $this->loopOver(
+            ScriptedVerifier::scripted([false, true]),
+            ['limits' => ['attempts_per_task' => 2]],
+            $terminal,
+        );
+        $result = $report->results()[0];
+
+        // One pass, two attempts, one commit, and the box ticked at the end of
+        // it rather than after the attempt that passed nothing.
+        self::assertSame(2, $result->attempts());
+        self::assertTrue($result->isCompleted());
+        self::assertTrue($result->wasChecked());
+        self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
+        self::assertCount(1, $this->commitsBeyondBase());
+
+        // What the second attempt was told, read out of the briefing the worker
+        // actually received.
+        $attempts = $worker->attempts();
+        self::assertCount(2, $attempts);
+        self::assertStringNotContainsString('Failed asserting', $attempts[0]->briefing());
+        self::assertStringContainsString('Failed asserting', $attempts[1]->briefing());
+        self::assertStringContainsString(
+            'Observed by Ralph PHP itself',
+            $attempts[1]->briefing(),
+            'The failing check is the package\'s observation, not a previous attempt\'s opinion.',
+        );
+        self::assertStringContainsString('attempt 2 follows', $terminal->standardOutput());
+
+        // The retry continues in the workspace the failing attempt left, so the
+        // work that was kept is part of what is committed.
+        self::assertSame(['src/DryRun.php', 'src/Import.php'], $this->filesIn((string) $result->commitSha()));
+
+        // And that workspace is still the pass's own, so completing the task
+        // removes the checkout as it would for a task that passed first time.
+        self::assertDirectoryDoesNotExist(
+            (string) $this->journal()->generations()->get($result->generation())->worktree()->path(),
+        );
+    }
+
+    /**
+     * A task whose checks never pass is tried up to its attempt limit, left
+     * unchecked, and does not take the rest of the run with it.
+     */
+    #[Test]
+    public function a_task_whose_checks_keep_failing_stops_at_its_attempt_limit(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// not good enough\n"])]);
+
+        $verifier = ScriptedVerifier::scripted([false, false, false, true]);
+        $report = $this->loopOver($verifier, ['limits' => ['attempts_per_task' => 3]]);
+
+        $failed = $report->results()[0];
+
+        self::assertSame(3, $failed->attempts());
+        self::assertTrue($failed->isFailure());
+        self::assertFalse($failed->wasChecked());
+        self::assertNull($failed->commitSha());
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+
+        // Three attempts at the first task and one at the second, each one
+        // verified by something that is not the worker.
+        self::assertCount(4, $verifier->calls);
+
+        // The row says what the checks said, not that the runner ran out of
+        // patience: the blocker a reviewer reads is the failing check.
+        self::assertStringContainsString('verification failed', (string) $failed->blocker()?->reason());
+
+        // The limit stops the retrying, not the run. The task after it is
+        // independent work and is taken on and finished.
+        self::assertCount(2, $report->results());
+        self::assertTrue($report->results()[1]->isCompleted());
+        self::assertCount(1, $this->commitsBeyondBase());
+
+        // Each attempt is on the record, and each one of them failed.
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($failed->generation());
+        $attempts = $journal->attempts()->forGeneration($pass);
+        self::assertCount(3, $attempts);
+
+        foreach ($attempts as $attempt) {
+            self::assertSame(LifecycleState::Failed, $attempt->state());
+            self::assertFalse($journal->attempts()->verificationSupports($attempt));
+            self::assertStringContainsString('Failed asserting', (string) $attempt->evidence()?->toMarkdown());
+        }
     }
 
     /**
@@ -687,12 +805,15 @@ final class RunnerTest extends TestCase
      *
      * @param array<string, mixed> $overrides merged into the configuration
      */
-    private function loopOver(ScriptedVerifier $verifier, array $overrides = []): RunReport
-    {
+    private function loopOver(
+        ScriptedVerifier $verifier,
+        array $overrides = [],
+        ?CapturingOutput $terminal = null,
+    ): RunReport {
         return Runner::forProject(
             $this->configuration($overrides),
             $verifier,
-            null,
+            $terminal?->output(),
             AdapterRegistry::default(),
         )->run();
     }
@@ -750,6 +871,12 @@ final class RunnerTest extends TestCase
                 ],
             ],
             'checks' => [['name' => 'tests', 'command' => ['php', '-v'], 'timeout' => 30]],
+            // One attempt per task unless a case asks for more. The loop
+            // retries a task whose checks failed (section G, item 4), so left
+            // at the default of three every failing case here would quietly
+            // become three cases — and how many attempts a case makes is
+            // something its assertions depend on and should state.
+            'limits' => ['attempts_per_task' => 1],
             // Nothing to install and nothing to copy: the worker needs no
             // dependencies, and preparation is section F, item 5's subject
             // rather than this one's.

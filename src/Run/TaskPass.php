@@ -24,11 +24,15 @@ use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\AttemptOutcome;
 use Celyes\RalphPhp\State\AttemptRecord;
 use Celyes\RalphPhp\State\Blocker;
+use Celyes\RalphPhp\State\EvidenceTrail;
 use Celyes\RalphPhp\State\FailureEvidence;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Phase;
 use Celyes\RalphPhp\State\RunRecord;
+use Celyes\RalphPhp\State\WorktreeOwnership;
+use Celyes\RalphPhp\Support\Clock;
+use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\ChecklistSnapshot;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskSnapshot;
@@ -59,6 +63,13 @@ use InvalidArgumentException;
  * process that has stopped, which is why the body sits inside a `try` whose
  * `catch` records the refusal and whose `finally` writes the attempt up and
  * sweeps the workspace.
+ *
+ * **A failing check is tried again; nothing else is.** While the configured
+ * checks decide against the work and the task's budget still has room, the pass
+ * makes another attempt, and that attempt is told what the last one ran into
+ * (section G, item 4). The box stays unticked for every one of them. Every
+ * other way a pass can go wrong is left alone — see
+ * {@see TaskResult::invitesAnotherAttempt()} for which, and why.
  */
 final class TaskPass
 {
@@ -66,6 +77,9 @@ final class TaskPass
      * @param VerificationSnapshot $checks the run's frozen checks, read off the
      *        run's row rather than out of the configuration, so that a worker's
      *        edit cannot replace them mid-run (section G, item 3)
+     * @param Clock $clock what times the gap between attempts within one pass,
+     *        which is the part of the run's time budget no row has been written
+     *        for yet
      */
     public function __construct(
         private readonly Configuration $configuration,
@@ -78,6 +92,7 @@ final class TaskPass
         private readonly BaseCommit $base,
         private readonly VerificationSnapshot $checks,
         private readonly ?Output $terminal = null,
+        private readonly Clock $clock = new SystemClock(),
     ) {
     }
 
@@ -90,6 +105,12 @@ final class TaskPass
      * about them is the loop's decision. What does come out as an exception is a
      * failure to *record* — a state database that cannot be written — because a
      * pass whose outcome was not stored is one nothing can reason about later.
+     *
+     * Attempts are made here, in a loop, for as long as the checks fail and the
+     * budget holds. The task's box is not ticked by any of them, which is the
+     * second half of section G, item 4 and needs no code of its own: ticking it
+     * is what {@see self::finalize()} does, and verification failing never
+     * reaches it.
      *
      * @param ChecklistSnapshot $snapshot the reading the run started from,
      *        which is what an edit made while the agent worked is compared
@@ -107,31 +128,107 @@ final class TaskPass
             ));
 
         $record = $this->open($task, $recorded);
-        $budget = ExecutionBudget::of(
+        $unverified = null;
+        $spent = 0.0;
+
+        while (true) {
+            $budget = $this->budgetFor($record, $spent);
+
+            // Checked before the log is opened and before an attempt is spent:
+            // a task with nothing left to spend on it has not failed again, it
+            // was not tried again, and the two must not read the same
+            // afterwards. A budget that ran out *between* attempts keeps the
+            // last failure as the outcome — the task failed its checks, and
+            // reporting a spent limit instead would bury what it failed on.
+            if ($budget->isExhausted()) {
+                return $unverified ?? $this->spent($task, $record, $budget);
+            }
+
+            $log = AttemptLog::open(
+                $this->workbench->logs(),
+                $record->generation(),
+                $record->attempts() + 1,
+                $this->terminal,
+            );
+
+            $began = $this->clock->now()->getTimestamp();
+
+            try {
+                $result = $this->carryOut($task, $recorded, $snapshot, $record, $budget, $log);
+            } finally {
+                $log->close();
+            }
+
+            if (!$result->invitesAnotherAttempt()) {
+                return $result;
+            }
+
+            $unverified = $result;
+            $spent += (float) max(0, $this->clock->now()->getTimestamp() - $began);
+
+            // Read back rather than carried: the attempt counter, the phase and
+            // the blocker were all written by the attempt that just ended, and
+            // the next one's budget is measured against them.
+            $record = $this->journal->generations()->get($record->generation());
+
+            $this->announceRetry($task, $record, $result);
+        }
+    }
+
+    /**
+     * What an attempt about to start has left to spend.
+     *
+     * The run's active seconds are read from its row rather than from the
+     * record this pass was handed at construction: the loop adds each task's
+     * time to that row as the run goes on, and a pass trusting its own copy
+     * would offer the last task of a long run the whole budget again.
+     *
+     * `$spent` is this pass's own time since, which no row holds yet — the loop
+     * writes the pass's elapsed time only once the pass returns, so between two
+     * attempts of the same pass this is the only thing keeping the run's bound
+     * true.
+     */
+    private function budgetFor(GenerationRecord $record, float $spent): ExecutionBudget
+    {
+        return ExecutionBudget::of(
             $this->configuration->limits(),
             $record->attempts(),
-            (float) $this->run->activeSeconds(),
+            $this->activeSeconds() + $spent,
         );
+    }
 
-        // Checked before the log is opened and before an attempt is spent: a
-        // task with nothing left to spend on it has not failed again, it was
-        // not tried again, and the two must not read the same afterwards.
-        if ($budget->isExhausted()) {
-            return $this->spent($task, $record, $budget);
-        }
-
-        $log = AttemptLog::open(
-            $this->workbench->logs(),
-            $record->generation(),
-            $record->attempts() + 1,
-            $this->terminal,
-        );
-
+    /**
+     * Active seconds the run has recorded so far.
+     *
+     * A row that cannot be read falls back to the copy this pass was
+     * constructed with, which is stale rather than wrong: a budget measured
+     * from it is too generous, and refusing to attempt the task at all over a
+     * reading of the clock would be the worse answer.
+     */
+    private function activeSeconds(): float
+    {
         try {
-            return $this->carryOut($task, $recorded, $snapshot, $record, $budget, $log);
-        } finally {
-            $log->close();
+            return (float) $this->journal->runs()->get($this->run->rowId())->activeSeconds();
+        } catch (RalphException) {
+            return (float) $this->run->activeSeconds();
         }
+    }
+
+    /**
+     * Say that the checks failed and another attempt follows.
+     *
+     * Printed between the attempts rather than left to the run's summary: the
+     * user is watching a task being worked on, and a second worker starting
+     * with no line to explain it reads as the loop having lost its place.
+     */
+    private function announceRetry(Task $task, GenerationRecord $record, TaskResult $result): void
+    {
+        $this->terminal?->line(sprintf(
+            '  %s: %s; attempt %d follows, with the failure as evidence',
+            $task->id()->value(),
+            $result->verification()?->describe() ?? 'the checks decided against the work',
+            $record->attempts() + 1,
+        ));
     }
 
     /**
@@ -160,7 +257,10 @@ final class TaskPass
             );
 
             $worktree = $this->workbench->worktrees()->prepare($record->generation(), $this->base);
-            $record = $this->journal->generations()->recordWorktree($record, $worktree->ownership());
+            $record = $this->journal->generations()->recordWorktree(
+                $record,
+                $this->ownershipOf($record, $worktree),
+            );
             $log->note('workspace ' . $worktree->describe());
 
             $preparation = $this->workbench->preparer()->prepare($worktree, $log);
@@ -262,6 +362,31 @@ final class TaskPass
     }
 
     /**
+     * What the row should say about the workspace this attempt is using.
+     *
+     * Ordinarily whatever the preparation reported. The exception is a pass
+     * attempting a task again: the directory its last attempt created is still
+     * there — kept on purpose, as the evidence a failing check leaves behind —
+     * so preparation can only report having adopted it, and recording that
+     * would hand the pass's own workspace to nobody. Cleanup removes only what
+     * a pass created ({@see \Celyes\RalphPhp\Git\WorktreeCleaner}), so a task
+     * that passed on its second attempt would leave a checkout behind where one
+     * that passed on its first did not.
+     *
+     * The row's own answer is kept when it already names this path as created,
+     * which is not a guess about the directory: it is what this pass wrote when
+     * it made it.
+     */
+    private function ownershipOf(GenerationRecord $record, TaskWorktree $worktree): WorktreeOwnership
+    {
+        $recorded = $record->worktree();
+
+        return $recorded->isOwned() && $recorded->isAt($worktree->path())
+            ? $recorded
+            : $worktree->ownership();
+    }
+
+    /**
      * Open the pass: record the task as read, choose its generation, and get
      * the row it will be worked on through.
      *
@@ -306,9 +431,15 @@ final class TaskPass
     /**
      * Invoke the agent for this attempt.
      *
-     * The previous attempt's evidence goes with the request, which is the whole
+     * The previous attempts' evidence goes with the request, which is the whole
      * point of having kept it: a second attempt that is told nothing about the
      * first is not a second attempt, it is the same one again.
+     *
+     * The trail rather than the newest row alone, and bounded by
+     * {@see EvidenceTrail} rather than by anything assembled here: an attempt
+     * that errored or was cancelled recorded nothing the runner observed, and
+     * the failing check behind it is still why the task is not done
+     * (section G, item 4).
      */
     private function invoke(
         Task $task,
@@ -319,7 +450,7 @@ final class TaskPass
         ExecutionBudget $budget,
         AttemptLog $log,
     ): ExecutionResult {
-        $previous = $this->journal->attempts()->recallFor($record, 1)[0] ?? null;
+        $evidence = EvidenceTrail::of($this->journal->attempts()->recallFor($record, EvidenceTrail::ROWS));
 
         $request = new ExecutionRequest(
             $this->agent,
@@ -329,7 +460,7 @@ final class TaskPass
             $worktree->workspace(),
             $context,
             $budget,
-            $previous?->evidence(),
+            $evidence,
             $log,
         );
 
@@ -653,7 +784,7 @@ final class TaskPass
 
         return $this->stopped(
             $task,
-            $current->state()->isOpen() ? $this->journal->generations()->fail($current, $blocker) : $current,
+            $this->failing($current, $blocker),
             $attempt,
             $verification,
             $refusal->getMessage(),
@@ -682,11 +813,30 @@ final class TaskPass
 
         return $this->stopped(
             $task,
-            $record->state()->isOpen() ? $this->journal->generations()->fail($record, $blocker) : $record,
+            $this->failing($record, $blocker),
             null,
             null,
             $blocker->reason(),
         );
+    }
+
+    /**
+     * Record the pass as failed, where the lifecycle has somewhere to go.
+     *
+     * `failed` is an open state — a failed task can be attempted again — but it
+     * is not a state a pass can move to from itself, and a pass that ran out of
+     * attempts after a failing check is exactly that: already failed, and now
+     * being passed over. Its first blocker is the true one, so the row is left
+     * saying what the checks said rather than that the runner declined to try
+     * again; the reason the loop prints says the rest.
+     *
+     * @throws RalphException when the row cannot be written
+     */
+    private function failing(GenerationRecord $record, ?Blocker $blocker): GenerationRecord
+    {
+        return $record->state()->canTransitionTo(LifecycleState::Failed)
+            ? $this->journal->generations()->fail($record, $blocker)
+            : $record;
     }
 
     /**

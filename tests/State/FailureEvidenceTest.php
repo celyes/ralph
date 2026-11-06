@@ -131,6 +131,34 @@ final class FailureEvidenceTest extends TestCase
         );
     }
 
+    /**
+     * Evidence folded out of evidence answers for what the first bound dropped.
+     *
+     * {@see \Celyes\RalphPhp\State\EvidenceTrail} reads stored observations
+     * that were bounded on the way into the column, so the count they carry has
+     * to be addable to the set they are folded into: a second bound that
+     * silently reset it would hide what the first one disclosed.
+     */
+    #[Test]
+    public function observations_something_else_left_out_can_be_counted_here(): void
+    {
+        $evidence = FailureEvidence::of('a check failed')->alsoOmitted(4);
+
+        self::assertSame(1, $evidence->count());
+        self::assertSame(4, $evidence->omitted());
+        self::assertStringContainsString('4 further observations are not shown', $evidence->toMarkdown());
+        self::assertSame('a check failed (+4 more)', $evidence->label());
+    }
+
+    #[Test]
+    public function counting_no_further_observations_leaves_the_evidence_alone(): void
+    {
+        $evidence = FailureEvidence::of('a check failed');
+
+        self::assertTrue($evidence->equals($evidence->alsoOmitted(0)));
+        self::assertTrue($evidence->equals($evidence->alsoOmitted(-3)));
+    }
+
     #[Test]
     public function evidence_does_not_change_when_more_is_added_to_it(): void
     {
