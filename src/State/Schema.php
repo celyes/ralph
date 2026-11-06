@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\State;
 
 use Celyes\RalphPhp\Agent\AgentSource;
 use Celyes\RalphPhp\Tasks\Completion;
+use Celyes\RalphPhp\Verification\CheckOutcome;
 use InvalidArgumentException;
 
 /**
@@ -20,8 +21,8 @@ use InvalidArgumentException;
  *
  * Some of these lists mirror a PHP enum that already exists
  * ({@see LifecycleState}, {@see Phase}, {@see Completion}, {@see PushState},
- * {@see AttemptOutcome}, {@see AgentSource}); those are built from the enum's
- * cases so the two cannot drift. The rest — run states, check outcomes,
+ * {@see AttemptOutcome}, {@see AgentSource}, {@see CheckOutcome}); those are
+ * built from the enum's cases so the two cannot drift. The rest — run states,
  * reference and checklist vocabularies — are named here first because the
  * schema needs them before the types that will own them are written, and those
  * types are expected to adopt exactly these spellings.
@@ -42,13 +43,19 @@ final class Schema
     /**
      * How one verification command finished.
      *
+     * Built from {@see CheckOutcome} so the column cannot hold an outcome the
+     * enum does not have, and the enum cannot name one the column would refuse.
+     *
      * `not_run` exists because the checks are a sequence: when one fails the
      * rest are skipped, and a skipped check must not be stored as a passing
      * one.
      *
-     * @var list<string>
+     * @return list<string>
      */
-    public const array CHECK_OUTCOMES = ['passed', 'failed', 'timed_out', 'not_run'];
+    public static function checkOutcomes(): array
+    {
+        return CheckOutcome::values();
+    }
 
     /**
      * The kinds of Git fact worth recording.

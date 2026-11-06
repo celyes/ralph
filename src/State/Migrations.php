@@ -317,7 +317,7 @@ final class Migrations
                 UNIQUE (attempt_id, position)
             )
             SQL,
-            Schema::literals(Schema::CHECK_OUTCOMES),
+            Schema::literals(Schema::checkOutcomes()),
         );
     }
 
