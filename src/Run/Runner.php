@@ -9,7 +9,9 @@ use Celyes\RalphPhp\Agent\AgentSelection;
 use Celyes\RalphPhp\Agent\AgentSelector;
 use Celyes\RalphPhp\Agent\ExecutionAdapter;
 use Celyes\RalphPhp\Config\Configuration;
-use Celyes\RalphPhp\Config\VerificationCommand;
+use Celyes\RalphPhp\Config\ConfigurationLoader;
+use Celyes\RalphPhp\Config\VerificationDrift;
+use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Git\BaseCommit;
@@ -42,6 +44,13 @@ use Throwable;
  * a setup failure and is raised: there is nothing to record a per-task result
  * against yet, and a run that started half-configured would be worse than one
  * that did not start.
+ *
+ * **The checks come off the row, not out of the configuration.** The frozen set
+ * is read back from the run that was just opened and handed to every pass, so a
+ * worker that edits `.ralph/config.json` changes what the next run requires and
+ * nothing about this one. The edit is still noticed and printed, because a run
+ * silently disregarding the settings a user is reading would be its own problem
+ * (section G, item 3).
  *
  * **One agent, one run, no parallelism.** The tasks are taken in file order and
  * finished one at a time. Selecting an agent does not enable simultaneous
@@ -126,7 +135,7 @@ final class Runner
 
         $run = $journal->runs()->open($agent, $this->configuration, $base->sha());
 
-        $this->announce($run, $agent, $base);
+        $this->announce($run, $agent, $base, $run->verification());
 
         try {
             return $this->loop($run, $agent, $adapter, $base, $journal, $workbench);
@@ -156,10 +165,12 @@ final class Runner
         $tasks = $this->read($journal, $workbench);
         $snapshot = ChecklistSnapshot::of($tasks, $this->configuration->tasksFile());
 
-        // Written down once, and handed to every pass. A worker that edits
-        // `.ralph/config.json` changes what the next run requires and nothing
+        // Read back off the run's row, not out of the configuration this
+        // process was handed. The row is where the set was frozen, so this is
+        // the set a resumed run is held to as well, and a worker's edit to
+        // `.ralph/config.json` changes what the *next* run requires and nothing
         // about this one (section G, item 3).
-        $checks = $this->configuration->checks();
+        $checks = $run->verification();
 
         $pass = new TaskPass(
             $this->configuration,
@@ -177,6 +188,7 @@ final class Runner
         $limit = $this->configuration->limits()->iterations();
         $results = [];
         $stopped = null;
+        $drift = VerificationDrift::none();
 
         foreach ($tasks->pending() as $task) {
             if (count($results) >= $limit) {
@@ -203,6 +215,10 @@ final class Runner
 
             $this->report($result);
 
+            // The frozen set is what just ran either way; what a worker's edit
+            // must not be is unmentioned.
+            $drift = $this->noticeDrift($checks, $drift);
+
             if ($result->stopsTheRun()) {
                 $stopped = sprintf('%s needs human input', $result->taskId()->value());
 
@@ -213,11 +229,77 @@ final class Runner
         $stopped ??= $this->whyItEnded($tasks, $results);
         $run = $journal->runs()->complete($run, $stopped);
 
-        $report = RunReport::of($run, $agent, $base, $tasks, $results, $stopped);
+        $report = RunReport::of($run, $agent, $base, $tasks, $results, $stopped, $drift);
 
         $this->terminal?->line($report->describe());
 
         return $report;
+    }
+
+    /**
+     * Notice the configuration moving under the run, and say so.
+     *
+     * The frozen checks of section G, item 3 make a worker's edit unable to
+     * replace what this run verifies against; this is what makes the edit
+     * unable to pass unmentioned. The file is read again rather than trusted to
+     * be what this process loaded, because the thing being looked for is
+     * exactly a change made after that load — by the agent that has just been
+     * given write access to the repository.
+     *
+     * Reporting only. A configuration that no longer parses is drift and not a
+     * failure: the checks this run is held to were frozen before the file was
+     * touched, the tasks after it are verified against that same set, and
+     * ending the run would throw away work over a file it is no longer reading.
+     *
+     * @param VerificationDrift $reported what has already been said, so that an
+     *        edit made during the first task is not announced again after each
+     *        of the tasks behind it
+     */
+    private function noticeDrift(VerificationSnapshot $frozen, VerificationDrift $reported): VerificationDrift
+    {
+        $drift = $this->readDrift($frozen);
+
+        // An edit already reported stays reported, and an unchanged reading
+        // does not withdraw it: a file put back after the fact does not unmake
+        // the edit, and the report is a record of what happened rather than a
+        // last look at the file.
+        if (!$drift->hasChanged() || $drift->toArray() === $reported->toArray()) {
+            return $reported;
+        }
+
+        $this->terminal?->line($drift->describe());
+
+        foreach ($drift->lines() as $line) {
+            $this->terminal?->line('  ' . $line);
+        }
+
+        $this->terminal?->line('  checks in force: ' . $frozen->describe());
+
+        return $drift;
+    }
+
+    /**
+     * Compare the frozen checks against what the configuration file says now.
+     */
+    private function readDrift(VerificationSnapshot $frozen): VerificationDrift
+    {
+        $file = ConfigurationLoader::fileIn($this->configuration->projectRoot());
+
+        if (!is_file($file)) {
+            // A run configured from a file whose file has gone is drift; a run
+            // that never had one and still has none is not.
+            return $this->configuration->source() === null
+                ? VerificationDrift::none()
+                : VerificationDrift::unreadable($file . ' is no longer there');
+        }
+
+        try {
+            return $frozen->compareTo(
+                VerificationSnapshot::of((new ConfigurationLoader())->load($this->configuration->projectRoot())),
+            );
+        } catch (RalphException $failure) {
+            return VerificationDrift::unreadable($failure->getMessage());
+        }
     }
 
     /**
@@ -276,15 +358,16 @@ final class Runner
     /**
      * Say what the run is, before it starts doing it.
      */
-    private function announce(RunRecord $run, AgentSelection $agent, BaseCommit $base): void
-    {
+    private function announce(
+        RunRecord $run,
+        AgentSelection $agent,
+        BaseCommit $base,
+        VerificationSnapshot $checks,
+    ): void {
         $this->terminal?->lines([
             sprintf('%s: %s', $run->runId(), $agent->describe()),
             sprintf('base %s', $base->describe()),
-            sprintf('checks: %s', implode(', ', array_map(
-                static fn (VerificationCommand $check): string => $check->name(),
-                $this->configuration->checks(),
-            ))),
+            sprintf('checks: %s', $checks->describe()),
         ]);
     }
 

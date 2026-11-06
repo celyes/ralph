@@ -10,7 +10,7 @@ use Celyes\RalphPhp\Agent\ExecutionBudget;
 use Celyes\RalphPhp\Agent\ExecutionRequest;
 use Celyes\RalphPhp\Agent\ExecutionResult;
 use Celyes\RalphPhp\Config\Configuration;
-use Celyes\RalphPhp\Config\VerificationCommand;
+use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Git\BaseCommit;
@@ -63,9 +63,9 @@ use InvalidArgumentException;
 final class TaskPass
 {
     /**
-     * @param list<VerificationCommand> $checks the run's frozen checks, passed
-     *        to the verifier rather than read from the configuration, so that a
-     *        worker's edit cannot replace them mid-run
+     * @param VerificationSnapshot $checks the run's frozen checks, read off the
+     *        run's row rather than out of the configuration, so that a worker's
+     *        edit cannot replace them mid-run (section G, item 3)
      */
     public function __construct(
         private readonly Configuration $configuration,
@@ -76,7 +76,7 @@ final class TaskPass
         private readonly ExecutionAdapter $adapter,
         private readonly Verifier $verifier,
         private readonly BaseCommit $base,
-        private readonly array $checks,
+        private readonly VerificationSnapshot $checks,
         private readonly ?Output $terminal = null,
     ) {
     }
@@ -200,7 +200,7 @@ final class TaskPass
             $record = $this->journal->generations()->enterPhase($record, Phase::Verifying);
             $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Verifying);
 
-            $verification = $this->verifier->verify($this->checks, $worktree->path(), $log);
+            $verification = $this->verifier->verify($this->checks->commands(), $worktree->path(), $log);
             $this->journal->verifications()->record($attempt, $verification);
             $log->note('verification: ' . $verification->describe());
 

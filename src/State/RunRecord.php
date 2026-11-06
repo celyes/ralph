@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\State;
 
 use Celyes\RalphPhp\Agent\AgentSource;
+use Celyes\RalphPhp\Config\VerificationSnapshot;
+use Celyes\RalphPhp\Exception\ConfigurationException;
 use InvalidArgumentException;
 
 /**
@@ -168,11 +170,38 @@ final class RunRecord
     /**
      * The verification commands the run froze at its start.
      *
+     * The stored rows. {@see verification()} is what a caller that intends to
+     * *run* them should ask for.
+     *
      * @return list<array<string, mixed>>
      */
     public function checks(): array
     {
         return $this->checks;
+    }
+
+    /**
+     * The frozen checks, read back as the set the run is held to.
+     *
+     * This is where the loop gets its checks from, rather than from the
+     * configuration it was handed: a worker that edits `.ralph/config.json`
+     * while the run is going changes what the next run requires and nothing
+     * about this one (PROJECT.md section G, item 3). A resumed run reads the
+     * same column and is therefore held to the same set it started under.
+     *
+     * Built on demand rather than in {@see fromRow()}, so that a row whose
+     * checks cannot be read back refuses only the caller that was about to
+     * verify something with them — `status` can still list the run.
+     *
+     * @throws ConfigurationException when the recorded checks cannot be read
+     *         back, which is not a reason to carry on with a different set
+     */
+    public function verification(): VerificationSnapshot
+    {
+        return VerificationSnapshot::fromStorage(
+            $this->checks,
+            sprintf('the checks run %s froze', $this->runId),
+        );
     }
 
     /**

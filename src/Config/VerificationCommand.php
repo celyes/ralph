@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Config;
 
+use Celyes\RalphPhp\Exception\ConfigurationException;
+
 /**
  * One entry of the `checks` setting: a command that must pass before a task's
  * work is committed and checked off.
@@ -45,6 +47,23 @@ final class VerificationCommand
             $command,
             $raw->nullableInt('timeout') ?? Defaults::CHECK_TIMEOUT_SECONDS,
         );
+    }
+
+    /**
+     * Read a check back out of a run's recorded snapshot.
+     *
+     * The same reading as {@see fromRaw()}, which is the point: a check written
+     * by {@see toArray()} and read back here is the command the run froze, with
+     * its arguments and its timeout, and a stored row that does not describe one
+     * is refused rather than approximated.
+     *
+     * @param array<string, mixed> $row as {@see toArray()} wrote it
+     *
+     * @throws ConfigurationException when the row does not describe a check
+     */
+    public static function fromStorage(array $row, string $source = 'a recorded check'): self
+    {
+        return self::fromRaw(RawConfiguration::fromArray($row, $source));
     }
 
     public function name(): string

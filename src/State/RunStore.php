@@ -6,7 +6,8 @@ namespace Celyes\RalphPhp\State;
 
 use Celyes\RalphPhp\Agent\AgentSelection;
 use Celyes\RalphPhp\Config\Configuration;
-use Celyes\RalphPhp\Config\VerificationCommand;
+use Celyes\RalphPhp\Config\VerificationSnapshot;
+use Celyes\RalphPhp\Exception\ConfigurationException;
 use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Support\SystemClock;
@@ -48,12 +49,16 @@ final class RunStore
      * @param AgentSelection $agent         the resolved agent, with where it was
      *        selected from — recorded so that `resume` can refuse an implicit
      *        change of agent (PROJECT.md section H, item 6)
-     * @param Configuration  $configuration the settings as read, frozen here
+     * @param Configuration  $configuration the settings as read, frozen here —
+     *        the verification commands among them, as a
+     *        {@see VerificationSnapshot}
      * @param string|null    $baseSha       the resolved base commit, when the
      *        reference has already been resolved
      * @param RunRecord|null $resumedFrom   the run this one continues
      *
-     * @throws StateException when the row cannot be written
+     * @throws StateException         when the row cannot be written
+     * @throws ConfigurationException when the configuration states no usable
+     *         set of checks to freeze
      */
     public function open(
         AgentSelection $agent,
@@ -79,10 +84,11 @@ final class RunStore
                 $agent->source()->value,
                 $columns['settings'],
                 $this->encode($configuration->toArray()),
-                $this->encode(array_map(
-                    static fn (VerificationCommand $check): array => $check->toArray(),
-                    $configuration->checks(),
-                )),
+                // The one place a run's checks are frozen (section G, item 3).
+                // Everything that later runs or reports a check reads this
+                // column back, not the configuration, so an edit to
+                // `.ralph/config.json` cannot reach a run already under way.
+                $this->encode(VerificationSnapshot::of($configuration)->toStorage()),
                 $configuration->tasksFile(),
                 $configuration->git()->baseReference(),
                 $baseSha,

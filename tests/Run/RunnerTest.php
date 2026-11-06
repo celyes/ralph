@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Tests\Run;
 use Celyes\RalphPhp\Agent\AdapterRegistry;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
+use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Exception\CheckoutException;
 use Celyes\RalphPhp\Exception\PreparationException;
 use Celyes\RalphPhp\Run\Journal;
@@ -22,6 +23,7 @@ use Celyes\RalphPhp\State\VerificationStore;
 use Celyes\RalphPhp\Tasks\Completion;
 use Celyes\RalphPhp\Tests\Fixture\FixtureStep;
 use Celyes\RalphPhp\Tests\Fixture\FixtureWorker;
+use Celyes\RalphPhp\Tests\Support\CapturingOutput;
 use Celyes\RalphPhp\Tests\Support\Git;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use Celyes\RalphPhp\Tests\Support\TemporaryProject;
@@ -67,6 +69,12 @@ final class RunnerTest extends TestCase
     private const string SECOND = 'Document the import command in the README';
 
     private const string DONE = 'Create the import command';
+
+    /**
+     * What a worker would write over the project's checks to make anything
+     * pass: the suite gone, something that always succeeds in its place.
+     */
+    private const string REPLACED_CHECKS = '{"checks": [{"name": "quick", "command": ["true"]}]}';
 
     private TemporaryProject $project;
 
@@ -582,6 +590,99 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * The checks a run is held to are the ones it froze, and an edit to them is
+     * reported rather than obeyed.
+     *
+     * Section G, item 3's whole reason for existing: the worker whose work the
+     * checks judge can write to the repository, `.ralph/config.json` included,
+     * so a loop that asked the file for its checks each time would let the
+     * worker choose what it is held to — replace the suite with `true`, and
+     * every task after it passes.
+     */
+    #[Test]
+    public function a_workers_edit_to_the_checks_does_not_change_what_this_run_verifies(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $this->givenAWorker([
+            FixtureStep::success([
+                'src/Import.php' => "<?php\n\n// one\n",
+                // The project's own configuration, four directories above a
+                // task workspace: the file the next run will read.
+                '../../../../.ralph/config.json' => self::REPLACED_CHECKS,
+            ]),
+            FixtureStep::success(['README.md' => "An example project.\n\n## Import\n"]),
+        ]);
+
+        $terminal = new CapturingOutput();
+        $verifier = ScriptedVerifier::passing();
+        $report = $this->loopFromTheConfigFile($verifier, $terminal);
+
+        // Both tasks were verified against the frozen set, including the one
+        // taken on after the file had already been rewritten.
+        self::assertSame(
+            [['tests'], ['tests']],
+            array_map(static fn (array $call): array => $call['checks'], $verifier->calls),
+        );
+        self::assertSame(['tests'], $report->run()->checkNames());
+        self::assertSame(['tests'], $report->run()->verification()->names());
+        self::assertSame(2, $report->completedCount());
+
+        // And the edit is said out loud: a run that quietly ignored it would
+        // leave a user reading settings the run is not obeying.
+        $drift = $report->verificationDrift();
+        self::assertTrue($drift->hasChanged());
+        self::assertSame(['tests'], $drift->removed());
+        self::assertSame(['quick'], $drift->added());
+
+        $printed = $terminal->standardOutput();
+        self::assertStringContainsString('the verification configuration changed', $printed);
+        self::assertStringContainsString('no longer configured: tests', $printed);
+        self::assertStringContainsString('newly configured: quick', $printed);
+        self::assertStringContainsString('checks in force: tests', $printed);
+        self::assertSame(
+            1,
+            substr_count($printed, 'no longer configured: tests'),
+            'One edit is reported once, not after every task behind it.',
+        );
+
+        // The file does now say what the worker wrote, which is what the next
+        // run will be held to.
+        self::assertSame(
+            ['quick'],
+            VerificationSnapshot::of((new ConfigurationLoader())->load($this->project->root()))->names(),
+        );
+    }
+
+    /**
+     * A configuration the worker left unreadable is reported, and is not a
+     * reason to throw away the run's work: the checks were frozen before the
+     * file was touched.
+     */
+    #[Test]
+    public function a_configuration_left_unreadable_is_reported_without_ending_the_run(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success([
+            'src/Import.php' => "<?php\n\n// done\n",
+            '../../../../.ralph/config.json' => '{ this is no longer JSON',
+        ])]);
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopFromTheConfigFile(ScriptedVerifier::passing(), $terminal);
+        $result = $report->results()[0];
+
+        self::assertTrue($result->isCompleted());
+        self::assertTrue($result->wasChecked());
+        self::assertSame(LifecycleState::Completed, $report->run()->state());
+        self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
+
+        $drift = $report->verificationDrift();
+        self::assertTrue($drift->hasChanged());
+        self::assertStringContainsString('not valid JSON', (string) $drift->unreadableReason());
+        self::assertStringContainsString('unreadable:', $terminal->standardOutput());
+    }
+
+    /**
      * Run the loop over this project.
      *
      * @param array<string, mixed> $overrides merged into the configuration
@@ -597,27 +698,63 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * Run the loop over this project, configured from a committed
+     * `.ralph/config.json`.
+     *
+     * The file matters to the cases about it: what a run freezes is compared
+     * against what the file says afterwards, and a worker's edit is only a
+     * worker's edit if there is a real file to edit.
+     *
+     * @param array<string, mixed> $overrides merged into the configuration
+     */
+    private function loopFromTheConfigFile(
+        ScriptedVerifier $verifier,
+        CapturingOutput $terminal,
+        array $overrides = [],
+    ): RunReport {
+        $this->project->writeConfigArray($this->settings($overrides));
+        Git::run($this->project->root(), 'add', '--all');
+        Git::commit($this->project->root(), 'Add the configuration');
+
+        return Runner::forProject(
+            (new ConfigurationLoader())->load($this->project->root()),
+            $verifier,
+            $terminal->output(),
+            AdapterRegistry::default(),
+        )->run();
+    }
+
+    /**
      * @param array<string, mixed> $overrides
      */
     private function configuration(array $overrides = []): Configuration
     {
-        return (new ConfigurationLoader())->fromArray(
-            array_replace_recursive([
-                'agent' => 'fixture',
-                'agents' => [
-                    'fixture' => [
-                        'adapter' => 'codex',
-                        'executable' => $this->tools . '/' . FixtureWorker::NAME,
-                    ],
+        return (new ConfigurationLoader())->fromArray($this->settings($overrides), $this->project->root());
+    }
+
+    /**
+     * The settings every case here runs under.
+     *
+     * @param array<string, mixed> $overrides
+     *
+     * @return array<string, mixed>
+     */
+    private function settings(array $overrides = []): array
+    {
+        return array_replace_recursive([
+            'agent' => 'fixture',
+            'agents' => [
+                'fixture' => [
+                    'adapter' => 'codex',
+                    'executable' => $this->tools . '/' . FixtureWorker::NAME,
                 ],
-                'checks' => [['name' => 'tests', 'command' => ['php', '-v'], 'timeout' => 30]],
-                // Nothing to install and nothing to copy: the worker needs no
-                // dependencies, and preparation is section F, item 5's subject
-                // rather than this one's.
-                'workspace' => ['prepare' => [], 'copy' => []],
-            ], $overrides),
-            $this->project->root(),
-        );
+            ],
+            'checks' => [['name' => 'tests', 'command' => ['php', '-v'], 'timeout' => 30]],
+            // Nothing to install and nothing to copy: the worker needs no
+            // dependencies, and preparation is section F, item 5's subject
+            // rather than this one's.
+            'workspace' => ['prepare' => [], 'copy' => []],
+        ], $overrides);
     }
 
     /**
