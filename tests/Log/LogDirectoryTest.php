@@ -111,6 +111,37 @@ final class LogDirectoryTest extends TestCase
         );
     }
 
+    /**
+     * The preserved patch of PROJECT.md section G, item 5 sits with the logs of
+     * the attempt that produced it, because they are read together — and is
+     * named `.diff` rather than `.log`, because it is a patch and not output.
+     */
+    #[Test]
+    public function an_attempts_staged_diff_sits_with_its_logs(): void
+    {
+        $logs = LogDirectory::in($this->project);
+        $generation = TaskGeneration::first($this->task);
+
+        self::assertSame(
+            dirname($logs->agentLog($generation, 2)) . '/attempt-02-staged.diff',
+            $logs->stagedDiff($generation, 2),
+        );
+        self::assertSame(
+            $logs->stagedDiff(TaskGeneration::first($this->task), 1),
+            $logs->stagedDiff($generation, 1),
+        );
+        self::assertNotSame($logs->stagedDiff($generation, 1), $logs->stagedDiff($generation, 2));
+    }
+
+    #[Test]
+    public function a_staged_diff_below_attempt_one_is_a_programming_error(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('An attempt number starts at 1.');
+
+        LogDirectory::in($this->project)->stagedDiff(TaskGeneration::first($this->task), 0);
+    }
+
     #[Test]
     public function an_attempt_number_below_one_is_a_programming_error(): void
     {

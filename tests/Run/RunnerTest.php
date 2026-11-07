@@ -801,6 +801,96 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * The other half of the frozen checks, end to end: a green run whose diff
+     * deleted the test that would have failed.
+     *
+     * Section G, item 5. Item 3 stops a worker choosing *which* commands judge
+     * its work; nothing there stops it choosing what those commands then find.
+     * The verifier here passes — which is the point, since a case where the
+     * checks failed would prove nothing about this — so everything asserted
+     * below follows from the diff alone.
+     */
+    #[Test]
+    public function a_diff_that_deletes_the_projects_tests_is_not_committed(): void
+    {
+        $this->project->write('tests/ImportTest.php', <<<'PHP'
+            <?php
+
+            final class ImportTest
+            {
+                public function testItImports(): void
+                {
+                    self::assertTrue(import());
+                }
+            }
+
+            PHP);
+        Git::run($this->project->root(), 'add', '--all');
+        Git::commit($this->project->root(), 'Add the import test');
+
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $this->givenAWorker([FixtureStep::success([
+            'src/Import.php' => "<?php\n\n// --dry-run\n",
+            'tests/ImportTest.php' => null,
+        ])]);
+        $before = $this->snapshotOfTheCheckout();
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
+
+        self::assertCount(1, $report->results(), 'A blocked task stops the run.');
+        $result = $report->results()[0];
+
+        // Blocked rather than failed: the checks passed, so there is nothing
+        // for another attempt to act on, and what is in question is a judgement
+        // only a person can make.
+        self::assertTrue($result->isBlocked());
+        self::assertTrue($result->stopsTheRun());
+        self::assertTrue($result->wasVerified(), 'The checks passed; the diff is what stopped it.');
+
+        // The three things that must not have happened.
+        self::assertNull($result->commitSha());
+        self::assertFalse($result->wasChecked());
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($result->generation());
+
+        self::assertSame(LifecycleState::Blocked, $pass->state());
+        self::assertSame(Phase::Verifying, $pass->phase(), 'It never entered committing.');
+        self::assertStringContainsString('weakens', (string) $pass->blocker()?->reason());
+        self::assertStringContainsString('not comprehensive', (string) $pass->blocker()?->nextAction());
+
+        // The work is kept twice over: the workspace with the diff still
+        // staged, and the patch as a file a reviewer can read on its own.
+        $workspace = (string) $pass->worktree()->path();
+        self::assertDirectoryExists($workspace);
+        self::assertSame(
+            ['src/Import.php', 'tests/ImportTest.php'],
+            $this->stagedIn($workspace),
+        );
+
+        $diff = $this->project->path(sprintf(
+            '.ralph/runtime/logs/%s/attempt-01-staged.diff',
+            $pass->generation()->slug(),
+        ));
+        self::assertFileExists($diff);
+        self::assertStringContainsString(
+            '-    public function testItImports(): void',
+            (string) file_get_contents($diff),
+        );
+
+        // The attempt's row carries what was found, for the next person rather
+        // than for the next attempt.
+        $attempt = $journal->attempts()->get($pass, 1);
+        self::assertNotNull($attempt);
+        self::assertStringContainsString('a test file removed', (string) $attempt->evidence()?->toMarkdown());
+
+        self::assertStringContainsString('weakens', $terminal->standardOutput());
+        self::assertSame($before, $this->snapshotOfTheCheckout());
+    }
+
+    /**
      * Run the loop over this project.
      *
      * @param array<string, mixed> $overrides merged into the configuration
@@ -945,6 +1035,31 @@ final class RunnerTest extends TestCase
     private function headOfTheCheckout(): string
     {
         return trim(Git::run($this->project->root(), 'rev-parse', 'HEAD')->standardOutput);
+    }
+
+    /**
+     * What is in a workspace's index, read back from Git.
+     *
+     * `--no-renames`, because what is being asserted is the index's own
+     * contents: a rename reported as one path would hide whether the deletion
+     * it depends on is in there with it.
+     *
+     * @return list<string>
+     */
+    private function stagedIn(string $directory): array
+    {
+        $output = trim(
+            Git::run($directory, 'diff', '--cached', '--name-only', '--no-renames')->standardOutput,
+        );
+
+        if ($output === '') {
+            return [];
+        }
+
+        $paths = explode("\n", $output);
+        sort($paths);
+
+        return array_map('trim', $paths);
     }
 
     private function tipOf(string $branch): ?string

@@ -36,6 +36,7 @@ use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\ChecklistSnapshot;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskSnapshot;
+use Celyes\RalphPhp\Verification\ChecksAudit;
 use Celyes\RalphPhp\Verification\VerificationReport;
 use Celyes\RalphPhp\Verification\Verifier;
 use InvalidArgumentException;
@@ -55,6 +56,12 @@ use InvalidArgumentException;
  * configured checks have passed, a commit or a justified no-change result has
  * been recorded, and any required push has succeeded — PROJECT.md section 4
  * read as a sequence, and section G, item 7 read as a condition.
+ *
+ * **Nor do the checks, entirely.** They pass against the suite the diff leaves
+ * behind, so between staging and the commit the diff itself is read for changes
+ * that weaken that suite, and a pass whose work would delete a test, empty one
+ * or exclude a path from a tool stops with the patch kept for review rather
+ * than committing on the strength of a green run (section G, item 5).
  *
  * **Every exit records what it found.** A pass that throws its way out of a
  * phase still ends with a row saying which phase that was, a blocker naming the
@@ -318,6 +325,22 @@ final class TaskPass
                 $record = $this->journal->generations()->recordNoChange($record);
                 $log->note('nothing to commit: the task was already satisfied, and the checks agree');
             } else {
+                // What the checks passed against is the suite this diff leaves
+                // behind, so the diff is read before it becomes a commit: a
+                // change that weakens the project's own verification stops the
+                // pass with the patch kept for review (section G, item 5).
+                $audit = $this->workbench->checks()->audit(
+                    $this->checks,
+                    $worktree,
+                    $staged,
+                    $this->workbench->logs()->stagedDiff($record->generation(), $attempt->number()),
+                    $log,
+                );
+
+                if ($audit->isBlocking()) {
+                    return $this->weakened($task, $record, $attempt, $result, $verification, $audit, $log);
+                }
+
                 $record = $this->journal->generations()->enterPhase($record, Phase::Committing);
                 $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Committing);
 
@@ -680,6 +703,58 @@ final class TaskPass
             $attempt,
             $verification,
             $blocker->reason(),
+        );
+    }
+
+    /**
+     * A verified diff that leaves the project's verification weaker than it
+     * found it.
+     *
+     * Blocked rather than failed, which is the deliberate part. A failing check
+     * is evidence of something wrong with the work, and the next attempt is
+     * given it (section G, item 4); this is not — the checks passed. What is in
+     * question is whether a diff that deletes a test, empties one or excludes a
+     * path from a tool is the change the task asked for, and no number of
+     * further attempts answers that. So the pass stops, the run stops with it,
+     * and the patch is where {@see ChecksAudit::diffPath()} says.
+     *
+     * Nothing is committed and nothing is undone. The workspace is preserved
+     * with the diff still staged, so the same patch can be read from Git as
+     * well as from the file, and a user who decides the change is right can
+     * commit it themselves.
+     */
+    private function weakened(
+        Task $task,
+        GenerationRecord $record,
+        AttemptRecord $attempt,
+        ExecutionResult $result,
+        VerificationReport $verification,
+        ChecksAudit $audit,
+        AttemptLog $log,
+    ): TaskResult {
+        $blocker = Blocker::raised(
+            $audit->summary(),
+            implode(' ', $audit->hints()),
+        );
+
+        $attempt = $this->journal->attempts()->finish(
+            $attempt,
+            AttemptOutcome::Candidate,
+            LifecycleState::Blocked,
+            $result->exitCode(),
+            $this->milliseconds($result),
+            evidence: $audit->evidence(),
+            blocker: $blocker,
+        );
+
+        $log->note('not committed: ' . $audit->summary());
+
+        return $this->stopped(
+            $task,
+            $this->journal->generations()->block($record, $blocker),
+            $attempt,
+            $verification,
+            $audit->summary(),
         );
     }
 

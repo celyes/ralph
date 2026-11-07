@@ -24,6 +24,7 @@ use Celyes\RalphPhp\Tasks\ChecklistReader;
 use Celyes\RalphPhp\Tasks\ChecklistReconciler;
 use Celyes\RalphPhp\Tasks\ChecklistWriter;
 use Celyes\RalphPhp\Tasks\GenerationSelector;
+use Celyes\RalphPhp\Verification\ChecksAuditor;
 
 /**
  * Everything a task is carried out with, built once for a run.
@@ -49,6 +50,7 @@ final class Workbench
         private readonly WorkspacePreparer $preparer,
         private readonly WorkspaceAuditor $auditor,
         private readonly WorkspaceStager $stager,
+        private readonly ChecksAuditor $checks,
         private readonly TaskCommitter $committer,
         private readonly TaskPublisher $publisher,
         private readonly WorktreeCleaner $cleaner,
@@ -85,6 +87,7 @@ final class Workbench
             WorkspacePreparer::forProject($configuration, $processes),
             WorkspaceAuditor::forProject($configuration, $generations, $executable, $processes),
             WorkspaceStager::forProject($configuration, $executable, $processes),
+            new ChecksAuditor($executable, $processes),
             TaskCommitter::forProject($configuration, $generations, $executable, $processes),
             TaskPublisher::forProject($configuration, $generations, $executable, $processes),
             WorktreeCleaner::forProject($configuration, $generations, $executable, $processes),
@@ -126,6 +129,15 @@ final class Workbench
     public function stager(): WorkspaceStager
     {
         return $this->stager;
+    }
+
+    /**
+     * What reads a staged diff for changes that weaken the project's own
+     * verification (PROJECT.md section G, item 5).
+     */
+    public function checks(): ChecksAuditor
+    {
+        return $this->checks;
     }
 
     public function committer(): TaskCommitter

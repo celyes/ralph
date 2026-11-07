@@ -30,7 +30,10 @@ use InvalidArgumentException;
  * output. The attempt number leads with a zero so an `ls` of the directory
  * reads in order, and the kind is a suffix so that the verification logs of
  * section G, item 2 can sit beside the agent's as `attempt-02-check-tests.log`
- * without either having to be found by elimination.
+ * without either having to be found by elimination. The same naming carries
+ * what is not output at all: `attempt-02-staged.diff` is the patch an attempt's
+ * commit would have contained, preserved where the attempt's own logs are
+ * because they are read together.
  *
  * **Known limit of the padding.** Past attempt 99 the names stop sorting as
  * bytes in the order they were made. The per-task attempt limit is in single
@@ -51,9 +54,24 @@ final class LogDirectory
     public const string EXTENSION = '.log';
 
     /**
+     * Suffix on a preserved patch.
+     *
+     * Not `.log`, because the file is not output: it is a patch, and `.diff` is
+     * what gets it syntax-highlighted in an editor and accepted by `git apply`.
+     * A reviewer sent to look at a diff should not have to find out that the
+     * `.log` beside the real logs is one.
+     */
+    public const string DIFF_EXTENSION = '.diff';
+
+    /**
      * The kind suffix on a worker's own output.
      */
     public const string AGENT = 'agent';
+
+    /**
+     * The kind suffix on the diff an attempt's commit would have contained.
+     */
+    public const string STAGED = 'staged';
 
     /**
      * Digits the attempt number is padded to.
@@ -121,6 +139,42 @@ final class LogDirectory
      */
     public function logFor(TaskGeneration $generation, int $attempt, string $kind): string
     {
+        return $this->fileFor($generation, $attempt, $kind, self::EXTENSION);
+    }
+
+    /**
+     * The path one attempt's staged diff is preserved at.
+     *
+     * Beside that attempt's logs rather than in a directory of its own, because
+     * a person reading why a task stopped reads the log and the patch together,
+     * and the one thing a preserved diff must not be is somewhere other than
+     * where `ralph logs` sends them. Named for the attempt for the same reason
+     * the logs are: a second attempt's diff is a different diff.
+     *
+     * The patch is only written when there is something to review — see
+     * {@see \Celyes\RalphPhp\Verification\ChecksAuditor} — so this is a path
+     * that may well hold no file.
+     *
+     * @throws InvalidArgumentException when the attempt number is not positive
+     */
+    public function stagedDiff(TaskGeneration $generation, int $attempt): string
+    {
+        return $this->fileFor($generation, $attempt, self::STAGED, self::DIFF_EXTENSION);
+    }
+
+    /**
+     * One attempt's file of a given kind.
+     *
+     * @param string $kind what the file holds, as lowercase words joined by
+     *        hyphens — a file name this package composes, so anything else is a
+     *        bug in the caller rather than bad user input
+     *
+     * @throws InvalidArgumentException when the attempt number is not positive
+     *                                 or the kind is not a name a file can be
+     *                                 called
+     */
+    private function fileFor(TaskGeneration $generation, int $attempt, string $kind, string $extension): string
+    {
         if ($attempt < 1) {
             throw new InvalidArgumentException('An attempt number starts at 1.');
         }
@@ -137,7 +191,7 @@ final class LogDirectory
             $this->forGeneration($generation),
             str_pad((string) $attempt, self::ATTEMPT_DIGITS, '0', STR_PAD_LEFT),
             $kind,
-            self::EXTENSION,
+            $extension,
         );
     }
 
