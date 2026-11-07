@@ -319,6 +319,17 @@ final class FixtureWorkerProgram
 
         fwrite(STDOUT, sprintf("waiting %d second%s\n", $step->seconds(), $step->seconds() === 1 ? '' : 's'));
 
+        // The keyboard interrupt, from the inside. The parent is the process
+        // that started this worker — the runner — so this is what reaches it
+        // when somebody presses Ctrl+C while an agent is working, and it is
+        // sent after the edits so the interruption finds a half-finished
+        // workspace (PROJECT.md section H, item 4).
+        if ($step->interruptsTheRunner() && function_exists('posix_kill')) {
+            fwrite(STDOUT, "interrupting the runner\n");
+            fflush(STDOUT);
+            posix_kill(posix_getppid(), SIGINT);
+        }
+
         // Flushed before the wait, so that whatever has been printed is
         // captured even by an attempt that is killed: a timeout's evidence is
         // the output that arrived before it (section E, item 4).

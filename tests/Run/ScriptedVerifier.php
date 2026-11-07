@@ -51,11 +51,14 @@ final class ScriptedVerifier implements Verifier
      *        unreached
      * @param list<string> $watching relative paths to read out of the workspace
      *        each time the checks run
+     * @param (callable(): void)|null $while something to do while the checks
+     *        are nominally running
      */
     private function __construct(
         private readonly array $verdicts,
         private readonly array $watching = [],
         private readonly bool $unrunnable = false,
+        private $while = null,
     ) {
     }
 
@@ -83,6 +86,24 @@ final class ScriptedVerifier implements Verifier
     public static function scripted(array $verdicts): self
     {
         return new self($verdicts);
+    }
+
+    /**
+     * A verifier that reports a pass, having first done something while the
+     * checks were nominally running.
+     *
+     * The only way to put a moment *inside* a verification run, which the
+     * interruption cases need: a run stopped while the checks are going has its
+     * checks cancelled, and what the package does with a half-finished check is
+     * the thing under test (PROJECT.md section H, item 4). The verdict is
+     * reported as a pass so that nothing about the outcome depends on this
+     * verifier having anything to say about the work.
+     *
+     * @param callable(): void $while
+     */
+    public static function passingWhile(callable $while): self
+    {
+        return new self([true], [], false, $while);
     }
 
     /**
@@ -118,6 +139,10 @@ final class ScriptedVerifier implements Verifier
         }
 
         $sink?->note('scripted verification in ' . $directory);
+
+        if ($this->while !== null) {
+            ($this->while)();
+        }
 
         $passes = $this->verdicts[$call] ?? $this->verdicts[count($this->verdicts) - 1] ?? true;
         $runs = [];

@@ -21,6 +21,12 @@ use Celyes\RalphPhp\Support\Clock;
  * of a runner that stopped without releasing, which this lock displaced. The
  * runner prints it, because a resume quietly taking over an interrupted run's
  * lock would hide the fact that there was something to take over.
+ *
+ * There are two ways to give it up. {@see self::release()} is the ordinary one
+ * and says the repository is free. {@see self::retain()} is for a run that was
+ * interrupted and could not confirm that the worker it started has stopped: the
+ * handle closes, because the process is ending, but the record keeps claiming
+ * the repository and names the processes that are the reason.
  */
 final class HeldLock
 {
@@ -101,6 +107,55 @@ final class HeldLock
                 $this->holder->describe(),
                 $this->reclaimed->describe(),
             );
+    }
+
+    /**
+     * Give up the lock while leaving the record claiming the repository.
+     *
+     * PROJECT.md section H, item 4's "releasing ownership only after
+     * termination is confirmed", for the case where it cannot be. The handle is
+     * closed — there is no choice about that, the process is ending and the
+     * kernel would drop the `flock` anyway — but the record is written with the
+     * surviving workers named and no release time, so the takeover check
+     * ({@see RepositoryLock::acquire()}) refuses to start anything here while
+     * one of them is alive.
+     *
+     * Idempotent in the same way {@see self::release()} is, and for the same
+     * reason: both are reached from a `finally`.
+     *
+     * @param list<int> $workers processes asked to stop that could not be
+     *        confirmed stopped; an empty list is an ordinary release, because
+     *        there is then nothing to hold the repository for
+     */
+    public function retain(array $workers): void
+    {
+        if ($workers === []) {
+            $this->release();
+
+            return;
+        }
+
+        $handle = $this->handle;
+
+        if ($handle === null) {
+            return;
+        }
+
+        $this->holder = $this->holder->withWorkers($workers);
+
+        try {
+            $this->write();
+        } catch (FilesystemException) {
+            // The claim could not be written, so the next command will read a
+            // record it can take over. Nothing better is available from here,
+            // and failing the run over it would replace the interruption the
+            // user is being told about with a filesystem complaint.
+        }
+
+        flock($handle, LOCK_UN);
+        fclose($handle);
+
+        $this->handle = null;
     }
 
     /**

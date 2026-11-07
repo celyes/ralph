@@ -28,11 +28,11 @@ use PHPUnit\Framework\TestCase;
  * exactly as it would occur between two terminals.
  *
  * The second is that a lock left behind is taken over only once its runner is
- * confirmed stopped. The three readings that confirmation can produce —
- * stopped, still running, and not answerable from this machine — are driven
- * through {@see KnownProcesses} and a hand-written lock record, because the
- * alternative is abandoning real processes and hoping their ids survive to the
- * assertion.
+ * confirmed stopped. The readings that confirmation can produce — stopped,
+ * still running, not answerable from this machine, and a worker an interrupted
+ * run could not account for (section H, item 4) — are driven through
+ * {@see KnownProcesses} and a hand-written lock record, because the alternative
+ * is abandoning real processes and hoping their ids survive to the assertion.
  *
  * The lock file is read back as JSON throughout rather than through the class
  * that wrote it, since it is the one piece of state a *different* process has
@@ -247,6 +247,145 @@ final class RepositoryLockTest extends TestCase
         }
     }
 
+    /**
+     * The other half of PROJECT.md section H, item 4. A run stopped with Ctrl+C
+     * that could not confirm its agent had gone leaves the record claiming the
+     * repository and naming the agent, and nothing may start here while that
+     * agent is alive: it is still writing in a task worktree.
+     */
+    #[Test]
+    public function it_refuses_to_start_over_a_worker_an_interrupted_run_left_behind(): void
+    {
+        $this->givenAbandonedLock(pid: 4242, runId: 'run-20261101-120000-aaaaaa', workers: [5150]);
+
+        try {
+            // The runner itself has gone; its worker has not.
+            $this->lockOf(KnownProcesses::running(5150))->acquire('resume');
+            self::fail('A resume started over an agent that is still writing.');
+        } catch (LockException $refusal) {
+            self::assertStringContainsString('worker process 5150 is still running', $refusal->getMessage());
+
+            $hints = implode("\n", $refusal->hints());
+            self::assertStringContainsString('run-20261101-120000-aaaaaa', $hints);
+            self::assertStringContainsString('worker process 5150 unaccounted for', $hints);
+            self::assertStringContainsString('may still be writing in a task worktree', $hints);
+            self::assertStringContainsString('Stop process 5150', $hints);
+        }
+    }
+
+    /**
+     * The claim is a reason to wait, not a lock-out to be cleared by hand: once
+     * the worker has gone, the next command takes the lock over in the ordinary
+     * way and says what it displaced.
+     */
+    #[Test]
+    public function a_worker_that_has_since_stopped_no_longer_holds_the_repository(): void
+    {
+        $this->givenAbandonedLock(pid: 4242, runId: 'run-20261101-120000-aaaaaa', workers: [5150]);
+
+        $held = $this->lockOf(KnownProcesses::none())->acquire('resume');
+
+        try {
+            self::assertTrue($held->wasReclaimed());
+            self::assertSame([5150], $held->reclaimed()?->workers());
+            self::assertStringContainsString('stopped without releasing it', $held->describe());
+        } finally {
+            $held->release();
+        }
+    }
+
+    /**
+     * What an interrupted run writes on its way out: the record keeps claiming
+     * the repository, with the worker named and no release time.
+     */
+    #[Test]
+    public function a_retained_lock_names_the_worker_and_does_not_claim_to_be_released(): void
+    {
+        $lock = $this->lockOf();
+        $held = $lock->acquire('run');
+        $held->record('run-20261102-090000-bbbbbb');
+
+        $held->retain([5150, 5151]);
+
+        self::assertFalse($held->isHeld(), 'The handle is closed: the process is ending either way.');
+
+        $record = $this->recordOn($lock);
+        self::assertNull($record['released_at'], 'A retained lock must not read as released.');
+        self::assertSame([5150, 5151], $record['workers'] ?? null);
+
+        $holder = LockHolder::fromStorage($record);
+        self::assertNotNull($holder);
+        self::assertTrue($holder->isHeld());
+        self::assertTrue($holder->hasWorkers());
+        self::assertStringContainsString('worker processes 5150, 5151 unaccounted for', $holder->describe());
+    }
+
+    /**
+     * Nothing left unaccounted for is an ordinary release. The distinction
+     * matters because the runner calls one method on its way out whether or not
+     * it was interrupted, and a run that stopped cleanly must not leave its
+     * repository claimed.
+     */
+    #[Test]
+    public function retaining_nothing_releases_the_lock(): void
+    {
+        $lock = $this->lockOf();
+        $held = $lock->acquire('run');
+
+        $held->retain([]);
+
+        self::assertFalse($held->isHeld());
+        self::assertSame('2026-11-02T09:00:00+00:00', $this->recordOn($lock)['released_at']);
+        self::assertSame([], $this->recordOn($lock)['workers'] ?? null);
+
+        // And the next command takes it without a word about a takeover.
+        $next = $this->lockOf()->acquire('run');
+
+        try {
+            self::assertFalse($next->wasReclaimed());
+        } finally {
+            $next->release();
+        }
+    }
+
+    #[Test]
+    public function retaining_a_lock_that_has_already_been_given_up_does_nothing(): void
+    {
+        $lock = $this->lockOf();
+        $held = $lock->acquire('run');
+        $held->release();
+
+        $held->retain([5150]);
+
+        self::assertSame([], $this->recordOn($lock)['workers'] ?? null);
+        self::assertNotNull($this->recordOn($lock)['released_at']);
+    }
+
+    /**
+     * The record is generated, and anything unusable in it is dropped rather
+     * than refused: a user whose next run was blocked by a malformed number in
+     * a file they never wrote would be worse served than one whose refusal says
+     * less.
+     */
+    #[Test]
+    public function unusable_worker_ids_in_a_record_are_ignored(): void
+    {
+        $this->project->write('.ralph/runtime/run.lock', (string) json_encode([
+            'purpose' => 'run',
+            'host' => gethostname(),
+            'pid' => 4242,
+            'run_id' => null,
+            'acquired_at' => Timestamp::of(FrozenClock::at('2026-11-01T12:00:00+00:00')->now())->value(),
+            'released_at' => null,
+            'workers' => ['nonsense', 0, -3, 5150, 5150],
+        ]));
+
+        self::assertSame([5150], $this->lockOf()->holder()?->workers());
+
+        $held = $this->lockOf(KnownProcesses::none())->acquire('run');
+        $held->release();
+    }
+
     #[Test]
     public function it_refuses_to_take_over_a_lock_recorded_on_another_machine(): void
     {
@@ -419,8 +558,15 @@ final class RepositoryLockTest extends TestCase
     /**
      * A lock file holding a record that claims to be held, over a free lock.
      */
-    private function givenAbandonedLock(int $pid, ?string $runId = null, ?string $host = null): void
-    {
+    /**
+     * @param list<int> $workers
+     */
+    private function givenAbandonedLock(
+        int $pid,
+        ?string $runId = null,
+        ?string $host = null,
+        array $workers = [],
+    ): void {
         $this->project->write('.ralph/runtime/run.lock', (string) json_encode([
             'purpose' => 'run',
             'host' => $host ?? gethostname(),
@@ -428,6 +574,7 @@ final class RepositoryLockTest extends TestCase
             'run_id' => $runId,
             'acquired_at' => Timestamp::of(FrozenClock::at('2026-11-01T12:00:00+00:00')->now())->value(),
             'released_at' => null,
+            'workers' => $workers,
         ]));
     }
 
@@ -443,7 +590,7 @@ final class RepositoryLockTest extends TestCase
     /**
      * The lock file as another process would read it.
      *
-     * @return array{purpose: string|null, host: string|null, pid: int|null, run_id: string|null, acquired_at: string|null, released_at: string|null}
+     * @return array{purpose: string|null, host: string|null, pid: int|null, run_id: string|null, acquired_at: string|null, released_at: string|null, workers?: list<int>}
      */
     private function recordOn(RepositoryLock $lock): array
     {
@@ -453,7 +600,7 @@ final class RepositoryLockTest extends TestCase
         $data = json_decode($contents, true);
         self::assertIsArray($data);
 
-        /** @var array{purpose: string|null, host: string|null, pid: int|null, run_id: string|null, acquired_at: string|null, released_at: string|null} $data */
+        /** @var array{purpose: string|null, host: string|null, pid: int|null, run_id: string|null, acquired_at: string|null, released_at: string|null, workers?: list<int>} $data */
         return $data;
     }
 }

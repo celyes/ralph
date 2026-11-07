@@ -26,6 +26,17 @@ use Throwable;
  * implementation of the pipe draining, the timeout and the termination, and the
  * one that ran agents would be the one tested least.
  *
+ * **It stops when the run is asked to stop.** Between reads of the worker's
+ * output it asks {@see Interruptions} whether a stop has been requested, and on
+ * the first one it terminates the command's whole process tree through
+ * {@see Terminator}, keeps whatever the command had printed, and reports a
+ * cancelled result (PROJECT.md section H, item 4). Polling rather than acting
+ * in the signal handler is the point: killing a process tree and writing to
+ * SQLite are not things to start halfway through an arbitrary opcode. The
+ * terminator's verdict is recorded process-wide, because whether the worker is
+ * confirmed gone is what decides if the run may release its lock, and that
+ * decision is made in a `finally` several layers above this one.
+ *
  * **Streaming does not replace collecting.** A chunk goes to the sink and into
  * the result both. The sink is for the user and for the log; the result is what
  * an adapter reads to decide what the agent did, and an adapter cannot read a
@@ -54,6 +65,20 @@ final class ProcessRunner
      * Seconds a terminated command is given to exit before it is killed.
      */
     private const float TERMINATION_GRACE_SECONDS = 2.0;
+
+    /**
+     * @param Interruptions $interruptions where a stop requested from outside
+     *        the process is noticed. Process-wide by nature, and defaulted
+     *        rather than required for that reason: an adapter builds its own
+     *        runner ({@see \Celyes\RalphPhp\Agent\ProcessAdapter}) and would
+     *        otherwise run an agent nothing could stop.
+     * @param Terminator $terminator what stops a command and its children
+     */
+    public function __construct(
+        private readonly Interruptions $interruptions = new Interruptions(),
+        private readonly Terminator $terminator = new Terminator(),
+    ) {
+    }
 
     /**
      * Run a command and wait for it.
@@ -87,6 +112,25 @@ final class ProcessRunner
             throw new InvalidArgumentException('A command timeout must be at least 1 second.');
         }
 
+        // Nothing is started after a stop has been asked for. The loop winds
+        // itself up a phase at a time (PROJECT.md section H, item 4) and this
+        // is the backstop under all of it: an interruption noticed between two
+        // commands must not be answered by starting the second one.
+        $pending = $this->interruptions->requested();
+
+        if ($pending !== null) {
+            return new ProcessResult(
+                $command,
+                null,
+                '',
+                '',
+                false,
+                0.0,
+                $pending,
+                Termination::nothingToStop(),
+            );
+        }
+
         $inputFile = $input === null ? null : $this->spool($input);
 
         $descriptors = [
@@ -110,7 +154,8 @@ final class ProcessRunner
                 throw $this->cannotStart($command, $workingDirectory);
             }
 
-            [$standardOutput, $errorOutput, $exitCode, $timedOut] = $this->wait($process, $pipes, $timeout, $sink);
+            [$standardOutput, $errorOutput, $exitCode, $timedOut, $cancelledBy, $termination]
+                = $this->wait($process, $pipes, $timeout, $sink);
         } finally {
             if ($inputFile !== null) {
                 @unlink($inputFile);
@@ -124,6 +169,8 @@ final class ProcessRunner
             $errorOutput,
             $timedOut,
             microtime(true) - $started,
+            $cancelledBy,
+            $termination,
         );
     }
 
@@ -176,9 +223,14 @@ final class ProcessRunner
      * agent working, and buffering a chunk until the next loop iteration would
      * hold back the last line of a worker that then goes quiet for a minute.
      *
+     * A stop requested from outside the process is noticed here, once per turn
+     * of the loop. The wait is capped at a second whatever the command's
+     * timeout, so a Ctrl+C during a quiet twenty-minute agent is acted on
+     * within a second rather than when the agent next prints something.
+     *
      * @param resource $process
      * @param array<int, resource> $pipes
-     * @return array{string, string, int|null, bool}
+     * @return array{string, string, int|null, bool, Interruption|null, Termination|null}
      */
     private function wait(mixed $process, array $pipes, int $timeout, ?OutputSink $sink = null): array
     {
@@ -193,8 +245,15 @@ final class ProcessRunner
 
         $deadline = microtime(true) + $timeout;
         $timedOut = false;
+        $cancelledBy = null;
 
         while ($open !== []) {
+            $cancelledBy = $this->interruptions->requested();
+
+            if ($cancelledBy !== null) {
+                break;
+            }
+
             $remaining = $deadline - microtime(true);
 
             if ($remaining <= 0) {
@@ -211,8 +270,10 @@ final class ProcessRunner
             $wait = min(1.0, $remaining);
 
             if (@stream_select($read, $write, $except, (int) $wait, (int) (fmod($wait, 1.0) * 1_000_000)) === false) {
-                // Interrupted by a signal — Ctrl+C during a run, which section
-                // H handles — rather than a broken pipe. Resume waiting.
+                // Interrupted by a signal rather than a broken pipe. The
+                // handler has already run by the time this returns, so the top
+                // of the loop is where the stop is noticed; there is nothing to
+                // do here but go back to it.
                 continue;
             }
 
@@ -237,8 +298,10 @@ final class ProcessRunner
             }
         }
 
-        if ($timedOut) {
-            $this->terminate($process);
+        $termination = null;
+
+        if ($timedOut || $cancelledBy !== null) {
+            $termination = $this->terminate($process, $cancelledBy !== null);
 
             // Whatever the command wrote before it was stopped is still worth
             // keeping: it is usually the explanation.
@@ -262,11 +325,14 @@ final class ProcessRunner
             }
         }
 
-        $exitCode = $timedOut ? null : $this->exitCodeOf($process);
+        // A stopped command reported no status of its own: the exit code of a
+        // process that was killed would say which signal ended it, which is
+        // not the command's verdict on its work and must not be read as one.
+        $exitCode = $timedOut || $cancelledBy !== null ? null : $this->exitCodeOf($process);
 
         proc_close($process);
 
-        return [$standardOutput, $errorOutput, $exitCode, $timedOut];
+        return [$standardOutput, $errorOutput, $exitCode, $timedOut, $cancelledBy, $termination];
     }
 
     /**
@@ -323,30 +389,34 @@ final class ProcessRunner
     }
 
     /**
-     * Stop a command that overran its timeout.
+     * Stop a command that overran its timeout or that the run no longer wants.
      *
-     * Asked first, killed second: a terminated command gets the chance to clean
-     * up after itself, and only a command that ignores that is killed outright.
-     * Stopping the whole process tree of an agent that spawns children is
-     * specified in PROJECT.md section H and belongs with interruption handling.
+     * The whole process tree, asked first and killed second
+     * ({@see Terminator}). A timeout and a cancellation stop a command in
+     * exactly the same way, and the one difference — what the result is called
+     * — belongs to the caller.
+     *
+     * The verdict is returned either way, so that an adapter's log note can say
+     * an agent had to be killed. It is recorded process-wide only for a
+     * cancellation, and that distinction is the point: what the record decides
+     * is whether the run may release the repository lock on its way out
+     * (PROJECT.md section H, item 4), and a run that merely timed a task out is
+     * not on its way out. It carries on to the next task and gives the lock
+     * back when it finishes, as it should.
      *
      * @param resource $process
+     * @param bool $ownership whether this stop decides what the run may
+     *        release — true when it is a cancellation
      */
-    private function terminate(mixed $process): void
+    private function terminate(mixed $process, bool $ownership): Termination
     {
-        proc_terminate($process);
+        $termination = $this->terminator->stop($process, self::TERMINATION_GRACE_SECONDS);
 
-        $deadline = microtime(true) + self::TERMINATION_GRACE_SECONDS;
-
-        while (microtime(true) < $deadline) {
-            if (proc_get_status($process)['running'] === false) {
-                return;
-            }
-
-            usleep(10_000);
+        if ($ownership) {
+            Interruptions::recordTermination($termination);
         }
 
-        proc_terminate($process, 9);
+        return $termination;
     }
 
     /**

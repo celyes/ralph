@@ -10,6 +10,12 @@ namespace Celyes\RalphPhp\Process;
  * Carries the argument array that was executed alongside the output, so that a
  * log line or an error message can state exactly what ran rather than a
  * reconstruction of it.
+ *
+ * **Three ways a command can end, not two.** It finished, it overran its
+ * timeout, or the run it belonged to was interrupted — and the third is not a
+ * failure of the command at all. Keeping it apart from a timeout is what lets
+ * an adapter report a cancelled attempt as cancelled (PROJECT.md section H,
+ * item 4) rather than have a user raise a limit that was never reached.
  */
 final class ProcessResult
 {
@@ -18,6 +24,11 @@ final class ProcessResult
      * @param int|null $exitCode the process's status, or null when it was
      *        killed for exceeding its timeout and so never reported one
      * @param float $seconds wall-clock duration
+     * @param Interruption|null $cancelledBy the stop the run was asked to make
+     *        while this command was running, or null when it ran to its own
+     *        conclusion
+     * @param Termination|null $termination what stopping the command's process
+     *        tree achieved, where it had to be stopped at all
      */
     public function __construct(
         private readonly array $command,
@@ -26,6 +37,8 @@ final class ProcessResult
         private readonly string $errorOutput,
         private readonly bool $timedOut = false,
         private readonly float $seconds = 0.0,
+        private readonly ?Interruption $cancelledBy = null,
+        private readonly ?Termination $termination = null,
     ) {
     }
 
@@ -66,11 +79,43 @@ final class ProcessResult
     }
 
     /**
+     * Whether the run was interrupted while this command was running.
+     */
+    public function wasCancelled(): bool
+    {
+        return $this->cancelledBy !== null;
+    }
+
+    /**
+     * The stop that cut the command short, or null when nothing did.
+     */
+    public function cancelledBy(): ?Interruption
+    {
+        return $this->cancelledBy;
+    }
+
+    /**
+     * What stopping the command's process tree achieved, where it was stopped.
+     *
+     * Null for a command that ended on its own. Present for a timeout and for
+     * a cancellation, and the reason it is kept on the result is that whether
+     * the worker is confirmed gone decides what the run may release
+     * (PROJECT.md section H, item 4).
+     */
+    public function termination(): ?Termination
+    {
+        return $this->termination;
+    }
+
+    /**
      * Whether the command finished and reported success.
+     *
+     * A cancelled command did not: it was stopped partway, and nothing it was
+     * asked to do can be assumed done.
      */
     public function succeeded(): bool
     {
-        return !$this->timedOut && $this->exitCode === 0;
+        return !$this->timedOut && !$this->wasCancelled() && $this->exitCode === 0;
     }
 
     /**
@@ -103,6 +148,10 @@ final class ProcessResult
      */
     public function failureReason(): string
     {
+        if ($this->cancelledBy !== null) {
+            return sprintf('it was stopped after %s seconds: %s', self::describeSeconds($this->seconds), $this->cancelledBy->reason());
+        }
+
         if ($this->timedOut) {
             return sprintf('it did not finish within %s seconds', self::describeSeconds($this->seconds));
         }
@@ -125,7 +174,11 @@ final class ProcessResult
         return sprintf(
             "command: %s\nexit code: %s\nstdout:\n%s\nstderr:\n%s",
             implode(' ', $this->command),
-            $this->timedOut ? 'timed out' : (string) ($this->exitCode ?? -1),
+            match (true) {
+                $this->cancelledBy !== null => 'cancelled',
+                $this->timedOut => 'timed out',
+                default => (string) ($this->exitCode ?? -1),
+            },
             $this->standardOutput === '' ? '  (empty)' : $this->standardOutput,
             $this->errorOutput === '' ? '  (empty)' : $this->errorOutput,
         );

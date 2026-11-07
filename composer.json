@@ -36,6 +36,10 @@
         "phpstan/phpstan": "^2.1",
         "friendsofphp/php-cs-fixer": "^3.75"
     },
+    "suggest": {
+        "ext-pcntl": "Handles Ctrl+C during a run: stops the agent, records the interruption, and releases the repository lock only once the worker is confirmed stopped.",
+        "ext-posix": "Stops the whole process tree of an agent that spawned children, so none is left running in a task worktree."
+    },
     "autoload": {
         "psr-4": {
             "Celyes\\RalphPhp\\": "src/"

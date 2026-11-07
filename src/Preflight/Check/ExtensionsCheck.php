@@ -43,7 +43,10 @@ final class ExtensionsCheck implements PreflightCheck
         }
 
         $driver = $this->sqliteDriverProblem();
-        $details = [sprintf('required: %s', implode(', ', Ralph::REQUIRED_EXTENSIONS))];
+        $details = [
+            sprintf('required: %s', implode(', ', Ralph::REQUIRED_EXTENSIONS)),
+            ...$this->optional(),
+        ];
 
         $configuration = php_ini_loaded_file();
         if (is_string($configuration)) {
@@ -77,6 +80,30 @@ final class ExtensionsCheck implements PreflightCheck
                 sprintf('"%s -m" lists the extensions this build has.', PHP_BINARY),
             ],
         );
+    }
+
+    /**
+     * What the optional extensions would add, where they are missing.
+     *
+     * A detail and never a failure: {@see Ralph::OPTIONAL_EXTENSIONS} are
+     * things the package does better with and works without, so the check
+     * passes either way. Reported at all because the one they affect is Ctrl+C
+     * (PROJECT.md section H, item 4), and a user is better told before a run
+     * that stopping it will end the process where it stands than after.
+     *
+     * @return list<string>
+     */
+    private function optional(): array
+    {
+        $details = [];
+
+        foreach (Ralph::OPTIONAL_EXTENSIONS as $extension => $what) {
+            if (!extension_loaded($extension)) {
+                $details[] = sprintf('%s is not loaded, which otherwise %s', $extension, $what);
+            }
+        }
+
+        return $details;
     }
 
     /**

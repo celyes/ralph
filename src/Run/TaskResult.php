@@ -164,13 +164,15 @@ final class TaskResult
      *
      * A blocked pass stops the run: it is waiting for an answer only a person
      * can give, and the next task would be handed to the same agent that has
-     * just said it needs one. A failed pass does not — the task stays
-     * unchecked and retriable, and the tasks after it are independent work
-     * (PROJECT.md section 2).
+     * just said it needs one. An interrupted one stops it for the plainest
+     * reason there is — the user asked for the run to stop, and starting the
+     * next task would be the opposite of obeying that (PROJECT.md section H,
+     * item 4). A failed pass does not — the task stays unchecked and retriable,
+     * and the tasks after it are independent work (PROJECT.md section 2).
      */
     public function stopsTheRun(): bool
     {
-        return $this->isBlocked();
+        return $this->isBlocked() || $this->isInterrupted();
     }
 
     /**

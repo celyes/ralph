@@ -13,11 +13,15 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\VerificationDrift;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Exception\InterruptionException;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\BaseResolver;
 use Celyes\RalphPhp\Git\ControllingCheckout;
+use Celyes\RalphPhp\Process\Interruption;
+use Celyes\RalphPhp\Process\Interruptions;
 use Celyes\RalphPhp\Process\ProcessRunner;
+use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\Support\Clock;
@@ -59,6 +63,13 @@ use Throwable;
  * nothing *else* starts a second one either: two runners over one state
  * database, one set of task branches and one checklist would hand the same task
  * to two agents and each tick a box for work only one of them did.
+ *
+ * **A stop asked for from outside ends it too.** Ctrl+C installs nothing more
+ * than a flag ({@see Interruptions}); the pass under way gives way at its next
+ * phase boundary, the loop takes no further task on, the run's row is closed as
+ * `interrupted` with the signal as its reason, and the repository lock goes
+ * back only once the worker is confirmed stopped — section H, item 4, in the
+ * order those four things have to happen in.
  *
  * **A failed task does not end the run; a blocked one does.** A task whose
  * checks failed stays unchecked and retriable, and the tasks after it are
@@ -105,6 +116,7 @@ final class Runner
         private readonly string $executable = 'git',
         private readonly ProcessRunner $processes = new ProcessRunner(),
         private readonly ?RepositoryLock $lock = null,
+        private readonly Interruptions $interruptions = new Interruptions(),
     ) {
     }
 
@@ -149,8 +161,15 @@ final class Runner
      */
     public function run(?string $requested = null): RunReport
     {
-        // Before anything at all: one runner per repository (section H, item
-        // 1). Taken first because every step below writes somewhere two
+        // Before the lock, because a Ctrl+C between taking the lock and
+        // installing the handlers would be the one window in which an
+        // interruption left a run recorded as running with a lock nobody
+        // released. Returns false where ext-pcntl is missing, which is
+        // reported once the terminal is being written to (section H, item 4).
+        $listening = Interruptions::listen();
+
+        // Then: one runner per repository (section H, item 1). Taken before
+        // anything is read because every step below writes somewhere two
         // runners would be sharing — the state database, the task branches,
         // the worktree directory, the user's one checklist — and a conflict
         // noticed after the second agent has started is a conflict that has
@@ -159,10 +178,49 @@ final class Runner
             ->acquire(self::PURPOSE);
 
         try {
-            return $this->locked($requested, $lock);
+            return $this->locked($requested, $lock, $listening);
         } finally {
-            $lock->release();
+            // The lock goes back only once the worker is accounted for, and the
+            // handlers are put back after it: a second Ctrl+C arriving during
+            // this is still this package's to notice rather than PHP's to die
+            // of halfway through writing the lock record.
+            $this->relinquish($lock);
+            Interruptions::release();
         }
+    }
+
+    /**
+     * Give the lock back, or keep claiming it.
+     *
+     * PROJECT.md section H, item 4's "releasing ownership only after
+     * termination is confirmed". An ordinary run, and an interrupted run whose
+     * worker was confirmed stopped, release it. A run that stopped a worker and
+     * could not confirm it had gone leaves the record claiming the repository
+     * and naming the survivors, so the next `ralph run` or `ralph resume`
+     * refuses to start on top of an agent that may still be writing in a task
+     * worktree.
+     */
+    private function relinquish(HeldLock $lock): void
+    {
+        $unconfirmed = Interruptions::unconfirmed();
+
+        if ($unconfirmed === []) {
+            $lock->release();
+
+            return;
+        }
+
+        $lock->retain($unconfirmed);
+
+        $this->terminal?->lines([
+            sprintf(
+                'worker process%s %s could not be confirmed stopped',
+                count($unconfirmed) === 1 ? '' : 'es',
+                implode(', ', $unconfirmed),
+            ),
+            sprintf('  %s still records this repository as in use, so nothing will start '
+                . 'here until they have gone.', $lock->path()),
+        ]);
     }
 
     /**
@@ -171,7 +229,7 @@ final class Runner
      * @throws RalphException when the run cannot be set up, or when a task's
      *         outcome could not be recorded
      */
-    private function locked(?string $requested, HeldLock $lock): RunReport
+    private function locked(?string $requested, HeldLock $lock, bool $listening): RunReport
     {
         // A lock left behind by a runner that stopped without releasing it has
         // been taken over rather than waited for, and that is worth a line: a
@@ -181,16 +239,32 @@ final class Runner
             $this->terminal?->line($lock->describe());
         }
 
+        // A stop that arrived before the run got this far. Raised rather than
+        // recorded, because there is nothing yet to record it against: no run
+        // row, no worktree, nothing read and nothing written. A run that never
+        // started is not a run that was interrupted (section H, item 4).
+        //
+        // It is asked again after each setup step below for a reason that is
+        // not symmetry: those steps run `git`, a stop cancels every command the
+        // package starts, and an interruption reported as "the uncommitted
+        // changes could not be read" would send a user looking at their
+        // checkout for a problem that is not there.
+        $this->stopUnlessRunning();
+
         // Before anything is written: the user's own checkout must have nothing
         // of theirs in it that a run could be blamed for (section F, item 1).
         ControllingCheckout::forProject($this->configuration, $this->executable, $this->processes)
             ->requireRunnable();
+
+        $this->stopUnlessRunning();
 
         $agent = (new AgentSelector($this->adapters))->select($this->configuration, $requested);
         $adapter = $this->adapters->create($agent);
 
         $base = BaseResolver::forProject($this->configuration, $this->executable, $this->processes)
             ->resolve();
+
+        $this->stopUnlessRunning();
 
         $journal = Journal::of($this->state->open($this->configuration), $this->clock);
         $workbench = Workbench::forProject(
@@ -208,7 +282,7 @@ final class Runner
         // with rather than only that something is running.
         $lock->record($run->runId());
 
-        $this->announce($run, $agent, $base, $run->verification());
+        $this->announce($run, $agent, $base, $run->verification(), $listening);
 
         try {
             return $this->loop($run, $agent, $adapter, $base, $journal, $workbench);
@@ -219,6 +293,24 @@ final class Runner
             $this->close($journal, $run, $failure);
 
             throw $failure;
+        }
+    }
+
+    /**
+     * Give way before a setup step, if a stop has already been asked for.
+     *
+     * The run's counterpart of {@see TaskPass::stopIfInterrupted()}, and it
+     * throws for the same reason: the steps either side of it are the ones that
+     * must not half-happen.
+     *
+     * @throws InterruptionException when the run has been asked to stop
+     */
+    private function stopUnlessRunning(): void
+    {
+        $interruption = $this->interruptions->requested();
+
+        if ($interruption !== null) {
+            throw InterruptionException::before($interruption, 'the run was set up');
         }
     }
 
@@ -257,6 +349,7 @@ final class Runner
             $checks,
             $this->terminal,
             $this->clock,
+            $this->interruptions,
         );
 
         $limits = $this->configuration->limits();
@@ -265,6 +358,19 @@ final class Runner
         $drift = VerificationDrift::none();
 
         foreach ($tasks->pending() as $task) {
+            // Before the budget and before the task: a run that has been asked
+            // to stop takes nothing else on. The pass that was already under
+            // way when the signal arrived has given way at its own phase
+            // boundary (section H, item 4); this is the next task never being
+            // started.
+            $interruption = $this->interruptions->requested();
+
+            if ($interruption !== null) {
+                $stopped = $this->wasStopped($interruption, $tasks, $results);
+
+                break;
+            }
+
             // Measured from the run's row rather than from this loop's own
             // bookkeeping, and read before the task is taken on rather than
             // after: see {@see RunBudget}. A run with nothing left stops here
@@ -295,14 +401,16 @@ final class Runner
             $drift = $this->noticeDrift($checks, $drift);
 
             if ($result->stopsTheRun()) {
-                $stopped = sprintf('%s needs human input', $result->taskId()->value());
+                $stopped = $result->isInterrupted()
+                    ? $this->wasStopped($this->interruptions->requested(), $tasks, $results)
+                    : sprintf('%s needs human input', $result->taskId()->value());
 
                 break;
             }
         }
 
         $stopped ??= $this->whyItEnded($tasks, $results);
-        $run = $journal->runs()->complete($run, $stopped);
+        $run = $this->endOfRun($journal, $run, $stopped);
 
         $report = RunReport::of($run, $agent, $base, $tasks, $results, $stopped, $drift);
 
@@ -403,6 +511,49 @@ final class Runner
     }
 
     /**
+     * Close the run's row the way it ended.
+     *
+     * `interrupted` rather than `completed` when a stop was asked for, which is
+     * the state `ralph resume` looks for and the state that keeps the run's
+     * counters continuable (section H, items 3 and 4). Everything else is a run
+     * that ended on its own terms, however much of the checklist it got
+     * through.
+     *
+     * @throws RalphException when the row cannot be written
+     */
+    private function endOfRun(Journal $journal, RunRecord $run, string $stopped): RunRecord
+    {
+        return $this->interruptions->requested() === null
+            ? $journal->runs()->complete($run, $stopped)
+            : $journal->runs()->interrupt($run, $stopped);
+    }
+
+    /**
+     * Why the loop stopped because it was told to, and what it left.
+     *
+     * The pending count is the same arithmetic {@see self::outOfBudget()} does
+     * and for the same reason: "stopped by Ctrl+C" with one task left and with
+     * nine left are different situations, and the user who pressed the key is
+     * the one who has to decide what to do about it.
+     *
+     * @param list<TaskResult> $results
+     */
+    private function wasStopped(?Interruption $interruption, TaskList $tasks, array $results): string
+    {
+        $pending = max(0, $tasks->pendingCount() - count(array_filter(
+            $results,
+            static fn (TaskResult $result): bool => $result->isCompleted(),
+        )));
+
+        return sprintf(
+            '%s, with %d task%s still pending',
+            $interruption === null ? 'the run was stopped' : $interruption->reason(),
+            $pending,
+            $pending === 1 ? '' : 's',
+        );
+    }
+
+    /**
      * Why the loop stopped short of the checklist.
      *
      * The limit is named together with what it left undone, because the two
@@ -460,12 +611,25 @@ final class Runner
         AgentSelection $agent,
         BaseCommit $base,
         VerificationSnapshot $checks,
+        bool $listening,
     ): void {
-        $this->terminal?->lines([
+        $lines = [
             sprintf('%s: %s', $run->runId(), $agent->describe()),
             sprintf('base %s', $base->describe()),
             sprintf('checks: %s', $checks->describe()),
-        ]);
+        ];
+
+        // Said once, at the start, and only when it is not true: a user who may
+        // have to stop this run should know beforehand that Ctrl+C will end the
+        // process where it stands rather than stop the agent and write the run
+        // up. The run itself is unaffected, and `ralph resume` reconciles what
+        // such a stop leaves behind.
+        if (!$listening) {
+            $lines[] = 'note: ext-pcntl is not loaded, so Ctrl+C cannot be handled — it will stop '
+                . 'this process without stopping the agent or recording the interruption';
+        }
+
+        $this->terminal?->lines($lines);
     }
 
     /**
@@ -492,8 +656,21 @@ final class Runner
     private function close(Journal $journal, RunRecord $run, Throwable $failure): void
     {
         try {
+            $current = $journal->runs()->get($run->rowId());
+
+            // A stop the user asked for is not a failure of the run, wherever
+            // it surfaced. It can escape from outside a pass — a checklist read
+            // between tasks, the reconciliation after one — and the row has to
+            // say `interrupted` for those too, because that is what resume
+            // looks for (section H, item 4).
+            if ($failure instanceof InterruptionException) {
+                $journal->runs()->interrupt($current, $failure->interruption()->reason());
+
+                return;
+            }
+
             $journal->runs()->fail(
-                $journal->runs()->get($run->rowId()),
+                $current,
                 sprintf('%s: %s', $this->describe($failure), $failure->getMessage()),
             );
         } catch (Throwable) {

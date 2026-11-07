@@ -27,6 +27,15 @@ use InvalidArgumentException;
  * would both believe they hold it — the exact situation the lock exists to
  * prevent.
  *
+ * **A record may outlive its runner on purpose.** Ordinarily a run releases
+ * the lock on its way out. A run that was interrupted and could not confirm
+ * that the agent it had started has stopped writes {@see self::withWorkers()}
+ * instead: the record still claims the repository and names the processes that
+ * are the reason (PROJECT.md section H, item 4). The `flock` is gone with the
+ * process either way, so the claim is all there is — and it is enough, because
+ * the takeover check asks the operating system about those processes before it
+ * allows anything to start.
+ *
  * **It is evidence, not authority.** Nothing here is trusted over the kernel:
  * a record claiming to be held while the lock is free describes a runner that
  * died, and a record whose process is somehow still running contradicts the
@@ -35,6 +44,10 @@ use InvalidArgumentException;
  */
 final class LockHolder
 {
+    /**
+     * @param list<int> $workers worker processes the runner asked to stop and
+     *        could not confirm had
+     */
     private function __construct(
         private readonly string $purpose,
         private readonly ?string $host,
@@ -42,6 +55,7 @@ final class LockHolder
         private readonly ?string $runId,
         private readonly Timestamp $acquiredAt,
         private readonly ?Timestamp $releasedAt,
+        private readonly array $workers = [],
     ) {
     }
 
@@ -98,6 +112,7 @@ final class LockHolder
         $host = $data['host'] ?? null;
         $pid = $data['pid'] ?? null;
         $runId = $data['run_id'] ?? null;
+        $workers = $data['workers'] ?? null;
 
         return new self(
             trim($purpose),
@@ -106,6 +121,7 @@ final class LockHolder
             is_string($runId) && trim($runId) !== '' ? trim($runId) : null,
             $acquiredAt,
             $releasedAt,
+            is_array($workers) ? self::processes($workers) : [],
         );
     }
 
@@ -127,6 +143,7 @@ final class LockHolder
             self::identifier($runId),
             $this->acquiredAt,
             $this->releasedAt,
+            $this->workers,
         );
     }
 
@@ -142,6 +159,35 @@ final class LockHolder
             $this->runId,
             $this->acquiredAt,
             Timestamp::now($clock),
+            $this->workers,
+        );
+    }
+
+    /**
+     * The same record, naming workers it could not confirm had stopped.
+     *
+     * The other half of PROJECT.md section H, item 4's "releasing ownership
+     * only after termination is confirmed". The `flock` itself cannot be kept
+     * past this process's death — the kernel drops it, which is the whole
+     * reason the lock is trustworthy — so what is kept is the *claim*: a record
+     * that says the repository is still held, and by which processes. The
+     * takeover check reads it and refuses while any of them is alive
+     * ({@see RepositoryLock::acquire()}), so a resume cannot start on top of an
+     * agent that is still writing in a task worktree.
+     *
+     * @param list<int> $workers
+     */
+    public function withWorkers(array $workers): self
+    {
+        return new self(
+            $this->purpose,
+            $this->host,
+            $this->pid,
+            $this->runId,
+            $this->acquiredAt,
+            // Deliberately not released: these processes are the reason.
+            null,
+            self::processes($workers),
         );
     }
 
@@ -166,6 +212,21 @@ final class LockHolder
     public function runId(): ?string
     {
         return $this->runId;
+    }
+
+    /**
+     * Worker processes this record's runner left behind unaccounted for.
+     *
+     * @return list<int>
+     */
+    public function workers(): array
+    {
+        return $this->workers;
+    }
+
+    public function hasWorkers(): bool
+    {
+        return $this->workers !== [];
     }
 
     public function acquiredAt(): Timestamp
@@ -236,20 +297,27 @@ final class LockHolder
         };
 
         return sprintf(
-            '%s, taken by %s at %s%s',
+            '%s, taken by %s at %s%s%s',
             $this->runId ?? sprintf('a "%s" command', $this->purpose),
             $where,
             $this->acquiredAt->value(),
             $this->releasedAt === null
                 ? ''
                 : sprintf(' and released at %s', $this->releasedAt->value()),
+            $this->workers === []
+                ? ''
+                : sprintf(
+                    ', leaving worker process%s %s unaccounted for',
+                    count($this->workers) === 1 ? '' : 'es',
+                    implode(', ', $this->workers),
+                ),
         );
     }
 
     /**
      * The record as the lock file holds it.
      *
-     * @return array<string, scalar|null>
+     * @return array<string, scalar|null|list<int>>
      */
     public function toStorage(): array
     {
@@ -260,6 +328,7 @@ final class LockHolder
             'run_id' => $this->runId,
             'acquired_at' => $this->acquiredAt->value(),
             'released_at' => $this->releasedAt?->value(),
+            'workers' => $this->workers,
         ];
     }
 
@@ -295,6 +364,30 @@ final class LockHolder
         }
 
         return $trimmed;
+    }
+
+    /**
+     * Process ids, as a record may be read or written with them.
+     *
+     * Anything unusable is dropped rather than refused: the list exists to
+     * explain a refusal, and a lock file that could not be read at all would
+     * cost a user their next run over a malformed number.
+     *
+     * @param array<array-key, mixed> $workers
+     *
+     * @return list<int>
+     */
+    private static function processes(array $workers): array
+    {
+        $pids = [];
+
+        foreach ($workers as $pid) {
+            if (is_int($pid) && $pid > 0 && !in_array($pid, $pids, true)) {
+                $pids[] = $pid;
+            }
+        }
+
+        return $pids;
     }
 
     /**

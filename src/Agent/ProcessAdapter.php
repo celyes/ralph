@@ -76,6 +76,16 @@ use Celyes\RalphPhp\State\FailureEvidence;
  * briefing asks for. {@see self::interpret()} stays abstract because an agent
  * whose CLI says some of this natively should use that first, but an adapter
  * that has nothing else to go on has one line to write.
+ *
+ * **Cancellation is not an adapter's to implement either.** A run stopped with
+ * Ctrl+C comes back from {@see ProcessRunner} as a cancelled result, and it is
+ * turned into {@see ExecutionResult::cancelled()} here, before
+ * {@see self::interpret()} is reached. So every adapter — shipped or registered
+ * — cancels identically, and none can mistake the half-written output of a
+ * killed agent for a candidate implementation. That is PROJECT.md section H,
+ * item 4, and it is also the cancellation each of section E's items 6 and 7
+ * asks its adapter for: one implementation, because an agent's CLI has no say
+ * in what happens once it has been killed.
  */
 abstract class ProcessAdapter implements ExecutionAdapter
 {
@@ -124,6 +134,26 @@ abstract class ProcessAdapter implements ExecutionAdapter
             // this returns, and whoever opened it closes it.
             $output,
         );
+
+        // A run the user stopped. Before the timeout below and before anything
+        // is interpreted, because an attempt that was cancelled has no verdict
+        // on the work at all: whatever the agent had printed is partial, and
+        // reading a result block out of it would be reading half a sentence
+        // (PROJECT.md section H, item 4). The attempt stays retryable, which is
+        // what makes an interrupted run resumable.
+        $cancelled = $result->cancelledBy();
+
+        if ($cancelled !== null) {
+            $termination = $result->termination();
+            $stopped = sprintf('%s was stopped: %s', $request->agent()->name(), $cancelled->reason());
+
+            $output->note($termination === null ? $stopped : $stopped . '; ' . $termination->describe());
+
+            return ExecutionResult::cancelled(
+                evidence: $this->evidenceOf($stopped, $result),
+                seconds: $result->seconds(),
+            );
+        }
 
         // Normalised here rather than in each adapter: a killed process has no
         // output to interpret and reported no exit status, so there is nothing

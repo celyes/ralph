@@ -14,6 +14,7 @@ use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\FilesystemException;
+use Celyes\RalphPhp\Exception\InterruptionException;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\CommitMessage;
@@ -23,6 +24,7 @@ use Celyes\RalphPhp\Git\TaskWorktree;
 use Celyes\RalphPhp\Log\AttemptLog;
 use Celyes\RalphPhp\Memory\AttemptContext;
 use Celyes\RalphPhp\Memory\AttemptSummary;
+use Celyes\RalphPhp\Process\Interruptions;
 use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\AttemptOutcome;
 use Celyes\RalphPhp\State\AttemptRecord;
@@ -92,6 +94,18 @@ use InvalidArgumentException;
  * other way a pass can go wrong is left alone — see
  * {@see TaskResult::invitesAnotherAttempt()} for which, and why.
  *
+ * **A stop is taken between phases, and never after a commit.** Nothing in the
+ * middle of a phase is abandoned, and nothing a cancelled command said is held
+ * against the work: a step that refused while the run was stopping is recorded
+ * as the interruption it was, with its own complaint kept as the detail. A run the user
+ * interrupted puts the task down at the next phase boundary and records
+ * `interrupted` rather than `failed` — resumable, workspace kept, attempt
+ * counted (PROJECT.md section H, item 4). The boundaries stop at the commit:
+ * once there is a commit, the few milliseconds left in the pass are spent
+ * finishing it, because a pass abandoned between a commit and the row that
+ * records it is the one state resume has to guess about, and a pass abandoned
+ * between the commit and the checkbox is work a user cannot see they have.
+ *
  * **A pass that owes only the checklist write is not attempted again at all.**
  * The write to the user's file is the last thing a pass does and the only one
  * that can fail with everything else already durable, so it is recorded as a
@@ -109,6 +123,8 @@ final class TaskPass
      * @param Clock $clock what times the gap between attempts within one pass,
      *        which is the part of the run's time budget no row has been written
      *        for yet
+     * @param Interruptions $interruptions where a stop asked for from outside
+     *        the process is noticed between phases
      */
     public function __construct(
         private readonly Configuration $configuration,
@@ -122,6 +138,7 @@ final class TaskPass
         private readonly VerificationSnapshot $checks,
         private readonly ?Output $terminal = null,
         private readonly Clock $clock = new SystemClock(),
+        private readonly Interruptions $interruptions = new Interruptions(),
     ) {
     }
 
@@ -312,6 +329,12 @@ final class TaskPass
 
             $context = $this->workbench->context()->load($this->configuration, $task);
 
+            // Before the attempt is spent: a run stopped while a worktree was
+            // being checked out has not tried the task, and counting an attempt
+            // against it would shorten its life for something that was not its
+            // doing.
+            $this->stopIfInterrupted('the agent was invoked');
+
             // The attempt is spent here and not before. Everything above can
             // fail with the agent never having been invoked, and an attempt
             // counted against a task whose workspace could not be made would
@@ -327,6 +350,12 @@ final class TaskPass
             $result = $this->invoke($task, $record, $attempt, $worktree, $context, $budget, $log);
             $attempt = $this->journal->attempts()->recordClaim($attempt, $result->claim());
 
+            // Before the workspace is read back. A stopped worker's result is
+            // already cancelled, and the audit below asks Git several questions
+            // the stop would cut short too — so an interruption reported as a
+            // workspace Git could not read would bury what actually happened.
+            $this->stopIfInterrupted('the workspace was read back');
+
             // What the worker did to the repository, put back or refused,
             // before anything is verified against it.
             $this->workbench->auditor()->require($record, $worktree, $branch, $before, $log);
@@ -336,18 +365,40 @@ final class TaskPass
                 return $this->settled($task, $record, $attempt, $result, $log);
             }
 
+            // And again after it: the checks would otherwise be run against a
+            // workspace nobody is going to commit, and a stop arriving during
+            // them would report the project's own test suite as failing.
+            $this->stopIfInterrupted('the checks were run');
+
             // Verifying: the configured checks, run against the workspace by
             // something that is not the worker.
             $record = $this->journal->generations()->enterPhase($record, Phase::Verifying);
             $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Verifying);
 
-            $verification = $this->verifier->verify($this->checks->commands(), $worktree->path(), $log);
+            $checked = $this->verifier->verify($this->checks->commands(), $worktree->path(), $log);
+
+            // Asked again before the verdict is kept, and that is the point of
+            // its placement: a stop cancels every command the package starts,
+            // so a check cut off halfway reports failure. Recorded as a
+            // verification result it would be a false accusation against the
+            // work, stored as a row and handed to the next attempt as evidence
+            // — so the run gives way here with nothing written about the
+            // checks, which is the honest account of a run that stopped while
+            // they were still going.
+            $this->stopIfInterrupted('the checks had finished');
+
+            $verification = $checked;
             $this->journal->verifications()->record($attempt, $verification);
             $log->note('verification: ' . $verification->describe());
 
             if (!$verification->passed()) {
                 return $this->unverified($task, $record, $attempt, $result, $verification, $log);
             }
+
+            // The last boundary a stop is taken at. Past this point the pass
+            // may hold a commit, and finishing it costs milliseconds while
+            // abandoning it would leave work recorded nowhere a user can see.
+            $this->stopIfInterrupted('the work was staged for a commit');
 
             // Committing. Staging is a reading and happens either way; the
             // phase is only entered when there is something to commit, because
@@ -439,7 +490,28 @@ final class TaskPass
                 $log,
                 $satisfaction,
             );
+        } catch (InterruptionException $stopped) {
+            return $this->interrupted($task, $record, $attempt, $verification, $stopped, $log);
         } catch (RalphException $refusal) {
+            // A step that refused while the run was stopping refused *because*
+            // the run was stopping: a stop cancels every command the package
+            // starts, so Git is the thing most likely to complain and "the
+            // commit could not be created" would send a reader to look at
+            // their repository. The step's own words are kept as the detail;
+            // what the pass is recorded as is interrupted.
+            $interruption = $this->interruptions->requested();
+
+            if ($interruption !== null) {
+                return $this->interrupted(
+                    $task,
+                    $record,
+                    $attempt,
+                    $verification,
+                    InterruptionException::during($interruption, $refusal),
+                    $log,
+                );
+            }
+
             return $this->refused($task, $record, $attempt, $verification, $refusal, $log);
         } finally {
             $this->remember($record, $attempt);
@@ -1218,6 +1290,101 @@ final class TaskPass
             $verification,
             $blocker->reason(),
         );
+    }
+
+    /**
+     * Give way, if a stop has been asked for.
+     *
+     * Called at the phase boundaries of PROJECT.md section H, item 4 and
+     * nowhere inside one: a step that is halfway through writing a row or a
+     * file finishes it, because an interruption is a reason to stop doing more
+     * work and never a reason to leave less of a record.
+     *
+     * @param string $next what would happen next, for the message a user reads
+     *
+     * @throws InterruptionException when the run has been asked to stop
+     */
+    private function stopIfInterrupted(string $next): void
+    {
+        $interruption = $this->interruptions->requested();
+
+        if ($interruption !== null) {
+            throw InterruptionException::before($interruption, $next);
+        }
+    }
+
+    /**
+     * A pass the user stopped.
+     *
+     * `interrupted` and not `failed`, which is the whole reason this is not
+     * {@see self::refused()}: nothing was wrong with the work, the attempt is
+     * still retryable ({@see AttemptOutcome::Cancelled}), the workspace is kept
+     * as it stood, and `ralph resume` continues from the phase on the row.
+     *
+     * The attempt is closed if one had been begun — a stop between the
+     * workspace and the agent leaves none — and the evidence says what stopped
+     * it rather than what was wrong with it, because the next attempt reads
+     * this trail and being told about a Ctrl+C would teach it nothing about the
+     * task.
+     *
+     * @throws RalphException when the interruption cannot itself be recorded,
+     *         in which case there is nothing useful left to do with it
+     */
+    private function interrupted(
+        Task $task,
+        GenerationRecord $record,
+        ?AttemptRecord $attempt,
+        ?VerificationReport $verification,
+        InterruptionException $stopped,
+        AttemptLog $log,
+    ): TaskResult {
+        $log->note($stopped->getMessage());
+
+        $current = $this->journal->generations()->find($record->generation()) ?? $record;
+        $phase = $current->phase();
+
+        if ($attempt !== null) {
+            $open = $this->journal->attempts()->get($current, $attempt->number());
+
+            if ($open !== null && !$open->isFinished()) {
+                $attempt = $this->journal->attempts()->finish(
+                    $open,
+                    AttemptOutcome::Cancelled,
+                    LifecycleState::Interrupted,
+                    evidence: FailureEvidence::of(
+                        sprintf(
+                            'the run was stopped during %s',
+                            $phase === null ? 'the pass' : $phase->value,
+                        ),
+                        $stopped->getMessage(),
+                    ),
+                );
+            }
+        }
+
+        return $this->stopped(
+            $task,
+            $this->interrupting($current),
+            $attempt,
+            $verification,
+            $stopped->getMessage(),
+        );
+    }
+
+    /**
+     * Record the pass as interrupted, where its row can still move there.
+     *
+     * The guard is the same one {@see self::failing()} needs and for the same
+     * reason: a row a step has already closed keeps the state that step
+     * decided, because the first reason a pass stopped is the true one.
+     *
+     * @throws RalphException when the row cannot be written
+     */
+    private function interrupting(GenerationRecord $record): GenerationRecord
+    {
+        return $record->state()->canTransitionTo(LifecycleState::Interrupted)
+            ? $this->journal->generations()->interrupt($record)
+            : $record;
     }
 
     /**

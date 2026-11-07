@@ -9,8 +9,11 @@ use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Exception\CheckoutException;
+use Celyes\RalphPhp\Exception\InterruptionException;
 use Celyes\RalphPhp\Exception\LockException;
 use Celyes\RalphPhp\Exception\PreparationException;
+use Celyes\RalphPhp\Process\Interruption;
+use Celyes\RalphPhp\Process\Interruptions;
 use Celyes\RalphPhp\Process\KnownProcesses;
 use Celyes\RalphPhp\Run\Journal;
 use Celyes\RalphPhp\Run\RepositoryLock;
@@ -19,6 +22,7 @@ use Celyes\RalphPhp\Run\Runner;
 use Celyes\RalphPhp\Run\TaskPass;
 use Celyes\RalphPhp\Run\TaskResult;
 use Celyes\RalphPhp\Run\Workbench;
+use Celyes\RalphPhp\State\AttemptOutcome;
 use Celyes\RalphPhp\State\ChecklistMarker;
 use Celyes\RalphPhp\State\ChecklistUpdateState;
 use Celyes\RalphPhp\State\LifecycleState;
@@ -116,6 +120,10 @@ final class RunnerTest extends TestCase
 
     protected function tearDown(): void
     {
+        // A stop is process-wide state, so a case that interrupted a run has to
+        // put it back before the next one starts in an interrupted one.
+        Interruptions::release();
+
         Git::tryRun($this->project->root(), 'worktree', 'prune');
         TemporaryDirectory::remove($this->tools);
         $this->project->remove();
@@ -1418,6 +1426,255 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * Ctrl+C while an agent is working: PROJECT.md section H, item 4, end to
+     * end.
+     *
+     * The interruption is a real signal, sent by the worker to the process that
+     * started it, so it arrives where one actually does — in the middle of an
+     * attempt, with a half-finished workspace on disk. Every clause of the item
+     * is a separate assertion: the worker is stopped, the interruption is
+     * recorded, the files are preserved, and the lock goes back because the
+     * worker was confirmed gone.
+     */
+    #[Test]
+    public function a_run_stopped_with_ctrl_c_stops_the_worker_and_records_the_interruption(): void
+    {
+        $this->requireSignals();
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $worker = $this->givenAWorker([
+            FixtureStep::interruption()
+                ->editing(['src/Import.php' => "<?php\n\n// half done\n"])
+                ->interruptingTheRunner(),
+        ]);
+
+        $report = $this->loopOver(ScriptedVerifier::passing());
+
+        // The run.
+        self::assertTrue($report->wasInterrupted(), $report->describe());
+        self::assertStringContainsString('stopped by SIGINT (Ctrl+C)', $report->stopReason());
+        self::assertStringContainsString('2 tasks still pending', $report->stopReason());
+        self::assertCount(1, $report->results(), 'The second task was taken on after the stop.');
+
+        // The task.
+        $result = $report->results()[0];
+        self::assertTrue($result->isInterrupted(), $result->describe());
+        self::assertFalse($result->isCompleted());
+        self::assertFalse($result->wasChecked());
+        self::assertTrue($result->stopsTheRun());
+        self::assertNull($result->commitSha(), 'An interrupted attempt committed something.');
+        self::assertCount(1, $report->interrupted());
+
+        // The worker, which was really stopped: it recorded the signal, and the
+        // package stopped it rather than waiting for it to finish its 30
+        // seconds.
+        self::assertSame([Interruption::SIGTERM], $worker->signals());
+
+        // The rows, which are what resume will believe.
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Interrupted, $pass->state());
+        self::assertSame(Phase::Executing, $pass->phase(), 'The phase it stopped in is what resume reads.');
+        self::assertTrue($pass->state()->isResumable());
+        self::assertSame(1, $pass->attempts(), 'An attempt that was cut short still counts.');
+
+        $attempt = $journal->attempts()->latestFor($pass);
+        self::assertNotNull($attempt);
+        self::assertSame(LifecycleState::Interrupted, $attempt->state());
+        self::assertSame(AttemptOutcome::Cancelled, $attempt->outcome());
+        self::assertTrue(
+            AttemptOutcome::Cancelled->isRetryable(),
+            'A cancelled attempt is what makes a resume possible.',
+        );
+
+        $run = $journal->runs()->get($report->run()->rowId());
+        self::assertSame(LifecycleState::Interrupted, $run->state());
+        self::assertStringContainsString('stopped by SIGINT', (string) $run->stopReason());
+        self::assertSame(1, $run->iterations());
+
+        // The files: the workspace is kept exactly as the stopped agent left
+        // it, which is the evidence a person needs (section F, item 10).
+        $workspace = (string) $pass->worktree()->path();
+        self::assertDirectoryExists($workspace);
+        self::assertStringContainsString('half done', (string) file_get_contents($workspace . '/src/Import.php'));
+
+        // The user's checkout and checklist are untouched, and nothing was
+        // committed anywhere.
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+        self::assertStringContainsString('- [ ] ' . self::SECOND, $this->tasksFile());
+        self::assertSame([], $this->commitsBeyondBase());
+    }
+
+    /**
+     * The lock goes back, because the worker was confirmed stopped.
+     *
+     * The conditional half of the item's last clause. A confirmed termination
+     * owes nothing, so an interrupted run leaves the repository free and the
+     * next command — `ralph resume` — can take it without a word from the user.
+     */
+    #[Test]
+    public function an_interrupted_run_whose_worker_stopped_leaves_the_lock_free(): void
+    {
+        $this->requireSignals();
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::interruption()->interruptingTheRunner()]);
+
+        $this->loopOver(ScriptedVerifier::passing());
+
+        $record = json_decode((string) file_get_contents($this->project->path('.ralph/runtime/run.lock')), true);
+        self::assertIsArray($record);
+        self::assertNotNull($record['released_at'] ?? null, 'An interrupted run kept a lock it did not need.');
+        self::assertSame([], $record['workers'] ?? null);
+
+        // And the proof that the record is not merely saying so.
+        $next = RepositoryLock::in($this->project->root())->acquire('resume');
+
+        try {
+            self::assertTrue($next->isHeld());
+        } finally {
+            $next->release();
+        }
+    }
+
+    /**
+     * A stop that arrived before the run was set up.
+     *
+     * Nothing is recorded, and that is the right answer rather than a gap: a
+     * run that never read the checklist, never opened a row and never started
+     * an agent has not been interrupted, it has not happened. The refusal is
+     * raised so a caller can report it, and the project is left exactly as it
+     * was.
+     *
+     * It is also the case that makes every setup step's check worth having:
+     * `git` is what the steps run, a stop cancels every command the package
+     * starts, and without the check this would surface as a user's checkout
+     * that could not be read.
+     */
+    #[Test]
+    public function a_run_asked_to_stop_before_it_is_set_up_does_not_start(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n"])]);
+        $before = $this->tasksFile();
+
+        Interruptions::request(Interruption::SIGTERM);
+
+        try {
+            $this->loopOver(ScriptedVerifier::passing());
+            self::fail('A run started after it had been asked to stop.');
+        } catch (InterruptionException $stopped) {
+            self::assertSame(Interruption::SIGTERM, $stopped->interruption()->signal());
+            self::assertStringContainsString('stopped by SIGTERM before the run was set up', $stopped->getMessage());
+            self::assertStringContainsString('ralph resume', implode("\n", $stopped->hints()));
+        }
+
+        self::assertSame([], $worker->records(), 'An agent was started after the run had been stopped.');
+        self::assertDirectoryDoesNotExist($this->project->path('.ralph/runtime/worktrees'));
+        self::assertSame($before, $this->tasksFile());
+        self::assertSame([], $this->commitsBeyondBase());
+
+        // And the lock is free: nothing was left running to hold it for.
+        $next = RepositoryLock::in($this->project->root())->acquire('run');
+
+        try {
+            self::assertTrue($next->isHeld());
+        } finally {
+            $next->release();
+        }
+    }
+
+    /**
+     * A stop that arrived in the gap between two tasks.
+     *
+     * The loop's own check, which the pass cannot make: the task before it
+     * finished, committed and was ticked off, and the next one is simply never
+     * started — no workspace, no agent, no attempt. The moment is arranged
+     * through the clock the loop reads between tasks, because a signal cannot
+     * be aimed at a window measured in microseconds.
+     */
+    #[Test]
+    public function a_stop_between_two_tasks_leaves_the_next_one_untouched(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n// done\n"])]);
+
+        $report = $this->loopOver(
+            ScriptedVerifier::passing(),
+            terminal: null,
+            clock: $this->aClockThatStopsTheRunOnceTicked(self::FIRST),
+        );
+
+        // The first task was finished, not cut short: a stop is a reason not to
+        // start the next task, never a reason to abandon the one in hand.
+        self::assertCount(1, $report->results());
+        self::assertTrue($report->results()[0]->isCompleted());
+        self::assertTrue($report->results()[0]->wasChecked());
+        self::assertCount(1, $worker->attempts(), 'The second task was handed to the agent.');
+
+        self::assertTrue($report->wasInterrupted(), $report->describe());
+        self::assertStringContainsString('stopped by SIGINT (Ctrl+C)', $report->stopReason());
+        self::assertStringContainsString('1 task still pending', $report->stopReason());
+
+        $markdown = $this->tasksFile();
+        self::assertStringContainsString('- [x] ' . self::FIRST, $markdown);
+        self::assertStringContainsString('- [ ] ' . self::SECOND, $markdown);
+
+        $journal = $this->journal();
+        $second = $this->recorded(self::SECOND);
+        self::assertTrue($second->isPending(), 'The task the run did not reach is still pending.');
+        self::assertSame([], $journal->generations()->forTask($second->id()));
+
+        $run = $journal->runs()->get($report->run()->rowId());
+        self::assertSame(LifecycleState::Interrupted, $run->state());
+        self::assertSame(1, $run->iterations(), 'An iteration was counted for a task never taken on.');
+    }
+
+    /**
+     * A second task is not started after the first was interrupted, even though
+     * the tasks are independent work.
+     *
+     * The distinction from a *failed* task, which does not end the run: a user
+     * who pressed Ctrl+C is not asking for the rest of the checklist to be
+     * worked through.
+     */
+    #[Test]
+    public function the_task_after_an_interrupted_one_is_left_pending(): void
+    {
+        $this->requireSignals();
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $worker = $this->givenAWorker([
+            FixtureStep::interruption()->interruptingTheRunner(),
+            FixtureStep::success(['README.md' => "Documented.\n"]),
+        ]);
+
+        $report = $this->loopOver(ScriptedVerifier::passing());
+
+        self::assertCount(1, $worker->attempts(), 'The agent was handed a second task after the stop.');
+        self::assertSame(1, $report->remaining() - 1, 'Both tasks should still be pending.');
+        self::assertNull($report->result(self::SECOND));
+        self::assertStringContainsString('- [ ] ' . self::SECOND, $this->tasksFile());
+    }
+
+    /**
+     * A run that was not interrupted is recorded as completing, and gives up
+     * nothing to the machinery that handles one that was.
+     */
+    #[Test]
+    public function an_ordinary_run_is_still_recorded_as_completed(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n// done\n"])]);
+
+        $report = $this->loopOver(ScriptedVerifier::passing());
+
+        self::assertFalse($report->wasInterrupted());
+        self::assertSame([], $report->interrupted());
+        self::assertSame(
+            LifecycleState::Completed,
+            $this->journal()->runs()->get($report->run()->rowId())->state(),
+        );
+    }
+
+    /**
      * The lock, from the loop's side: a run does not start beside another one.
      *
      * PROJECT.md section H, item 1. The refusal has to come before anything is
@@ -1545,6 +1802,16 @@ final class RunnerTest extends TestCase
     /**
      * A lock file holding a record that claims to be held, over a free lock.
      */
+    /**
+     * Ctrl+C can only be tested where it can be sent and handled.
+     */
+    private function requireSignals(): void
+    {
+        if (!Interruptions::isSupported() || !function_exists('posix_kill')) {
+            self::markTestSkipped('Stopping a run needs ext-pcntl, and the worker signals it with ext-posix.');
+        }
+    }
+
     private function givenAnAbandonedLock(int $pid, string $runId): void
     {
         $this->project->write('.ralph/runtime/run.lock', (string) json_encode([
@@ -1727,6 +1994,39 @@ final class RunnerTest extends TestCase
      * task, so a clock that moves when it is read is the smallest substitution
      * that makes the arithmetic observable.
      */
+    /**
+     * A clock that stops the run once a task's box has been ticked.
+     *
+     * How a stop is placed in the gap between two tasks, which is a window no
+     * signal can be aimed at. The clock is what the loop reads on either side
+     * of a pass, so it is the one thing guaranteed to be consulted again after
+     * a task has been finalized and before the next is taken on — and a ticked
+     * box is the last thing a pass does, which makes "after this task
+     * finished" something a test can state rather than count.
+     *
+     * Everything else is real: the stop goes through the same process-wide
+     * channel a signal handler writes to, and the loop notices it the same way.
+     */
+    private function aClockThatStopsTheRunOnceTicked(string $description): Clock
+    {
+        return new class ($this->project->path('.ralph/tasks.md'), $description) implements Clock {
+            public function __construct(
+                private readonly string $checklist,
+                private readonly string $description,
+            ) {
+            }
+
+            public function now(): DateTimeImmutable
+            {
+                if (str_contains((string) @file_get_contents($this->checklist), '- [x] ' . $this->description)) {
+                    Interruptions::request(Interruption::SIGINT);
+                }
+
+                return new DateTimeImmutable('2026-11-07 09:00:00', new DateTimeZone('UTC'));
+            }
+        };
+    }
+
     private function aClockThatJumpsBy(int $seconds): Clock
     {
         return new class ($seconds) implements Clock {

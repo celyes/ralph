@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Run;
 use Celyes\RalphPhp\Agent\AgentSelection;
 use Celyes\RalphPhp\Config\VerificationDrift;
 use Celyes\RalphPhp\Git\BaseCommit;
+use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\Tasks\TaskList;
 
@@ -185,6 +186,26 @@ final class RunReport
     public function isClean(): bool
     {
         return $this->unfinished() === [];
+    }
+
+    /**
+     * @return list<TaskResult>
+     */
+    public function interrupted(): array
+    {
+        return array_values(array_filter($this->results, static fn (TaskResult $r): bool => $r->isInterrupted()));
+    }
+
+    /**
+     * Whether the run was stopped from outside rather than ending on its own.
+     *
+     * Read off the run's row, which is the durable answer: the stop reason is
+     * prose, and a caller deciding what to print or what status to exit with
+     * should not be parsing it.
+     */
+    public function wasInterrupted(): bool
+    {
+        return $this->run->state() === LifecycleState::Interrupted;
     }
 
     /**

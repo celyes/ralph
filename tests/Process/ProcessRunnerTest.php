@@ -6,7 +6,10 @@ namespace Celyes\RalphPhp\Tests\Process;
 
 use Celyes\RalphPhp\Exception\ProcessException;
 use Celyes\RalphPhp\Log\OutputStream;
+use Celyes\RalphPhp\Process\Interruption;
+use Celyes\RalphPhp\Process\Interruptions;
 use Celyes\RalphPhp\Process\ProcessRunner;
+use Celyes\RalphPhp\Process\ProcessTree;
 use Celyes\RalphPhp\Tests\Log\RecordingSink;
 use Celyes\RalphPhp\Tests\Log\ThrowingSink;
 use Celyes\RalphPhp\Tests\Support\Environment;
@@ -21,8 +24,9 @@ use PHPUnit\Framework\TestCase;
  *
  * Real subprocesses throughout: what is under test is the interaction with the
  * operating system — that no shell sees the argument array, that both pipes are
- * drained without deadlocking, that a timeout actually stops the process — and
- * none of that can be observed through a double.
+ * drained without deadlocking, that a timeout actually stops the process, that
+ * a Ctrl+C stops it and everything it started — and none of that can be
+ * observed through a double.
  */
 #[CoversClass(ProcessRunner::class)]
 final class ProcessRunnerTest extends TestCase
@@ -33,6 +37,13 @@ final class ProcessRunnerTest extends TestCase
 
     private Environment $environment;
 
+    /**
+     * Grandchildren a test started, which nothing else will reap.
+     *
+     * @var list<int>
+     */
+    private array $spawned = [];
+
     protected function setUp(): void
     {
         $this->runner = new ProcessRunner();
@@ -42,6 +53,17 @@ final class ProcessRunnerTest extends TestCase
 
     protected function tearDown(): void
     {
+        // Process-wide by design, so a test that stopped a run has to put it
+        // back before the next one starts.
+        Interruptions::release();
+
+        foreach ($this->spawned as $pid) {
+            if (function_exists('posix_kill')) {
+                @posix_kill($pid, 9);
+            }
+        }
+
+        $this->spawned = [];
         $this->environment->restore();
         TemporaryDirectory::remove($this->directory);
     }
@@ -432,6 +454,194 @@ final class ProcessRunnerTest extends TestCase
         $result = $this->runner->run([PHP_BINARY, '-r', 'echo "collected";'], $this->directory);
 
         self::assertSame('collected', $result->standardOutput());
+    }
+
+    /**
+     * The whole of PROJECT.md section H, item 4 at this level: a command that
+     * is running when the run is asked to stop is stopped, and what comes back
+     * says so.
+     *
+     * The command signals its own parent — this process — so the stop arrives
+     * while it is genuinely running, exactly as a keyboard interrupt would.
+     */
+    #[Test]
+    public function a_command_running_when_the_run_is_stopped_is_cancelled(): void
+    {
+        $this->requireSignals();
+        Interruptions::listen();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', $this->interruptsItsParent()],
+            $this->directory,
+            timeout: 30,
+        );
+
+        self::assertTrue($result->wasCancelled(), $result->describe());
+        self::assertFalse($result->timedOut(), 'A cancellation is not a timeout: the limit was never reached.');
+        self::assertFalse($result->succeeded());
+        self::assertNull($result->exitCode(), 'A stopped command reported no verdict on its work.');
+        self::assertSame('stopped by SIGINT (Ctrl+C)', $result->cancelledBy()?->reason());
+        self::assertStringContainsString('cancelled', $result->describe());
+        self::assertStringContainsString('stopped by SIGINT', $result->failureReason());
+    }
+
+    #[Test]
+    public function what_a_cancelled_command_printed_before_it_was_stopped_is_kept_and_streamed(): void
+    {
+        $this->requireSignals();
+        Interruptions::listen();
+
+        $sink = new RecordingSink();
+
+        $this->runner->run(
+            [PHP_BINARY, '-r', $this->interruptsItsParent()],
+            $this->directory,
+            timeout: 30,
+            sink: $sink,
+        );
+
+        self::assertStringContainsString('working', $sink->textOf(OutputStream::Standard));
+    }
+
+    /**
+     * The process tree, through the runner: a worker's children go with it.
+     */
+    #[Test]
+    public function the_children_of_a_cancelled_command_are_stopped_too(): void
+    {
+        $this->requireSignals();
+
+        if (!ProcessTree::isReadable()) {
+            self::markTestSkipped('Reaching a grandchild needs a process filesystem.');
+        }
+
+        Interruptions::listen();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', $this->spawnsAChildThenInterruptsItsParent()],
+            $this->directory,
+            timeout: 30,
+        );
+
+        $grandchild = (int) trim($result->standardOutput());
+        self::assertGreaterThan(0, $grandchild, 'The command never reported the process it started: '
+            . $result->describe());
+        $this->spawned[] = $grandchild;
+
+        self::assertTrue($result->wasCancelled(), $result->describe());
+        self::assertContains($grandchild, $result->termination()?->signalled() ?? []);
+        self::assertFalse(
+            ProcessTree::isProcessAlive($grandchild),
+            'The process the worker started outlived the run that was stopped.',
+        );
+    }
+
+    /**
+     * What the run reads on its way out to decide whether it may release the
+     * repository lock. A confirmed stop owes nothing.
+     */
+    #[Test]
+    public function a_cancelled_command_that_was_confirmed_stopped_leaves_nothing_owed(): void
+    {
+        $this->requireSignals();
+        Interruptions::listen();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', $this->interruptsItsParent()],
+            $this->directory,
+            timeout: 30,
+        );
+
+        self::assertTrue($result->termination()?->isConfirmed(), (string) $result->termination()?->describe());
+        self::assertSame([], Interruptions::unconfirmed());
+    }
+
+    /**
+     * A command that timed out is stopped the same way and reported
+     * differently, and it does not touch what the run owes: the run carries on
+     * to the next task and gives its lock back when it finishes.
+     */
+    #[Test]
+    public function a_timeout_stops_the_command_without_making_the_run_owe_anything(): void
+    {
+        $result = $this->runner->run([PHP_BINARY, '-r', 'echo "slow"; sleep(30);'], $this->directory, timeout: 1);
+
+        self::assertTrue($result->timedOut(), $result->describe());
+        self::assertFalse($result->wasCancelled());
+        self::assertTrue($result->termination()?->isConfirmed(), (string) $result->termination()?->describe());
+        self::assertSame([], Interruptions::unconfirmed());
+    }
+
+    #[Test]
+    public function nothing_is_started_once_a_stop_has_been_asked_for(): void
+    {
+        Interruptions::request(Interruption::SIGTERM);
+
+        $result = $this->runner->run([PHP_BINARY, '-r', 'file_put_contents("ran.txt", "yes");'], $this->directory);
+
+        self::assertTrue($result->wasCancelled(), $result->describe());
+        self::assertSame('stopped by SIGTERM', $result->cancelledBy()?->reason());
+        self::assertSame(0.0, $result->seconds());
+        self::assertFileDoesNotExist(
+            $this->directory . '/ran.txt',
+            'A command was started after the run had been asked to stop.',
+        );
+    }
+
+    /**
+     * A command that finished normally says nothing about being stopped, which
+     * is what keeps every other caller of this class unaffected.
+     */
+    #[Test]
+    public function a_command_that_ran_to_its_own_conclusion_was_not_cancelled(): void
+    {
+        $result = $this->runner->run([PHP_BINARY, '-r', 'echo "done";'], $this->directory);
+
+        self::assertFalse($result->wasCancelled());
+        self::assertNull($result->cancelledBy());
+        self::assertNull($result->termination(), 'Nothing had to be stopped.');
+        self::assertTrue($result->succeeded());
+    }
+
+    /**
+     * A program that prints, interrupts the process that started it, and then
+     * stays there to be stopped.
+     *
+     * Not `sleep()`: a signal cuts that short, and a command that returned from
+     * it would exit by itself instead of waiting to be terminated.
+     */
+    private function interruptsItsParent(): string
+    {
+        return <<<'CODE'
+            fwrite(STDOUT, "working\n");
+            fflush(STDOUT);
+            posix_kill(posix_getppid(), SIGINT);
+            $deadline = microtime(true) + 30;
+            while (microtime(true) < $deadline) { usleep(20000); }
+            CODE;
+    }
+
+    /**
+     * The same, having started a child of its own first.
+     */
+    private function spawnsAChildThenInterruptsItsParent(): string
+    {
+        return <<<'CODE'
+            $quiet = [['file', '/dev/null', 'r'], ['file', '/dev/null', 'w'], ['file', '/dev/null', 'w']];
+            $child = proc_open([PHP_BINARY, '-r', 'sleep(60);'], $quiet, $pipes);
+            fwrite(STDOUT, proc_get_status($child)['pid'] . "\n");
+            fflush(STDOUT);
+            posix_kill(posix_getppid(), SIGINT);
+            $deadline = microtime(true) + 30;
+            while (microtime(true) < $deadline) { usleep(20000); }
+            CODE;
+    }
+
+    private function requireSignals(): void
+    {
+        if (!Interruptions::isSupported() || !function_exists('posix_kill')) {
+            self::markTestSkipped('Stopping a run needs ext-pcntl, and signalling a parent needs ext-posix.');
+        }
     }
 
     #[Test]

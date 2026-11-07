@@ -37,6 +37,8 @@ use RuntimeException;
  * - **How long it waits**, for the attempt timeout and the run budget.
  * - **Refusing to stop**, for the escalation from a termination signal to a
  *   kill.
+ * - **Interrupting the runner**, for Ctrl+C: the worker signals the process
+ *   that started it, so a stop arrives while an agent is genuinely working.
  *
  * Edit paths are relative to the workspace, which is the worker's working
  * directory. `..` is allowed on purpose — section F, item 6 stages the task
@@ -55,6 +57,7 @@ final class FixtureStep
     private const string SECONDS = 'seconds';
     private const string REPORTS = 'reports';
     private const string IGNORES_TERMINATION = 'ignores_termination';
+    private const string INTERRUPTS_RUNNER = 'interrupts_runner';
 
     /**
      * How long a waiting step waits when the test does not say.
@@ -78,6 +81,7 @@ final class FixtureStep
         private readonly int $seconds,
         private readonly bool $reports,
         private readonly bool $ignoresTermination,
+        private readonly bool $interruptsTheRunner,
     ) {
     }
 
@@ -143,6 +147,7 @@ final class FixtureStep
             [],
             $mode->waits() ? self::DEFAULT_WAIT_SECONDS : 0,
             true,
+            false,
             false,
         );
     }
@@ -234,6 +239,34 @@ final class FixtureStep
     }
 
     /**
+     * The same step, sending Ctrl+C to the runner before it waits.
+     *
+     * The only way an interruption can be tested where it actually happens:
+     * PROJECT.md section H, item 4 is about a signal arriving *while an agent
+     * is working*, and a test that set the flag beforehand would exercise the
+     * loop's bookkeeping while skipping the part that stops a live process. The
+     * worker signals its own parent, which is the process that started it — the
+     * runner — exactly as a keyboard interrupt in a terminal would reach it.
+     *
+     * A waiting mode, therefore: the worker must still be there when the runner
+     * acts on the signal, or there would be nothing to stop.
+     *
+     * @throws InvalidArgumentException when the step would have exited first
+     */
+    public function interruptingTheRunner(): self
+    {
+        if (!$this->mode->waits()) {
+            throw new InvalidArgumentException(sprintf(
+                'A step in mode "%s" does not wait, so it would have exited before the interruption it sent '
+                    . 'could reach it; use FixtureStep::interruption() or ::slow().',
+                $this->mode->value,
+            ));
+        }
+
+        return $this->with(interruptsTheRunner: true);
+    }
+
+    /**
      * The same step, recording a termination signal and carrying on anyway.
      *
      * Only {@see FixtureMode::Interruption} handles signals at all, so this is
@@ -290,6 +323,11 @@ final class FixtureStep
         return $this->ignoresTermination;
     }
 
+    public function interruptsTheRunner(): bool
+    {
+        return $this->interruptsTheRunner;
+    }
+
     /**
      * The step as the plan file holds it.
      *
@@ -306,6 +344,7 @@ final class FixtureStep
             self::SECONDS => $this->seconds,
             self::REPORTS => $this->reports,
             self::IGNORES_TERMINATION => $this->ignoresTermination,
+            self::INTERRUPTS_RUNNER => $this->interruptsTheRunner,
         ];
     }
 
@@ -354,6 +393,7 @@ final class FixtureStep
             self::integer($raw, self::SECONDS),
             self::boolean($raw, self::REPORTS),
             self::boolean($raw, self::IGNORES_TERMINATION),
+            self::boolean($raw, self::INTERRUPTS_RUNNER),
         );
     }
 
@@ -416,6 +456,7 @@ final class FixtureStep
         ?int $seconds = null,
         ?bool $reports = null,
         ?bool $ignoresTermination = null,
+        ?bool $interruptsTheRunner = null,
     ): self {
         return new self(
             $this->mode,
@@ -426,6 +467,7 @@ final class FixtureStep
             $seconds ?? $this->seconds,
             $reports ?? $this->reports,
             $ignoresTermination ?? $this->ignoresTermination,
+            $interruptsTheRunner ?? $this->interruptsTheRunner,
         );
     }
 }

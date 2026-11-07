@@ -51,6 +51,28 @@ final class Ralph
     public const array REQUIRED_EXTENSIONS = ['json', 'mbstring', 'pdo', 'pdo_sqlite'];
 
     /**
+     * Extensions the package uses where they are there, and works without.
+     *
+     * `pcntl` and `posix` are what make Ctrl+C a handled event rather than a
+     * dead process: the first installs the signal handler, the second reaches
+     * the children an agent spawned (PROJECT.md section H, item 4). Without
+     * them a run still works and still records everything else; an interruption
+     * simply ends the process where it stands, leaving work for `ralph resume`
+     * to reconcile rather than a run that wrote itself up on the way out.
+     *
+     * Suggested in `composer.json` and reported by preflight for that reason,
+     * and required by neither: a build without them can do every other thing
+     * this package does, and refusing to install there would be refusing over a
+     * courtesy.
+     *
+     * @var array<string, string>
+     */
+    public const array OPTIONAL_EXTENSIONS = [
+        'pcntl' => 'handles Ctrl+C by stopping the agent and recording the interruption',
+        'posix' => 'reaches the processes an agent started, so none is left behind',
+    ];
+
+    /**
      * Oldest Git version the package supports.
      *
      * Chosen from the Git features the design commits to, newest first:

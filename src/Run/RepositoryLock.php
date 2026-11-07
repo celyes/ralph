@@ -51,6 +51,12 @@ use Celyes\RalphPhp\Support\SystemClock;
  *   recycled process id and a filesystem whose locks do not work, and the two
  *   are indistinguishable from here — so the run stops with the reason and the
  *   next action (section H, item 9) rather than guessing.
+ * - **A worker that outlived its runner.** A run stopped with Ctrl+C terminates
+ *   the agent's process tree and confirms it; where it cannot, it leaves the
+ *   record claiming the repository and naming the survivors (section H, item
+ *   4). Those are a live agent writing in a task worktree, not an ambiguity, so
+ *   the refusal names the process to stop. One that has since exited is not
+ *   found and the lock is taken over as usual.
  *
  * The same gate serves `run` and `resume`: the question "has the previous
  * runner stopped" has one answer and one safe way to get it, and a fresh run
@@ -240,6 +246,26 @@ final class RepositoryLock
             );
         }
 
+        $worker = $this->survivingWorker($previous);
+
+        if ($worker !== null) {
+            return new LockException(
+                sprintf(
+                    'The run that held %s was interrupted and its worker process %d is still running.',
+                    $this->file,
+                    $worker,
+                ),
+                [
+                    sprintf('It records %s.', $previous->describe()),
+                    'Ralph PHP stopped that worker and could not confirm it had gone, so it left the '
+                        . 'repository claimed rather than release it over an agent that may still be '
+                        . 'writing in a task worktree.',
+                    sprintf('Stop process %d, then run the command again; the lock is taken over '
+                        . 'automatically once nothing it names is running.', $worker),
+                ],
+            );
+        }
+
         // A record this process wrote itself: whatever went wrong between
         // taking the lock and releasing it, the runner it names is this one,
         // and nothing can be overlapping.
@@ -266,6 +292,31 @@ final class RepositoryLock
                     sprintf('Check that process, then delete %s if it is not a Ralph PHP run.', $this->file),
                 ],
             );
+        }
+
+        return null;
+    }
+
+    /**
+     * A worker the previous run left behind that is still running, if any.
+     *
+     * The second half of PROJECT.md section H, item 4. The runner that wrote
+     * this record had already stopped — its `flock` is free — but a run
+     * interrupted with a worker it could not confirm dead names that worker
+     * instead of releasing ({@see LockHolder::withWorkers()}), and starting
+     * here while it is alive would put a second agent in a worktree the first
+     * is still writing to.
+     *
+     * Workers that have since gone are simply not found, so the next command
+     * takes the lock over in the ordinary way: the record is a reason to wait,
+     * not a lock-out that has to be cleared by hand.
+     */
+    private function survivingWorker(LockHolder $previous): ?int
+    {
+        foreach ($previous->workers() as $pid) {
+            if ($this->processes->isRunning($pid) === true) {
+                return $pid;
+            }
         }
 
         return null;
