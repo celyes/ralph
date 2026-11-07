@@ -284,6 +284,54 @@ final class GenerationStore
     }
 
     /**
+     * Put a pass back into `running` at {@see Phase::Finalizing}, without
+     * spending an attempt.
+     *
+     * The one way back into a pass that owes nothing but the write to the
+     * user's checklist (PROJECT.md section G, item 8). Everything an attempt
+     * produces is already recorded — the implementation, the commit, the
+     * publication — so there is nothing to attempt, and counting one would let
+     * a read-only file eventually exhaust the budget of a pass that has
+     * already done its work.
+     *
+     * Refused for a pass that is not finalizable, which is what keeps this from
+     * being a general way to call a pass running: resuming the finalization of
+     * work that was never committed would move a row into a state its history
+     * does not support.
+     *
+     * @throws StateException when the pass has no implementation recorded, its
+     *                        required push has not succeeded, or it cannot be
+     *                        run from the state it is in
+     */
+    public function resumeFinalizing(GenerationRecord $generation): GenerationRecord
+    {
+        if (!$generation->isFinalizable()) {
+            throw new StateException(
+                sprintf(
+                    'Generation %s has not reached finalization: %s.',
+                    $generation->slug(),
+                    $generation->hasImplementation()
+                        ? $generation->push()->describe()
+                        : 'neither a commit nor a recorded no-change result',
+                ),
+                [
+                    'Only a pass whose work is recorded can be resumed at its last phase; '
+                    . 'anything earlier is another attempt.',
+                ],
+            );
+        }
+
+        $state = $generation->state()->isRunning()
+            ? LifecycleState::Running
+            : $generation->state()->transitionTo(LifecycleState::Running);
+
+        return $this->write($generation, [
+            'state' => $state->value,
+            'phase' => Phase::Finalizing->value,
+        ]);
+    }
+
+    /**
      * Record what the pass is now in the middle of.
      *
      * @throws StateException when the phase would go backwards, or the pass is

@@ -12,6 +12,8 @@ use Celyes\RalphPhp\Agent\ExecutionResult;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Exception\ChecklistException;
+use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\CommitMessage;
@@ -25,6 +27,7 @@ use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\AttemptOutcome;
 use Celyes\RalphPhp\State\AttemptRecord;
 use Celyes\RalphPhp\State\Blocker;
+use Celyes\RalphPhp\State\ChecklistUpdate;
 use Celyes\RalphPhp\State\EvidenceTrail;
 use Celyes\RalphPhp\State\FailureEvidence;
 use Celyes\RalphPhp\State\GenerationRecord;
@@ -35,6 +38,7 @@ use Celyes\RalphPhp\State\WorktreeOwnership;
 use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\CheckboxEdit;
+use Celyes\RalphPhp\Tasks\ChecklistFile;
 use Celyes\RalphPhp\Tasks\ChecklistSnapshot;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskSnapshot;
@@ -87,6 +91,14 @@ use InvalidArgumentException;
  * (section G, item 4). The box stays unticked for every one of them. Every
  * other way a pass can go wrong is left alone — see
  * {@see TaskResult::invitesAnotherAttempt()} for which, and why.
+ *
+ * **A pass that owes only the checklist write is not attempted again at all.**
+ * The write to the user's file is the last thing a pass does and the only one
+ * that can fail with everything else already durable, so it is recorded as a
+ * plan before it is made ({@see \Celyes\RalphPhp\State\ChecklistStore}). A pass
+ * found with that plan still outstanding goes straight to
+ * {@see self::finishTheChecklist()}: no workspace, no agent, no checks, no
+ * second commit, and no attempt spent — section G, item 8.
  */
 final class TaskPass
 {
@@ -145,6 +157,17 @@ final class TaskPass
             ));
 
         $record = $this->open($task, $recorded);
+
+        // Before a budget is measured or a workspace is made: a pass whose work
+        // is recorded and whose checklist write is still outstanding owes one
+        // line in a Markdown file. Attempting the task again would re-invoke
+        // the agent against work that is already committed (section G, item 8).
+        $owed = $this->owedChecklistWrite($record);
+
+        if ($owed !== null) {
+            return $this->finishTheChecklist($task, $snapshot, $record, $owed);
+        }
+
         $unverified = null;
         $spent = 0.0;
 
@@ -590,7 +613,7 @@ final class TaskPass
         $blocker = $this->unearned($evidence) ?? $this->movedUnderUs($task, $snapshot);
 
         if ($blocker === null) {
-            $written = $this->tick($task, $record);
+            $written = $this->tick($task, $record, $log);
 
             if ($written instanceof Blocker) {
                 $blocker = $written;
@@ -682,31 +705,247 @@ final class TaskPass
     }
 
     /**
-     * Tick the task's box, and report a write that did not happen.
+     * Tick the task's box, recording the write before making it.
      *
-     * The implementation and the commit are already durable by the time this
-     * runs, so a checklist that cannot be written is a blocker and not a lost
-     * pass: the next action is to make the file writable, and nothing is
-     * implemented again.
+     * The plan goes in the state store first, which is what PROJECT.md
+     * section G, item 8 turns on: the implementation and the commit are already
+     * durable by the time this runs, so a checklist that cannot be written is a
+     * pass pending its finalization rather than a lost pass, and the row is
+     * what makes that recognisable afterwards. Without it, a pass blocked on an
+     * unwritable file and a pass blocked on a question the agent asked are the
+     * same row in `generations`.
      *
      * The edit is returned rather than discarded because the completion record
      * names the line it changed, which is the one part of the evidence that
      * exists nowhere else.
+     *
+     * @throws RalphException when the plan cannot be recorded, which is a
+     *         failure to record and not a failed write: the box is left alone
+     *         rather than ticked with nothing saying so
      */
-    private function tick(Task $task, GenerationRecord $record): CheckboxEdit|Blocker
+    private function tick(Task $task, GenerationRecord $record, AttemptLog $log): CheckboxEdit|Blocker
     {
+        return $this->apply($task, $record, $this->plan($task, $record), $log);
+    }
+
+    /**
+     * Record what the run means to write, before the file is touched.
+     *
+     * The checklist is hashed as it reads now rather than as the run first read
+     * it: this is the state the write is about to be applied to, and it is what
+     * a later retry has to compare against to know the file has not moved under
+     * it. The task's own hash goes with it for the same reason — a retry must
+     * be able to tell "the same write, not yet made" from "a different task on
+     * that line now".
+     *
+     * @throws RalphException when the checklist cannot be read, or the plan
+     *         cannot be recorded
+     */
+    private function plan(Task $task, GenerationRecord $record): ChecklistUpdate
+    {
+        return $this->journal->checklists()->plan(
+            $record,
+            $this->run->rowId(),
+            $this->configuration->tasksPath(),
+            ChecklistFile::hash(ChecklistFile::read($this->configuration->tasksFile())),
+            TaskSnapshot::hash($task->description(), $task->details()),
+        );
+    }
+
+    /**
+     * Make the planned write, and settle its row either way.
+     *
+     * The two failures are kept apart because they call for opposite things.
+     * A {@see FilesystemException} is the file saying no — unwritable, full,
+     * a rename that could not happen — and the plan stays outstanding, because
+     * the work is done and retrying the write unchanged is exactly right.
+     * A {@see ChecklistException} means what the plan was made against has
+     * changed, and retrying it would tick a line nobody asked about, so the
+     * plan is closed and the pass stops for reconciliation.
+     *
+     * @throws RalphException when the row cannot be settled
+     */
+    private function apply(
+        Task $task,
+        GenerationRecord $record,
+        ChecklistUpdate $planned,
+        AttemptLog $log,
+    ): CheckboxEdit|Blocker {
         try {
-            return $this->workbench->checkboxes()->tick($this->configuration, $task->id());
-        } catch (RalphException $failure) {
+            $edit = $this->workbench->checkboxes()->tick($this->configuration, $task->id());
+        } catch (FilesystemException $refused) {
+            $owed = $this->journal->checklists()->deferred($planned, $refused->getMessage());
+            $log->note('pending finalization: ' . $owed->describe());
+
+            return $this->pendingFinalization($record, $refused);
+        } catch (ChecklistException $changed) {
+            $this->journal->checklists()->abandoned($planned, $changed->getMessage());
+
             return Blocker::raised(
-                'the task is done, but its box could not be ticked: ' . $failure->getMessage(),
+                'the task is done, but its box could not be ticked: ' . $changed->getMessage(),
                 sprintf(
-                    'The implementation is kept%s and is not repeated. Make %s writable, then run `ralph resume`.',
-                    $record->commitSha() === null ? '' : ' as commit ' . substr((string) $record->commitSha(), 0, 8),
+                    'The implementation is kept%s and is not repeated. Reconcile %s against the task '
+                        . 'this pass was given, then run `ralph retry %s`.',
+                    $this->keptCommit($record),
                     $this->configuration->tasksPath(),
+                    $task->id()->value(),
                 ),
             );
         }
+
+        $this->journal->checklists()->applied($planned, ChecklistFile::hash($edit->markdown()));
+
+        return $edit;
+    }
+
+    /**
+     * A pass that earned its tick and could not write it.
+     *
+     * The next action is the whole point of the state: a person makes the file
+     * writable and resumes, and what resumes is the write and nothing else.
+     */
+    private function pendingFinalization(GenerationRecord $record, RalphException $failure): Blocker
+    {
+        return Blocker::raised(
+            'the task is done, but its box could not be ticked: ' . $failure->getMessage(),
+            sprintf(
+                'The implementation is kept%s and is not repeated: the pass is pending finalization, '
+                    . 'and a resume writes only the box. Make %s writable, then run `ralph resume`.',
+                $this->keptCommit($record),
+                $this->configuration->tasksPath(),
+            ),
+        );
+    }
+
+    /**
+     * The commit a refused tick leaves behind, phrased for a hint.
+     */
+    private function keptCommit(GenerationRecord $record): string
+    {
+        $sha = $record->commitSha();
+
+        return $sha === null ? '' : ' as commit ' . substr($sha, 0, BaseCommit::SHORT_LENGTH);
+    }
+
+    /**
+     * The checklist write this pass still owes, or null when it owes none.
+     *
+     * Both halves have to hold. The plan must still be outstanding — that is
+     * the write not having landed — and the pass must be finalizable, which is
+     * the implementation recorded and the publication settled
+     * ({@see GenerationRecord::isFinalizable()}). A pass interrupted before
+     * either of those has work to redo and is not this case; a pass that has
+     * both owes a line in a file.
+     *
+     * @throws RalphException when the rows cannot be read
+     */
+    private function owedChecklistWrite(GenerationRecord $record): ?ChecklistUpdate
+    {
+        if (!$record->isFinalizable()) {
+            return null;
+        }
+
+        return $this->journal->checklists()->outstandingFor($record);
+    }
+
+    /**
+     * Finish a pass that owes nothing but the write to the user's checklist.
+     *
+     * PROJECT.md section G, item 8's second half. Everything an attempt
+     * produces is already recorded, so nothing here prepares a workspace,
+     * invokes the agent, runs a check or commits, and no attempt is spent: a
+     * read-only file must not be able to exhaust the budget of work that has
+     * already passed. The agent's log is reopened rather than replaced, so the
+     * retry reads as the end of the attempt that earned it.
+     *
+     * The task is still reconciled first. A pass can sit pending finalization
+     * for as long as it takes someone to notice, and in that time the task may
+     * have been reworded or removed — in which case the planned write is closed
+     * rather than applied to whatever is on that line now.
+     *
+     * @throws RalphException when the outcome cannot be recorded
+     */
+    private function finishTheChecklist(
+        Task $task,
+        ChecklistSnapshot $snapshot,
+        GenerationRecord $record,
+        ChecklistUpdate $owed,
+    ): TaskResult {
+        $attempt = $this->journal->attempts()->latestFor($record);
+        $log = $attempt === null
+            ? AttemptLog::toTerminal($this->terminal)
+            : AttemptLog::open(
+                $this->workbench->logs(),
+                $record->generation(),
+                $attempt->number(),
+                $this->terminal,
+            );
+
+        try {
+            $log->note('resuming finalization: ' . $owed->describe());
+            $this->announceFinalization($task, $record, $owed);
+
+            $record = $this->journal->generations()->resumeFinalizing($record);
+            $verification = $attempt === null ? null : $this->journal->verifications()->reportFor($attempt);
+
+            $blocker = $this->movedUnderUs($task, $snapshot);
+
+            if ($blocker !== null) {
+                $this->journal->checklists()->abandoned($owed, $blocker->reason());
+            } else {
+                // The same plan-then-write as a first-time finalization:
+                // {@see self::plan()} reuses the outstanding row rather than
+                // adding to it, so the retry refreshes what the write is about
+                // to be applied against instead of recording a second claim on
+                // the same line.
+                $written = $this->tick($task, $record, $log);
+                $blocker = $written instanceof Blocker ? $written : null;
+            }
+
+            if ($blocker !== null) {
+                $log->note('still not checked off: ' . $blocker->reason());
+
+                return $this->stopped(
+                    $task,
+                    $this->journal->generations()->block($record, $blocker),
+                    $attempt,
+                    $verification,
+                    $blocker->reason(),
+                );
+            }
+
+            $this->journal->tasks()->markVerified($task->id());
+            $record = $this->journal->generations()->complete($record);
+
+            return TaskResult::of(
+                $task,
+                $record,
+                $attempt,
+                $verification,
+                true,
+                'the box was written; the commit and the checks are the ones this pass already recorded',
+            );
+        } finally {
+            $this->sweep($record, $log);
+            $log->close();
+        }
+    }
+
+    /**
+     * Say that the pass is being finished rather than attempted.
+     *
+     * Worth a line of its own: a run that prints a task and then neither a
+     * worker's output nor a check reads as the loop having skipped it, when in
+     * fact it is doing the one thing the task still needed.
+     */
+    private function announceFinalization(Task $task, GenerationRecord $record, ChecklistUpdate $owed): void
+    {
+        $this->terminal?->line(sprintf(
+            '  %s: %s; writing only the box%s',
+            $task->id()->value(),
+            $owed->state()->describe(),
+            $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
+        ));
     }
 
     /**

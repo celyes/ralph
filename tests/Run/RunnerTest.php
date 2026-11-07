@@ -16,10 +16,13 @@ use Celyes\RalphPhp\Run\Runner;
 use Celyes\RalphPhp\Run\TaskPass;
 use Celyes\RalphPhp\Run\TaskResult;
 use Celyes\RalphPhp\Run\Workbench;
+use Celyes\RalphPhp\State\ChecklistMarker;
+use Celyes\RalphPhp\State\ChecklistUpdateState;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Phase;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\State\VerificationStore;
+use Celyes\RalphPhp\Tasks\ChecklistFile;
 use Celyes\RalphPhp\Tasks\Completion;
 use Celyes\RalphPhp\Tests\Fixture\FixtureStep;
 use Celyes\RalphPhp\Tests\Fixture\FixtureWorker;
@@ -1077,6 +1080,244 @@ final class RunnerTest extends TestCase
 
         self::assertStringContainsString('weakens', $terminal->standardOutput());
         self::assertSame($before, $this->snapshotOfTheCheckout());
+    }
+
+    /**
+     * A checkbox write the filesystem refuses leaves the pass pending its
+     * finalization: the work is kept, and the write is what is still owed.
+     *
+     * Section G, item 8's first half. Everything before the write succeeded —
+     * the agent produced a diff, the checks passed, the commit was made — so
+     * the only thing missing from a completed task is one line in a file the
+     * package does not own, and the state store has to say exactly that rather
+     * than record a pass that failed.
+     */
+    #[Test]
+    public function a_checkbox_write_that_fails_leaves_the_pass_pending_finalization(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $terminal = new CapturingOutput();
+        $report = $this->whileTheChecklistCannotBeWritten(
+            fn (): RunReport => $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal),
+        );
+
+        $result = $report->results()[0];
+
+        // The work: committed, verified, and not thrown away.
+        self::assertTrue($result->wasVerified());
+        self::assertFalse($result->wasChecked());
+        self::assertFalse($result->isCompleted());
+        self::assertCount(1, $this->commitsBeyondBase());
+
+        $sha = (string) $result->commitSha();
+        self::assertSame($sha, $this->tipOf((string) $result->branch()));
+
+        // The box is as the user left it.
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Blocked, $pass->state());
+        self::assertSame(Phase::Finalizing, $pass->phase());
+        self::assertTrue($pass->isFinalizable(), 'The Git side of the tick is already satisfied.');
+        self::assertStringContainsString(
+            'pending finalization',
+            (string) $pass->blocker()?->nextAction(),
+        );
+
+        // The row that makes it recognisable afterwards as owing a write.
+        $owed = $journal->checklists()->outstandingFor($pass);
+        self::assertNotNull($owed);
+        self::assertSame(ChecklistUpdateState::Pending, $owed->state());
+        self::assertSame(ChecklistMarker::Checked, $owed->marker());
+        self::assertSame('.ralph/tasks.md', $owed->path());
+        self::assertSame(1, $owed->attempts(), 'The write was tried once.');
+        self::assertTrue($owed->wasRefused());
+        self::assertStringContainsString('Unable to write', (string) $owed->error());
+        self::assertNull($owed->resultingHash());
+        self::assertNull($owed->appliedAt());
+        self::assertSame(
+            ChecklistFile::hash($this->tasksFile()),
+            $owed->expectedHash(),
+            'The plan names the file it was about to write to.',
+        );
+
+        // And the task is not the user's completion either way.
+        self::assertSame(
+            Completion::Pending,
+            $journal->tasks()->get($result->taskId())->completion(),
+        );
+
+        self::assertStringContainsString('could not be ticked', $terminal->standardOutput());
+    }
+
+    /**
+     * The second half: a resume writes the box and nothing else.
+     *
+     * The agent is not invoked, no second commit appears, no attempt is spent,
+     * and the commit the first run made is the one the completed task points
+     * at. The worker is given no further steps on purpose — a run that reached
+     * it would fail rather than quietly produce a second implementation.
+     */
+    #[Test]
+    public function a_pass_pending_finalization_is_finished_by_writing_only_the_box(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $first = $this->whileTheChecklistCannotBeWritten(
+            fn (): RunReport => $this->loopOver(ScriptedVerifier::passing()),
+        );
+        $blocked = $first->results()[0];
+        self::assertFalse($blocked->wasChecked());
+
+        $terminal = new CapturingOutput();
+        $second = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
+        $result = $second->results()[0];
+
+        // The same pass, the same attempt, the same commit.
+        self::assertSame($blocked->generation()->number(), $result->generation()->number());
+        self::assertSame(1, $result->attempts());
+        self::assertSame($blocked->commitSha(), $result->commitSha());
+        self::assertCount(1, $this->commitsBeyondBase());
+
+        // The agent was invoked once, by the run that implemented the task.
+        self::assertCount(1, $worker->attempts());
+
+        // And now it is done.
+        self::assertTrue($result->isCompleted());
+        self::assertTrue($result->wasChecked());
+        self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
+
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Completed, $pass->state());
+        self::assertNull($pass->phase());
+        self::assertSame(
+            Completion::RunnerVerified,
+            $journal->tasks()->get($result->taskId())->completion(),
+        );
+
+        // The write is recorded as landed, against the file it produced.
+        $owed = $journal->checklists()->outstandingFor($pass);
+        self::assertNull($owed, 'Nothing is owed any more.');
+
+        $applied = $journal->checklists()->latestFor($pass);
+        self::assertNotNull($applied);
+        self::assertSame(ChecklistUpdateState::Applied, $applied->state());
+        self::assertSame(2, $applied->attempts(), 'The refused write, and the one that landed.');
+        self::assertNotNull($applied->appliedAt());
+        self::assertSame(ChecklistFile::hash($this->tasksFile()), $applied->resultingHash());
+        self::assertCount(1, $journal->checklists()->forGeneration($pass), 'One plan, not two.');
+
+        // The checks were not run again: the report the task completed on is
+        // the one the first run recorded.
+        self::assertTrue($result->wasVerified());
+        $attempt = $journal->attempts()->get($pass, 1);
+        self::assertNotNull($attempt);
+        self::assertCount(1, (new VerificationStore($journal->database()))->forAttempt($attempt));
+
+        self::assertStringContainsString('writing only the box', $terminal->standardOutput());
+    }
+
+    /**
+     * A task reworded while its write was owed is not ticked by the run that
+     * finds it reworded.
+     *
+     * A pass can sit pending finalization for as long as it takes someone to
+     * notice the file is read-only, and the user may well edit the checklist in
+     * that time. Rewording gives the line a different identity, so the task the
+     * write was planned for is not in the checklist the next run reads: the
+     * loop takes the new line on as new work and does not go near the old plan.
+     * The plan stays outstanding — it is a recovery path's business, not a
+     * reason to tick a line nobody asked about.
+     */
+    #[Test]
+    public function a_task_reworded_while_its_write_was_owed_is_not_ticked(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([
+            FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]),
+            FixtureStep::blocking('the rewording needs a decision'),
+        ]);
+
+        $first = $this->whileTheChecklistCannotBeWritten(
+            fn (): RunReport => $this->loopOver(ScriptedVerifier::passing()),
+        );
+        $blocked = $first->results()[0];
+
+        // The user rewords the task, which gives it a different identity.
+        $reworded = self::FIRST . ', and a --verbose option too';
+        $this->project->write('.ralph/tasks.md', "# Tasks\n\n- [ ] " . $reworded . "\n");
+
+        $report = $this->loopOver(ScriptedVerifier::passing());
+
+        // The run worked on the reworded line, which is a different task.
+        self::assertCount(1, $report->results());
+        self::assertSame($reworded, $report->results()[0]->description());
+        self::assertFalse($report->results()[0]->wasChecked());
+
+        // Nothing was ticked, and the pass that is owed a write still is.
+        self::assertStringNotContainsString('- [x]', $this->tasksFile());
+
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($blocked->generation());
+        self::assertSame(LifecycleState::Blocked, $pass->state());
+        self::assertSame(Phase::Finalizing, $pass->phase());
+
+        $owed = $journal->checklists()->outstandingFor($pass);
+        self::assertNotNull($owed);
+        self::assertSame(ChecklistUpdateState::Pending, $owed->state());
+        self::assertSame(1, $owed->attempts(), 'The write was not tried again.');
+
+        // What a recovery path will find: one write still owed, naming the pass
+        // that owes it.
+        $outstanding = $journal->checklists()->outstanding();
+        self::assertCount(1, $outstanding);
+        self::assertTrue($outstanding[0]->generation()->equals($pass->generation()));
+        self::assertSame($blocked->taskId()->value(), $outstanding[0]->task()->value());
+    }
+
+    /**
+     * Run something with the checklist's directory read-only.
+     *
+     * The realistic shape of a refused checkbox write, and the only one that
+     * reaches {@see \Celyes\RalphPhp\Tasks\ChecklistFile::replace()}'s failure
+     * paths: the replacement is written beside the original and renamed over
+     * it, so a read-only *file* would still be replaced and it is the directory
+     * that has to say no. The runtime directory is created first, because it
+     * lives inside the one being locked and the state store has to be able to
+     * open.
+     *
+     * @template T
+     *
+     * @param callable(): T $work
+     *
+     * @return T
+     */
+    private function whileTheChecklistCannotBeWritten(callable $work): mixed
+    {
+        $directory = dirname($this->project->path('.ralph/tasks.md'));
+
+        if (!is_dir($this->project->path('.ralph/runtime'))) {
+            self::assertTrue(mkdir($this->project->path('.ralph/runtime'), 0o755, true));
+        }
+
+        self::assertTrue(chmod($directory, 0o500));
+        clearstatcache(true, $directory);
+
+        if (is_writable($directory)) {
+            chmod($directory, 0o700);
+            self::markTestSkipped('This user can write to a directory it has no write permission on.');
+        }
+
+        try {
+            return $work();
+        } finally {
+            chmod($directory, 0o700);
+        }
     }
 
     /**

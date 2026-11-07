@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Run;
 
 use Celyes\RalphPhp\State\AttemptStore;
+use Celyes\RalphPhp\State\ChecklistStore;
 use Celyes\RalphPhp\State\Database;
 use Celyes\RalphPhp\State\GenerationStore;
 use Celyes\RalphPhp\State\RunStore;
@@ -15,12 +16,12 @@ use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Support\SystemClock;
 
 /**
- * The five stores the loop writes through, over one database.
+ * The six stores the loop writes through, over one database.
  *
  * Nothing but a grouping. It exists because the loop and the pass each need all
  * of them, they must all share one connection and one clock — a run whose
  * attempt rows were timed by a different clock than its generations would be
- * unreadable — and because a constructor listing five stores separately invites
+ * unreadable — and because a constructor listing six stores separately invites
  * exactly that mistake.
  */
 final class Journal
@@ -32,6 +33,7 @@ final class Journal
         private readonly GenerationStore $generations,
         private readonly AttemptStore $attempts,
         private readonly VerificationStore $verifications,
+        private readonly ChecklistStore $checklists,
     ) {
     }
 
@@ -49,6 +51,7 @@ final class Journal
             new GenerationStore($database, $clock),
             new AttemptStore($database, $clock),
             new VerificationStore($database, $clock),
+            new ChecklistStore($database, $clock),
         );
     }
 
@@ -88,5 +91,18 @@ final class Journal
     public function verifications(): VerificationStore
     {
         return $this->verifications;
+    }
+
+    /**
+     * The planned writes to the user's checklist.
+     *
+     * Separate from {@see self::tasks()} because the two answer different
+     * questions: a task's row says where its work stands, and a checklist
+     * update says whether the one line this package writes in a file the user
+     * owns has been written (PROJECT.md section G, item 8).
+     */
+    public function checklists(): ChecklistStore
+    {
+        return $this->checklists;
     }
 }

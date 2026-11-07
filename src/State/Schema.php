@@ -21,11 +21,12 @@ use InvalidArgumentException;
  *
  * Some of these lists mirror a PHP enum that already exists
  * ({@see LifecycleState}, {@see Phase}, {@see Completion}, {@see PushState},
- * {@see AttemptOutcome}, {@see AgentSource}, {@see CheckOutcome}); those are
- * built from the enum's cases so the two cannot drift. The rest — run states,
- * reference and checklist vocabularies — are named here first because the
- * schema needs them before the types that will own them are written, and those
- * types are expected to adopt exactly these spellings.
+ * {@see AttemptOutcome}, {@see AgentSource}, {@see CheckOutcome},
+ * {@see ChecklistMarker}, {@see ChecklistUpdateState}); those are built from
+ * the enum's cases so the two cannot drift. The rest — run states and the Git
+ * reference vocabularies — are named here first because the schema needs them
+ * before the types that will own them are written, and those types are
+ * expected to adopt exactly these spellings.
  *
  * The list of {@see self::TABLES} is part of the contract too: it is what
  * bootstrap and the tests check a database against to decide it is a Ralph PHP
@@ -82,21 +83,35 @@ final class Schema
     /**
      * The marker a checklist write is aiming for.
      *
-     * @var list<string>
+     * Built from {@see ChecklistMarker} so the column cannot hold a marker the
+     * enum does not have, and the enum cannot name one the column would refuse.
+     *
+     * @return list<string>
      */
-    public const array CHECKLIST_MARKERS = ['checked', 'unchecked'];
+    public static function checklistMarkers(): array
+    {
+        return ChecklistMarker::values();
+    }
 
     /**
      * Where a planned checklist write stands.
      *
      * `pending` is the state that makes a failed checkbox write recoverable:
      * the implementation and the commit are already safe, so resume has only
-     * the file to write. `superseded` covers a write that a later generation
-     * replaced before it was applied.
+     * the file to write. `failed` is a write that must not be retried as
+     * planned, because what it was planned against has changed, and
+     * `superseded` covers a write that a later generation replaced before it
+     * was applied.
      *
-     * @var list<string>
+     * Built from {@see ChecklistUpdateState} so the column cannot hold a state
+     * the enum does not have.
+     *
+     * @return list<string>
      */
-    public const array CHECKLIST_UPDATE_STATES = ['pending', 'applied', 'failed', 'superseded'];
+    public static function checklistUpdateStates(): array
+    {
+        return ChecklistUpdateState::values();
+    }
 
     /**
      * The tables a complete state store has, in dependency order.

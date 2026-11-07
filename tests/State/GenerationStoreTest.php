@@ -668,6 +668,78 @@ final class GenerationStoreTest extends TestCase
         self::assertFalse($generation->awaitsPublication());
     }
 
+    /**
+     * The way back into a pass that owes nothing but the write to the user's
+     * checklist (PROJECT.md section G, item 8).
+     *
+     * The attempt counter does not move, which is the point: everything an
+     * attempt produces is already recorded, and counting one would let a
+     * read-only file eventually exhaust the budget of work that has passed.
+     */
+    #[Test]
+    public function a_blocked_pass_with_its_work_recorded_resumes_at_finalizing(): void
+    {
+        $blocked = $this->generations->block(
+            $this->generations->recordCommit(
+                $this->generations->beginAttempt($this->start($this->record('Add a --dry-run option'))),
+                'f1e2d3c4b5a6',
+            ),
+            Blocker::raised('its box could not be ticked', 'Make the checklist writable.'),
+        );
+        self::assertSame(1, $blocked->attempts());
+
+        $resumed = $this->generations->resumeFinalizing($blocked);
+
+        self::assertSame(LifecycleState::Running, $resumed->state());
+        self::assertSame(Phase::Finalizing, $resumed->phase());
+        self::assertSame(1, $resumed->attempts(), 'The write is not an attempt at the task.');
+        self::assertSame('f1e2d3c4b5a6', $resumed->commitSha());
+
+        // And from there the pass can be completed, which is the whole journey
+        // a refused checkbox write has left to make.
+        self::assertTrue($this->generations->complete($resumed)->isComplete());
+    }
+
+    /**
+     * A pass interrupted before its work was recorded has work to redo, and
+     * resuming it at the last phase would move a row into a state its history
+     * does not support.
+     */
+    #[Test]
+    public function a_pass_with_nothing_recorded_cannot_resume_at_finalizing(): void
+    {
+        $generation = $this->generations->beginAttempt(
+            $this->start($this->record('Add a --dry-run option')),
+        );
+
+        try {
+            $this->generations->resumeFinalizing($generation);
+            self::fail('A pass with nothing to show cannot be finalized.');
+        } catch (StateException $refused) {
+            self::assertStringContainsString('has not reached finalization', $refused->getMessage());
+            self::assertStringContainsString('no-change result', $refused->getMessage());
+        }
+    }
+
+    #[Test]
+    public function a_pass_whose_push_is_outstanding_cannot_resume_at_finalizing(): void
+    {
+        $generation = $this->generations->recordCommit(
+            $this->generations->beginAttempt(
+                $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
+            ),
+            'f1e2d3c4b5a6',
+        );
+
+        try {
+            $this->generations->resumeFinalizing($generation);
+            self::fail('A pass that still owes a push is not pending its checklist write.');
+        } catch (StateException $refused) {
+            self::assertStringContainsString('has not reached finalization', $refused->getMessage());
+            self::assertStringContainsString('push pending', $refused->getMessage());
+        }
+    }
+
     #[Test]
     public function completing_a_pass_records_it_as_complete(): void
     {

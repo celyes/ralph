@@ -413,8 +413,8 @@ final class Migrations
                 applied_at TEXT
             )
             SQL,
-            Schema::literals(Schema::CHECKLIST_MARKERS),
-            Schema::literals(Schema::CHECKLIST_UPDATE_STATES),
+            Schema::literals(Schema::checklistMarkers()),
+            Schema::literals(Schema::checklistUpdateStates()),
         );
     }
 

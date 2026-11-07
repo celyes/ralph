@@ -470,8 +470,8 @@ final class SchemaTest extends TestCase
             Schema::pushStates(),
             Schema::GIT_REFERENCE_KINDS,
             Schema::GIT_REFERENCE_OUTCOMES,
-            Schema::CHECKLIST_MARKERS,
-            Schema::CHECKLIST_UPDATE_STATES,
+            Schema::checklistMarkers(),
+            Schema::checklistUpdateStates(),
             Schema::completions(),
             Schema::agentSources(),
         ];

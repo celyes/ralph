@@ -67,6 +67,22 @@ final class ChecklistFile
     }
 
     /**
+     * The content hash of a checklist document.
+     *
+     * Of the bytes, not of the tasks parsed out of them: what this answers is
+     * "is this the same file I was looking at", which is the question a planned
+     * write has to ask before it is applied and after it has been
+     * ({@see \Celyes\RalphPhp\State\ChecklistUpdate}). A task's own hash is
+     * {@see TaskSnapshot::hash()} and deliberately ignores formatting; this one
+     * must not, because a byte the package did not write is exactly what it is
+     * looking for.
+     */
+    public static function hash(string $contents): string
+    {
+        return hash('sha256', $contents);
+    }
+
+    /**
      * Replace the checklist's contents with the given document.
      *
      * Written to a temporary file beside the original and renamed over it, so
