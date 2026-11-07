@@ -73,6 +73,17 @@ use Throwable;
  * many attempts that took: the iteration limit bounds how much of the checklist
  * a run works through, and the attempt limit bounds how long it stays on one
  * item.
+ *
+ * **The run's own limits stop it between tasks** ({@see RunBudget}, section H,
+ * item 2). The iteration limit and the total active run-time budget are read
+ * before each task is taken on, off the run's row, and a run with neither left
+ * ends with its untaken tasks untouched and still pending. The other two limits
+ * are a task's and are enforced inside the pass: the attempt limit by
+ * {@see TaskPass}, and the task timeout by the adapter, as the seconds
+ * {@see \Celyes\RalphPhp\Agent\ExecutionBudget} gives the process it starts.
+ * That one is the lesser of the task timeout and the run's remaining time, so
+ * no single attempt can overrun the run's budget and leave it to be noticed at
+ * the boundary afterwards.
  */
 final class Runner
 {
@@ -248,19 +259,20 @@ final class Runner
             $this->clock,
         );
 
-        $limit = $this->configuration->limits()->iterations();
+        $limits = $this->configuration->limits();
         $results = [];
         $stopped = null;
         $drift = VerificationDrift::none();
 
         foreach ($tasks->pending() as $task) {
-            if (count($results) >= $limit) {
-                $stopped = sprintf(
-                    'the iteration limit of %d was reached with %d task%s still pending',
-                    $limit,
-                    $tasks->pendingCount() - count($results),
-                    $tasks->pendingCount() - count($results) === 1 ? '' : 's',
-                );
+            // Measured from the run's row rather than from this loop's own
+            // bookkeeping, and read before the task is taken on rather than
+            // after: see {@see RunBudget}. A run with nothing left stops here
+            // with its remaining tasks untouched and still pending.
+            $budget = RunBudget::of($limits, $run->iterations(), $run->activeSeconds());
+
+            if (!$budget->allowsAnotherTask()) {
+                $stopped = $this->outOfBudget($budget, $tasks, $results);
 
                 break;
             }
@@ -388,6 +400,28 @@ final class Runner
         $journal->tasks()->recordReading(...ChecklistSnapshot::of($tasks, $checklist->source())->tasks());
 
         return $tasks;
+    }
+
+    /**
+     * Why the loop stopped short of the checklist.
+     *
+     * The limit is named together with what it left undone, because the two
+     * together are the decision the user has to make: a run that stopped with
+     * one task pending and a run that stopped with nine want different answers,
+     * and neither is visible from the limit alone.
+     *
+     * @param list<TaskResult> $results
+     */
+    private function outOfBudget(RunBudget $budget, TaskList $tasks, array $results): string
+    {
+        $pending = max(0, $tasks->pendingCount() - count($results));
+
+        return sprintf(
+            '%s with %d task%s still pending',
+            $budget->exhausted() ?? 'the run stopped',
+            $pending,
+            $pending === 1 ? '' : 's',
+        );
     }
 
     /**

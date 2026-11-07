@@ -24,7 +24,9 @@ use Celyes\RalphPhp\State\ChecklistUpdateState;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Phase;
 use Celyes\RalphPhp\State\StateBootstrap;
+use Celyes\RalphPhp\State\TaskRecord;
 use Celyes\RalphPhp\State\VerificationStore;
+use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Tasks\ChecklistFile;
 use Celyes\RalphPhp\Tasks\Completion;
 use Celyes\RalphPhp\Tests\Fixture\FixtureStep;
@@ -33,6 +35,8 @@ use Celyes\RalphPhp\Tests\Support\CapturingOutput;
 use Celyes\RalphPhp\Tests\Support\Git;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use Celyes\RalphPhp\Tests\Support\TemporaryProject;
+use DateTimeImmutable;
+use DateTimeZone;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
@@ -746,6 +750,69 @@ final class RunnerTest extends TestCase
         self::assertSame(1, $report->remaining());
         self::assertStringContainsString('- [ ] ' . self::SECOND, $this->tasksFile());
         self::assertSame(1, $this->journal()->runs()->get($report->run()->rowId())->iterations());
+
+        // The task the limit kept the run from reaching was not opened: no
+        // pass, no branch, no row of its own to explain away later.
+        self::assertSame([], $this->journal()->generations()->forTask($this->recorded(self::SECOND)->id()));
+    }
+
+    /**
+     * The run's time budget stops the loop between tasks, leaving the tasks it
+     * did not reach pending rather than failed.
+     *
+     * The distinction is the whole of it. A run that let the loop begin a task
+     * it had no budget for would open a pass, fail it against a spent budget,
+     * and leave `status` showing a failure for work no agent was ever asked to
+     * do — so what is asserted is as much about the second task's *absence*
+     * from the state store as about the first task's success.
+     */
+    #[Test]
+    public function the_run_stops_when_its_time_budget_is_spent(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// one\n"])]);
+        $terminal = new CapturingOutput();
+
+        // Two minutes pass every time the clock is read, so the first task
+        // costs the run more than the ninety seconds it had in total.
+        $report = $this->loopOver(
+            ScriptedVerifier::passing(),
+            ['limits' => ['run_timeout' => 90]],
+            $terminal,
+            null,
+            $this->aClockThatJumpsBy(120),
+        );
+
+        // The first task was finished, not cut short: the budget is a reason
+        // not to start the next one, not a reason to abandon this one.
+        self::assertCount(1, $report->results());
+        self::assertTrue($report->results()[0]->isCompleted());
+        self::assertTrue($report->results()[0]->wasChecked());
+        self::assertCount(1, $worker->attempts(), 'The second task was never handed to the agent.');
+
+        self::assertStringContainsString('time budget of 90 seconds was spent', $report->stopReason());
+        self::assertStringContainsString('1 task still pending', $report->stopReason());
+        self::assertStringContainsString('time budget of 90 seconds', $terminal->standardOutput());
+        self::assertSame(1, $report->remaining());
+
+        // On disk and in the store: the second task is as it was.
+        $markdown = $this->tasksFile();
+        self::assertStringContainsString('- [x] ' . self::FIRST, $markdown);
+        self::assertStringContainsString('- [ ] ' . self::SECOND, $markdown);
+
+        $journal = $this->journal();
+        $second = $this->recorded(self::SECOND);
+        self::assertTrue($second->isPending(), 'The task the run did not reach is still pending.');
+        self::assertSame([], $journal->generations()->forTask($second->id()));
+
+        // And the run's row says what it spent, which is what a resume reads.
+        $run = $journal->runs()->get($report->run()->rowId());
+        self::assertSame(1, $run->iterations());
+        self::assertGreaterThanOrEqual(90, $run->activeSeconds());
+        self::assertSame(LifecycleState::Completed, $run->state());
+
+        // One commit, for the one task that ran.
+        self::assertCount(1, $this->commitsBeyondBase());
     }
 
     /**
@@ -1473,13 +1540,14 @@ final class RunnerTest extends TestCase
         array $overrides = [],
         ?CapturingOutput $terminal = null,
         ?RepositoryLock $lock = null,
+        ?Clock $clock = null,
     ): RunReport {
         return Runner::forProject(
             $this->configuration($overrides),
             $verifier,
             $terminal?->output(),
             AdapterRegistry::default(),
-            null,
+            $clock,
             $lock,
         )->run();
     }
@@ -1580,6 +1648,51 @@ final class RunnerTest extends TestCase
         $this->project->write('.ralph/CONTEXT.md', "# Conventions\n\nKeep it small.\n");
         Git::run($this->project->root(), 'add', '--all');
         Git::commit($this->project->root(), 'Add the checklist');
+    }
+
+    /**
+     * A clock that jumps forward every time it is read.
+     *
+     * The run's time budget cannot be asserted against the wall clock: a case
+     * that really spent its budget would really take that long, and a budget
+     * small enough to spend quickly would also be the timeout the agent's
+     * process is given. Reading the clock is what the loop does to measure a
+     * task, so a clock that moves when it is read is the smallest substitution
+     * that makes the arithmetic observable.
+     */
+    private function aClockThatJumpsBy(int $seconds): Clock
+    {
+        return new class ($seconds) implements Clock {
+            private int $reads = 0;
+
+            public function __construct(private readonly int $seconds)
+            {
+            }
+
+            public function now(): DateTimeImmutable
+            {
+                return (new DateTimeImmutable('2026-11-07 09:00:00', new DateTimeZone('UTC')))
+                    ->modify(sprintf('+%d seconds', $this->seconds * $this->reads++));
+            }
+        };
+    }
+
+    /**
+     * A task as the state store holds it, found by what the checklist says.
+     *
+     * By description rather than by id, because the point of asking is usually
+     * a task the run never reported on — so there is no result to take an id
+     * from.
+     */
+    private function recorded(string $description): TaskRecord
+    {
+        foreach ($this->journal()->tasks()->all() as $task) {
+            if ($task->description() === $description) {
+                return $task;
+            }
+        }
+
+        self::fail(sprintf('The state store holds no task described as "%s".', $description));
     }
 
     private function tasksFile(): string
