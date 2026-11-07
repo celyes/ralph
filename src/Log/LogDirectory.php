@@ -32,7 +32,8 @@ use InvalidArgumentException;
  * section G, item 2 can sit beside the agent's as `attempt-02-check-tests.log`
  * without either having to be found by elimination. The same naming carries
  * what is not output at all: `attempt-02-staged.diff` is the patch an attempt's
- * commit would have contained, preserved where the attempt's own logs are
+ * commit would have contained, and `attempt-02-satisfied.md` is why a task was
+ * completed without one. Both are preserved where the attempt's own logs are,
  * because they are read together.
  *
  * **Known limit of the padding.** Past attempt 99 the names stop sorting as
@@ -72,6 +73,21 @@ final class LogDirectory
      * The kind suffix on the diff an attempt's commit would have contained.
      */
     public const string STAGED = 'staged';
+
+    /**
+     * Suffix on a record meant to be read rather than paged through.
+     *
+     * The memory notes of section D are Markdown for the same reason: a file
+     * whose headings and lists are there to be read by a person is not a log,
+     * and calling it one would send a reviewer to `tail` instead of to their
+     * editor.
+     */
+    public const string RECORD_EXTENSION = '.md';
+
+    /**
+     * The kind suffix on the evidence behind a no-change outcome.
+     */
+    public const string SATISFIED = 'satisfied';
 
     /**
      * Digits the attempt number is padded to.
@@ -160,6 +176,25 @@ final class LogDirectory
     public function stagedDiff(TaskGeneration $generation, int $attempt): string
     {
         return $this->fileFor($generation, $attempt, self::STAGED, self::DIFF_EXTENSION);
+    }
+
+    /**
+     * The path one attempt's no-change evidence is written to.
+     *
+     * Beside the attempt's logs, like the preserved diff and for the same
+     * reason: a task completed without a commit has no commit to read, so this
+     * file is what answers "why is this ticked off", and the one place it must
+     * not be is somewhere other than where `ralph logs` sends a reader.
+     *
+     * Written only when an attempt staged nothing — see
+     * {@see \Celyes\RalphPhp\Verification\SatisfactionAuditor} — so this is
+     * a path that will usually hold no file.
+     *
+     * @throws InvalidArgumentException when the attempt number is not positive
+     */
+    public function satisfactionRecord(TaskGeneration $generation, int $attempt): string
+    {
+        return $this->fileFor($generation, $attempt, self::SATISFIED, self::RECORD_EXTENSION);
     }
 
     /**

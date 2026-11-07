@@ -12,6 +12,7 @@ use Celyes\RalphPhp\State\PushResult;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskGeneration;
 use Celyes\RalphPhp\Tasks\TaskId;
+use Celyes\RalphPhp\Verification\Satisfaction;
 use Celyes\RalphPhp\Verification\VerificationReport;
 
 /**
@@ -19,9 +20,10 @@ use Celyes\RalphPhp\Verification\VerificationReport;
  *
  * The pass's own record is the authority for everything durable — the state,
  * the commit, the push, the blocker — so this holds that record rather than
- * copies of its columns. What it adds is the two things the database cannot
- * answer: the verification report the decision was made on, and whether the
- * checklist's box was actually ticked.
+ * copies of its columns. What it adds is the three things the database cannot
+ * answer: the verification report the decision was made on, whether the
+ * checklist's box was actually ticked, and — for a pass that staged nothing —
+ * the case for or against completing it without a commit.
  *
  * **`wasChecked()` is deliberately separate from the pass being complete.** A
  * pass can be verified, committed, pushed and complete, and the box still not
@@ -39,6 +41,7 @@ final class TaskResult
         private readonly ?VerificationReport $verification,
         private readonly bool $checked,
         private readonly string $reason,
+        private readonly ?Satisfaction $satisfaction,
     ) {
     }
 
@@ -47,6 +50,8 @@ final class TaskResult
      *
      * @param bool   $checked whether the checklist's box was ticked
      * @param string $reason  one line on why the pass ended as it did
+     * @param Satisfaction|null $satisfaction the case for a pass that staged
+     *        nothing, where one was made
      */
     public static function of(
         Task $task,
@@ -55,8 +60,9 @@ final class TaskResult
         ?VerificationReport $verification = null,
         bool $checked = false,
         string $reason = '',
+        ?Satisfaction $satisfaction = null,
     ): self {
-        return new self($task, $generation, $attempt, $verification, $checked, $reason);
+        return new self($task, $generation, $attempt, $verification, $checked, $reason, $satisfaction);
     }
 
     public function task(): Task
@@ -199,6 +205,21 @@ final class TaskResult
         return $this->generation->isNoChange();
     }
 
+    /**
+     * The evidence behind a pass that staged nothing, or null when the pass
+     * never reached that question.
+     *
+     * Present for both answers to it: a task completed as a verified no-change
+     * outcome, and one stopped because the facts did not support completing it
+     * (PROJECT.md section G, item 6). The row is the authority for the state
+     * either way — this is what the database has no column for, and what
+     * {@see Satisfaction::recordPath()} has already been written to a file.
+     */
+    public function satisfaction(): ?Satisfaction
+    {
+        return $this->satisfaction;
+    }
+
     public function branch(): ?string
     {
         return $this->generation->branch();
@@ -266,6 +287,7 @@ final class TaskResult
             'commit' => $this->commitSha(),
             'branch' => $this->branch(),
             'no_change' => $this->isNoChange(),
+            'satisfaction' => $this->satisfaction?->toArray(),
             'push' => $this->push()->state()->value,
             'verification' => $this->verification?->toArray(),
             'blocker' => $this->blocker()?->toStorage(),

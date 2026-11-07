@@ -37,6 +37,7 @@ use Celyes\RalphPhp\Tasks\ChecklistSnapshot;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskSnapshot;
 use Celyes\RalphPhp\Verification\ChecksAudit;
+use Celyes\RalphPhp\Verification\Satisfaction;
 use Celyes\RalphPhp\Verification\VerificationReport;
 use Celyes\RalphPhp\Verification\Verifier;
 use InvalidArgumentException;
@@ -62,6 +63,13 @@ use InvalidArgumentException;
  * that weaken that suite, and a pass whose work would delete a test, empty one
  * or exclude a path from a tool stops with the patch kept for review rather
  * than committing on the strength of a green run (section G, item 5).
+ *
+ * **An empty diff decides nothing either.** A task can be asked for and
+ * already be done, and that is a verified outcome rather than an empty commit
+ * (section G, item 6) — but only once the facts are collected and read: an
+ * empty index with green checks is equally what an agent that ticked the
+ * checklist in its own workspace leaves behind. So the case is made, written
+ * down beside the attempt's logs, and refused where something contradicts it.
  *
  * **Every exit records what it found.** A pass that throws its way out of a
  * phase still ends with a row saying which phase that was, a blocker naming the
@@ -251,6 +259,7 @@ final class TaskPass
     ): TaskResult {
         $attempt = null;
         $verification = null;
+        $satisfaction = null;
 
         try {
             // Preparing. The branch is read before the workspace is created: a
@@ -322,8 +331,27 @@ final class TaskPass
             $staged = $this->workbench->stager()->stage($worktree, $log);
 
             if ($staged->isEmpty()) {
+                // An empty index is not evidence of anything on its own, so the
+                // case for completing the task without a commit is collected,
+                // written down beside the attempt's logs, and read for what
+                // contradicts it (section G, item 6).
+                $satisfaction = $this->workbench->satisfaction()->audit(
+                    $worktree,
+                    $attempt->number(),
+                    $this->base,
+                    $this->workbench->auditor()->observe($worktree),
+                    $staged,
+                    $verification,
+                    $result->claim(),
+                    $this->workbench->logs()->satisfactionRecord($record->generation(), $attempt->number()),
+                    $log,
+                );
+
+                if ($satisfaction->isBlocking()) {
+                    return $this->unsatisfied($task, $record, $attempt, $result, $verification, $satisfaction, $log);
+                }
+
                 $record = $this->journal->generations()->recordNoChange($record);
-                $log->note('nothing to commit: the task was already satisfied, and the checks agree');
             } else {
                 // What the checks passed against is the suite this diff leaves
                 // behind, so the diff is read before it becomes a commit: a
@@ -375,7 +403,16 @@ final class TaskPass
                 }
             }
 
-            return $this->finalize($task, $snapshot, $record, $attempt, $result, $verification, $log);
+            return $this->finalize(
+                $task,
+                $snapshot,
+                $record,
+                $attempt,
+                $result,
+                $verification,
+                $log,
+                $satisfaction,
+            );
         } catch (RalphException $refusal) {
             return $this->refused($task, $record, $attempt, $verification, $refusal, $log);
         } finally {
@@ -510,6 +547,7 @@ final class TaskPass
         ExecutionResult $result,
         VerificationReport $verification,
         AttemptLog $log,
+        ?Satisfaction $satisfaction = null,
     ): TaskResult {
         $record = $this->journal->generations()->enterPhase($record, Phase::Finalizing);
         $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Finalizing);
@@ -532,6 +570,7 @@ final class TaskPass
                 ),
                 $verification,
                 $blocker->reason(),
+                $satisfaction,
             );
         }
 
@@ -556,7 +595,8 @@ final class TaskPass
             $attempt,
             $verification,
             true,
-            $record->isNoChange() ? 'already satisfied, and the checks agree' : 'verified and committed',
+            $record->isNoChange() ? $this->describeNoChange($satisfaction) : 'verified and committed',
+            $satisfaction,
         );
     }
 
@@ -759,6 +799,55 @@ final class TaskPass
     }
 
     /**
+     * An empty index whose no-change outcome the facts do not support.
+     *
+     * The counterpart of {@see self::weakened()} on the other side of staging,
+     * and blocked for the same reason: nothing here is a failing check, so
+     * there is nothing a further attempt would be told that it does not
+     * already know. An agent that staged nothing because it ticked the
+     * checklist inside its own workspace, or a workspace that is no longer at
+     * the commit it was handed, is a question for a person — and the one answer
+     * the package must not give is to complete the task because the checks were
+     * green and the diff was empty.
+     *
+     * The evidence is where {@see Satisfaction::recordPath()} says, and the
+     * workspace is kept, so what was collected can be read beside the files it
+     * was collected from.
+     */
+    private function unsatisfied(
+        Task $task,
+        GenerationRecord $record,
+        AttemptRecord $attempt,
+        ExecutionResult $result,
+        VerificationReport $verification,
+        Satisfaction $satisfaction,
+        AttemptLog $log,
+    ): TaskResult {
+        $blocker = Blocker::raised($satisfaction->summary(), implode(' ', $satisfaction->hints()));
+
+        $attempt = $this->journal->attempts()->finish(
+            $attempt,
+            AttemptOutcome::Candidate,
+            LifecycleState::Blocked,
+            $result->exitCode(),
+            $this->milliseconds($result),
+            evidence: $satisfaction->evidence(),
+            blocker: $blocker,
+        );
+
+        $log->note('not completed: ' . $satisfaction->summary());
+
+        return $this->stopped(
+            $task,
+            $this->journal->generations()->block($record, $blocker),
+            $attempt,
+            $verification,
+            $satisfaction->summary(),
+            $satisfaction,
+        );
+    }
+
+    /**
      * Verified and committed work the remote would not take.
      *
      * The local commit is kept and the task is left unchecked, because a push
@@ -923,8 +1012,9 @@ final class TaskPass
         ?AttemptRecord $attempt,
         ?VerificationReport $verification,
         string $reason,
+        ?Satisfaction $satisfaction = null,
     ): TaskResult {
-        return TaskResult::of($task, $record, $attempt, $verification, false, $reason);
+        return TaskResult::of($task, $record, $attempt, $verification, false, $reason, $satisfaction);
     }
 
     /**
@@ -976,6 +1066,20 @@ final class TaskPass
         } catch (RalphException $failure) {
             $log->note('the workspace could not be cleaned up: ' . $failure->getMessage());
         }
+    }
+
+    /**
+     * What the terminal says about a task that needed no change.
+     *
+     * The audit's own words where there is an audit, so the line a user reads
+     * names the base commit the checks passed against rather than only
+     * asserting that they agreed. A pass completed without one — which the
+     * loop has no path to today, and which a later caller could — says the
+     * plain thing instead of claiming evidence that was never collected.
+     */
+    private function describeNoChange(?Satisfaction $satisfaction): string
+    {
+        return $satisfaction?->summary() ?? 'already satisfied, and the checks agree';
     }
 
     /**

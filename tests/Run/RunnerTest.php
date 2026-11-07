@@ -513,6 +513,9 @@ final class RunnerTest extends TestCase
     /**
      * A task the checks already pass without any change is a verified
      * no-change result, and not an empty commit.
+     *
+     * Section G, item 6, and the evidence half of it: what a reviewer can read
+     * instead of the commit that was deliberately not made.
      */
     #[Test]
     public function a_task_that_was_already_satisfied_completes_without_a_commit(): void
@@ -520,19 +523,131 @@ final class RunnerTest extends TestCase
         $this->givenTasks([self::FIRST]);
         $this->givenAWorker([FixtureStep::success()->saying('nothing to do: it already has one')]);
 
-        $report = $this->loopOver(ScriptedVerifier::passing());
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
         $result = $report->results()[0];
 
         self::assertTrue($result->isCompleted());
         self::assertTrue($result->isNoChange());
         self::assertNull($result->commitSha());
         self::assertTrue($result->wasChecked());
-        self::assertSame([], $this->commitsBeyondBase());
+        self::assertSame([], $this->commitsBeyondBase(), 'Not an empty commit.');
         self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
 
         $pass = $this->journal()->generations()->get($result->generation());
         self::assertTrue($pass->isNoChange());
         self::assertTrue($pass->hasImplementation());
+
+        // The case the ticked box rests on, made at the moment of the decision
+        // and carried on the result.
+        $satisfaction = $result->satisfaction();
+        self::assertNotNull($satisfaction);
+        self::assertTrue($satisfaction->isJustified());
+        self::assertTrue($satisfaction->isAtBase());
+        self::assertSame($this->headOfTheCheckout(), $satisfaction->head());
+        self::assertStringContainsString('1 check(s) passed', $result->reason());
+
+        // And written down beside the attempt's logs, because there is no
+        // commit for `git show` to be pointed at.
+        $record = (string) $satisfaction->recordPath();
+        self::assertSame(
+            $this->project->path(sprintf(
+                '.ralph/runtime/logs/%s/attempt-01-satisfied.md',
+                $pass->generation()->slug(),
+            )),
+            $record,
+        );
+        self::assertFileExists($record);
+
+        $written = (string) file_get_contents($record);
+        self::assertStringContainsString('already satisfied', $written);
+        self::assertStringContainsString('**tests** — `php -v`', $written);
+        self::assertStringContainsString('nothing to do: it already has one', $written);
+        self::assertStringContainsString('Nothing in them has been checked', $written);
+        self::assertStringContainsString('does not say that any configured check tests', $written);
+
+        self::assertStringContainsString('already satisfied', $terminal->standardOutput());
+    }
+
+    /**
+     * A worker that ticked the checklist inside its own workspace and changed
+     * nothing else is not a satisfied task.
+     *
+     * The case an empty index cannot be read as "already done" on its own, and
+     * the reason section G, item 6 asks for evidence rather than for the
+     * outcome: everything a green run can say is true here — the checks
+     * passed, there is nothing to commit — and completing it would make a
+     * model-written checkbox into verified execution state, which section D,
+     * item 6 forbids.
+     */
+    #[Test]
+    public function a_worker_that_only_edited_ralphs_own_files_does_not_complete_the_task(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+
+        // The checklist as the worker would leave it: its own box ticked, in
+        // the copy inside its workspace, and no other change anywhere.
+        $this->givenAWorker([FixtureStep::success([
+            '.ralph/tasks.md' => "# Tasks\n\n- [x] " . self::FIRST . "\n- [ ] " . self::SECOND . "\n",
+        ])->saying('done — I have ticked it off')]);
+        $before = $this->snapshotOfTheCheckout();
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
+
+        self::assertCount(1, $report->results(), 'A blocked task stops the run.');
+        $result = $report->results()[0];
+
+        // Blocked, not completed and not failed: the checks passed, so there is
+        // nothing a further attempt would be told, and whether the task is
+        // really done is a question for a person.
+        self::assertTrue($result->isBlocked());
+        self::assertTrue($result->stopsTheRun());
+        self::assertTrue($result->wasVerified());
+        self::assertFalse($result->isNoChange());
+        self::assertFalse($result->wasChecked());
+        self::assertNull($result->commitSha());
+
+        // The user's checklist still says the work is pending, which is the
+        // whole point: the agent's tick was a claim in a directory nobody
+        // commits from.
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+        self::assertSame([], $this->commitsBeyondBase());
+        self::assertSame($before, $this->snapshotOfTheCheckout());
+
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Blocked, $pass->state());
+        self::assertSame(Phase::Verifying, $pass->phase(), 'It never entered committing.');
+        self::assertStringContainsString(
+            'Ralph PHP\'s own files (.ralph/tasks.md)',
+            (string) $pass->blocker()?->reason(),
+        );
+        self::assertStringContainsString('ralph retry', (string) $pass->blocker()?->nextAction());
+
+        // What was found is on the attempt's row and in the record, and the
+        // workspace is kept so both can be read against the files.
+        $attempt = $journal->attempts()->get($pass, 1);
+        self::assertNotNull($attempt);
+        self::assertStringContainsString(
+            'no-change outcome refused',
+            (string) $attempt->evidence()?->toMarkdown(),
+        );
+        self::assertDirectoryExists((string) $pass->worktree()->path());
+
+        $record = $this->project->path(sprintf(
+            '.ralph/runtime/logs/%s/attempt-01-satisfied.md',
+            $pass->generation()->slug(),
+        ));
+        self::assertFileExists($record);
+
+        $written = (string) file_get_contents($record);
+        self::assertStringContainsString('## Why it was refused', $written);
+        self::assertStringContainsString('## Changes kept out of the commit', $written);
+        self::assertStringContainsString('.ralph/tasks.md', $written);
+        self::assertStringContainsString('done — I have ticked it off', $written);
+
+        self::assertStringContainsString('not supported', $terminal->standardOutput());
     }
 
     /**

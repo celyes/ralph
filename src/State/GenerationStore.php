@@ -426,8 +426,13 @@ final class GenerationStore
      * commit.
      *
      * A verified outcome rather than a failure, and deliberately not an empty
-     * commit (PROJECT.md section G, item 6). The evidence for it lives in the
-     * pass's verification results; this says only that no commit is owed.
+     * commit (PROJECT.md section G, item 6). This column says only that no
+     * commit is owed; the case for saying it is
+     * {@see \Celyes\RalphPhp\Verification\Satisfaction}, which the pass makes
+     * before calling this and which is refused rather than recorded when the
+     * facts contradict it. The durable half of that case is the pass's
+     * verification results, and a copy of the whole of it is written beside the
+     * attempt's logs.
      *
      * @throws StateException when a commit is already recorded, in which case
      *                        the pass did change something

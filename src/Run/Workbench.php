@@ -25,6 +25,7 @@ use Celyes\RalphPhp\Tasks\ChecklistReconciler;
 use Celyes\RalphPhp\Tasks\ChecklistWriter;
 use Celyes\RalphPhp\Tasks\GenerationSelector;
 use Celyes\RalphPhp\Verification\ChecksAuditor;
+use Celyes\RalphPhp\Verification\SatisfactionAuditor;
 
 /**
  * Everything a task is carried out with, built once for a run.
@@ -51,6 +52,7 @@ final class Workbench
         private readonly WorkspaceAuditor $auditor,
         private readonly WorkspaceStager $stager,
         private readonly ChecksAuditor $checks,
+        private readonly SatisfactionAuditor $satisfaction,
         private readonly TaskCommitter $committer,
         private readonly TaskPublisher $publisher,
         private readonly WorktreeCleaner $cleaner,
@@ -88,6 +90,7 @@ final class Workbench
             WorkspaceAuditor::forProject($configuration, $generations, $executable, $processes),
             WorkspaceStager::forProject($configuration, $executable, $processes),
             new ChecksAuditor($executable, $processes),
+            new SatisfactionAuditor(),
             TaskCommitter::forProject($configuration, $generations, $executable, $processes),
             TaskPublisher::forProject($configuration, $generations, $executable, $processes),
             WorktreeCleaner::forProject($configuration, $generations, $executable, $processes),
@@ -138,6 +141,15 @@ final class Workbench
     public function checks(): ChecksAuditor
     {
         return $this->checks;
+    }
+
+    /**
+     * What makes the case for a task that changed nothing (PROJECT.md
+     * section G, item 6).
+     */
+    public function satisfaction(): SatisfactionAuditor
+    {
+        return $this->satisfaction;
     }
 
     public function committer(): TaskCommitter

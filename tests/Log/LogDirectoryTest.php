@@ -133,6 +133,41 @@ final class LogDirectoryTest extends TestCase
         self::assertNotSame($logs->stagedDiff($generation, 1), $logs->stagedDiff($generation, 2));
     }
 
+    /**
+     * The no-change evidence of PROJECT.md section G, item 6 sits with the same
+     * attempt's logs, and is Markdown because it is written to be read rather
+     * than paged through.
+     */
+    #[Test]
+    public function an_attempts_no_change_evidence_sits_with_its_logs(): void
+    {
+        $logs = LogDirectory::in($this->project);
+        $generation = TaskGeneration::first($this->task);
+
+        self::assertSame(
+            dirname($logs->agentLog($generation, 3)) . '/attempt-03-satisfied.md',
+            $logs->satisfactionRecord($generation, 3),
+        );
+        self::assertNotSame(
+            $logs->satisfactionRecord($generation, 1),
+            $logs->satisfactionRecord($generation, 2),
+        );
+        self::assertNotSame(
+            $logs->stagedDiff($generation, 1),
+            $logs->satisfactionRecord($generation, 1),
+            'A patch and the reason there was none are different files.',
+        );
+    }
+
+    #[Test]
+    public function no_change_evidence_below_attempt_one_is_a_programming_error(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('An attempt number starts at 1.');
+
+        LogDirectory::in($this->project)->satisfactionRecord(TaskGeneration::first($this->task), 0);
+    }
+
     #[Test]
     public function a_staged_diff_below_attempt_one_is_a_programming_error(): void
     {
