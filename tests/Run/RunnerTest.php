@@ -9,8 +9,11 @@ use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Exception\CheckoutException;
+use Celyes\RalphPhp\Exception\LockException;
 use Celyes\RalphPhp\Exception\PreparationException;
+use Celyes\RalphPhp\Process\KnownProcesses;
 use Celyes\RalphPhp\Run\Journal;
+use Celyes\RalphPhp\Run\RepositoryLock;
 use Celyes\RalphPhp\Run\RunReport;
 use Celyes\RalphPhp\Run\Runner;
 use Celyes\RalphPhp\Run\TaskPass;
@@ -1281,6 +1284,146 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * The lock, from the loop's side: a run does not start beside another one.
+     *
+     * PROJECT.md section H, item 1. The refusal has to come before anything is
+     * read or written, because the damage two runners do is done by the time
+     * either of them notices the other — so the assertions are about what did
+     * *not* happen: no state database, no worktree, no worker started, and the
+     * user's checklist exactly as it was.
+     */
+    #[Test]
+    public function a_run_does_not_start_while_another_runner_holds_the_repository(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n"])]);
+
+        $held = RepositoryLock::in($this->project->root())->acquire('run');
+        $held->record('run-20261101-120000-aaaaaa');
+        $before = $this->tasksFile();
+
+        try {
+            $this->loopOver(ScriptedVerifier::passing());
+            self::fail('A second run started while the repository was locked.');
+        } catch (LockException $refusal) {
+            self::assertStringContainsString('Another Ralph PHP runner is working', $refusal->getMessage());
+            self::assertStringContainsString(
+                'run-20261101-120000-aaaaaa',
+                implode("\n", $refusal->hints()),
+            );
+        } finally {
+            $held->release();
+        }
+
+        self::assertSame([], $worker->records(), 'The agent was started beside another run.');
+        self::assertFileDoesNotExist($this->project->path('.ralph/runtime/state.sqlite'));
+        self::assertDirectoryDoesNotExist($this->project->path('.ralph/runtime/worktrees'));
+        self::assertSame($before, $this->tasksFile());
+        self::assertSame([], $this->commitsBeyondBase());
+    }
+
+    /**
+     * A run releases the lock on its way out, whatever happened in it.
+     *
+     * The release is the ordinary path; the kernel covers the other one. Both
+     * halves are asserted: the record says released, and the next run can
+     * actually take it — which is the half a `finally` that quietly did nothing
+     * would still pass.
+     */
+    #[Test]
+    public function a_finished_run_leaves_the_lock_free_for_the_next_one(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $this->loopOver(ScriptedVerifier::passing());
+
+        $holder = RepositoryLock::in($this->project->root())->holder();
+        self::assertNotNull($holder);
+        self::assertTrue($holder->isReleased());
+        self::assertSame(Runner::PURPOSE, $holder->purpose());
+        self::assertNotNull($holder->runId(), 'The lock did not name the run that took it.');
+
+        $next = RepositoryLock::in($this->project->root())->acquire('run');
+
+        try {
+            self::assertFalse($next->wasReclaimed(), 'A released lock was reported as taken over.');
+        } finally {
+            $next->release();
+        }
+    }
+
+    /**
+     * A lock left behind by a runner that stopped: taken over, and said so.
+     *
+     * The second half of section H, item 1. The run proceeds, because the
+     * process named by the record is gone and a free lock is the kernel saying
+     * so; and it prints what it displaced, because a run that silently
+     * continued past an interrupted one would hide the fact that there is
+     * interrupted work in the repository at all.
+     */
+    #[Test]
+    public function a_run_takes_over_a_lock_left_by_a_runner_that_has_stopped_and_says_so(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+        $this->givenAnAbandonedLock(pid: 4242, runId: 'run-20261101-120000-aaaaaa');
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(
+            ScriptedVerifier::passing(),
+            terminal: $terminal,
+            lock: RepositoryLock::in($this->project->root(), null, KnownProcesses::none()),
+        );
+
+        self::assertTrue($report->results()[0]->isCompleted());
+        self::assertStringContainsString('stopped without releasing it', $terminal->standardOutput());
+        self::assertStringContainsString('run-20261101-120000-aaaaaa', $terminal->standardOutput());
+    }
+
+    /**
+     * Confirmation before a takeover: the recorded process is still there.
+     *
+     * The lock is free and the record names a live process, which cannot both
+     * be true of a Ralph PHP runner. Nothing starts.
+     */
+    #[Test]
+    public function a_run_refuses_to_take_over_a_lock_whose_process_is_still_running(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n"])]);
+        $this->givenAnAbandonedLock(pid: 4242, runId: 'run-20261101-120000-aaaaaa');
+
+        try {
+            $this->loopOver(
+                ScriptedVerifier::passing(),
+                lock: RepositoryLock::in($this->project->root(), null, KnownProcesses::running(4242)),
+            );
+            self::fail('A run started over a worker that has not stopped.');
+        } catch (LockException $refusal) {
+            self::assertStringContainsString('still running', $refusal->getMessage());
+        }
+
+        self::assertSame([], $worker->records());
+        self::assertFileDoesNotExist($this->project->path('.ralph/runtime/state.sqlite'));
+    }
+
+    /**
+     * A lock file holding a record that claims to be held, over a free lock.
+     */
+    private function givenAnAbandonedLock(int $pid, string $runId): void
+    {
+        $this->project->write('.ralph/runtime/run.lock', (string) json_encode([
+            'purpose' => 'run',
+            'host' => gethostname(),
+            'pid' => $pid,
+            'run_id' => $runId,
+            'acquired_at' => '2026-11-01T12:00:00+00:00',
+            'released_at' => null,
+        ]));
+    }
+
+    /**
      * Run something with the checklist's directory read-only.
      *
      * The realistic shape of a refused checkbox write, and the only one that
@@ -1329,12 +1472,15 @@ final class RunnerTest extends TestCase
         ScriptedVerifier $verifier,
         array $overrides = [],
         ?CapturingOutput $terminal = null,
+        ?RepositoryLock $lock = null,
     ): RunReport {
         return Runner::forProject(
             $this->configuration($overrides),
             $verifier,
             $terminal?->output(),
             AdapterRegistry::default(),
+            null,
+            $lock,
         )->run();
     }
 

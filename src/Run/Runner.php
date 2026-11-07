@@ -55,6 +55,10 @@ use Throwable;
  * **One agent, one run, no parallelism.** The tasks are taken in file order and
  * finished one at a time. Selecting an agent does not enable simultaneous
  * execution (PROJECT.md section 4), and nothing here starts a second worker.
+ * The repository lock ({@see RepositoryLock}) is taken before any of it, so
+ * nothing *else* starts a second one either: two runners over one state
+ * database, one set of task branches and one checklist would hand the same task
+ * to two agents and each tick a box for work only one of them did.
  *
  * **A failed task does not end the run; a blocked one does.** A task whose
  * checks failed stays unchecked and retriable, and the tasks after it are
@@ -72,6 +76,14 @@ use Throwable;
  */
 final class Runner
 {
+    /**
+     * What the repository lock records this command as.
+     *
+     * Written into the lock file so that a second runner's refusal can say
+     * what it is refusing beside.
+     */
+    public const string PURPOSE = 'run';
+
     public function __construct(
         private readonly Configuration $configuration,
         private readonly Verifier $verifier,
@@ -81,6 +93,7 @@ final class Runner
         private readonly Clock $clock = new SystemClock(),
         private readonly string $executable = 'git',
         private readonly ProcessRunner $processes = new ProcessRunner(),
+        private readonly ?RepositoryLock $lock = null,
     ) {
     }
 
@@ -98,6 +111,7 @@ final class Runner
         ?Output $terminal = null,
         ?AdapterRegistry $adapters = null,
         ?Clock $clock = null,
+        ?RepositoryLock $lock = null,
     ): self {
         return new self(
             $configuration,
@@ -106,6 +120,9 @@ final class Runner
             new StateBootstrap(),
             $terminal,
             $clock ?? new SystemClock(),
+            'git',
+            new ProcessRunner(),
+            $lock,
         );
     }
 
@@ -121,6 +138,38 @@ final class Runner
      */
     public function run(?string $requested = null): RunReport
     {
+        // Before anything at all: one runner per repository (section H, item
+        // 1). Taken first because every step below writes somewhere two
+        // runners would be sharing — the state database, the task branches,
+        // the worktree directory, the user's one checklist — and a conflict
+        // noticed after the second agent has started is a conflict that has
+        // already done its damage.
+        $lock = ($this->lock ?? RepositoryLock::forProject($this->configuration, $this->clock))
+            ->acquire(self::PURPOSE);
+
+        try {
+            return $this->locked($requested, $lock);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * The run, with the repository lock held.
+     *
+     * @throws RalphException when the run cannot be set up, or when a task's
+     *         outcome could not be recorded
+     */
+    private function locked(?string $requested, HeldLock $lock): RunReport
+    {
+        // A lock left behind by a runner that stopped without releasing it has
+        // been taken over rather than waited for, and that is worth a line: a
+        // run that silently continued past an interrupted one would hide the
+        // fact that there is interrupted work in the repository at all.
+        if ($lock->wasReclaimed()) {
+            $this->terminal?->line($lock->describe());
+        }
+
         // Before anything is written: the user's own checkout must have nothing
         // of theirs in it that a run could be blamed for (section F, item 1).
         ControllingCheckout::forProject($this->configuration, $this->executable, $this->processes)
@@ -142,6 +191,11 @@ final class Runner
         );
 
         $run = $journal->runs()->open($agent, $this->configuration, $base->sha());
+
+        // The lock was taken before there was a run to name in it; now there
+        // is, so a conflicting runner can be told which run it is conflicting
+        // with rather than only that something is running.
+        $lock->record($run->runId());
 
         $this->announce($run, $agent, $base, $run->verification());
 

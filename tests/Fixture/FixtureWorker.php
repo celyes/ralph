@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Fixture;
 
+use Celyes\RalphPhp\Process\SystemProbe;
 use Celyes\RalphPhp\Tests\Support\Paths;
 use InvalidArgumentException;
 use JsonException;
@@ -224,21 +225,11 @@ final class FixtureWorker
      */
     public static function isRunning(int $pid): ?bool
     {
-        if ($pid <= 0) {
-            return null;
-        }
-
-        if (is_dir('/proc/self')) {
-            return is_dir('/proc/' . $pid);
-        }
-
-        if (function_exists('posix_kill')) {
-            // Signal zero asks whether the process exists without sending it
-            // anything.
-            return @posix_kill($pid, 0);
-        }
-
-        return null;
+        // Asked through the probe the repository lock uses, so that "has the
+        // old worker stopped" is answered here the same way the lock answers
+        // it. A non-positive identifier is not a process that has stopped; it
+        // is a record that never named one.
+        return $pid <= 0 ? null : (new SystemProbe())->isRunning($pid);
     }
 
     /**
