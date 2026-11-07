@@ -25,6 +25,13 @@ use Celyes\RalphPhp\Verification\VerificationReport;
  * checklist's box was actually ticked, and — for a pass that staged nothing —
  * the case for or against completing it without a commit.
  *
+ * **`completion()` is the evidence behind the box, when there is one.** A pass
+ * that reached the checklist write collected every condition the tick rests on
+ * as one reading — the checks, the commit or the no-change case, the
+ * publication, and the write itself — which is section G, item 7's "record
+ * completion evidence together". It is carried here for both answers: a box
+ * ticked, and a box deliberately left alone.
+ *
  * **`wasChecked()` is deliberately separate from the pass being complete.** A
  * pass can be verified, committed, pushed and complete, and the box still not
  * be ticked, because ticking it is a write to a file a user may own and may
@@ -42,6 +49,7 @@ final class TaskResult
         private readonly bool $checked,
         private readonly string $reason,
         private readonly ?Satisfaction $satisfaction,
+        private readonly ?CompletionEvidence $completion,
     ) {
     }
 
@@ -52,6 +60,8 @@ final class TaskResult
      * @param string $reason  one line on why the pass ended as it did
      * @param Satisfaction|null $satisfaction the case for a pass that staged
      *        nothing, where one was made
+     * @param CompletionEvidence|null $completion what the tick rested on, for a
+     *        pass that reached the checklist write — either answer
      */
     public static function of(
         Task $task,
@@ -61,8 +71,18 @@ final class TaskResult
         bool $checked = false,
         string $reason = '',
         ?Satisfaction $satisfaction = null,
+        ?CompletionEvidence $completion = null,
     ): self {
-        return new self($task, $generation, $attempt, $verification, $checked, $reason, $satisfaction);
+        return new self(
+            $task,
+            $generation,
+            $attempt,
+            $verification,
+            $checked,
+            $reason,
+            $satisfaction,
+            $completion,
+        );
     }
 
     public function task(): Task
@@ -220,6 +240,21 @@ final class TaskResult
         return $this->satisfaction;
     }
 
+    /**
+     * What the ticked box rests on, or null when the pass never reached the
+     * checklist write.
+     *
+     * Present for both answers to it: a task checked off, and one carried to
+     * the end of its pass and refused because a condition on ticking a box was
+     * not met (PROJECT.md section G, item 7). The row is the authority for the
+     * state either way — this is the five layers of it read as one reading, and
+     * {@see CompletionEvidence::recordPath()} is where that reading was kept.
+     */
+    public function completion(): ?CompletionEvidence
+    {
+        return $this->completion;
+    }
+
     public function branch(): ?string
     {
         return $this->generation->branch();
@@ -288,6 +323,7 @@ final class TaskResult
             'branch' => $this->branch(),
             'no_change' => $this->isNoChange(),
             'satisfaction' => $this->satisfaction?->toArray(),
+            'completion' => $this->completion?->toArray(),
             'push' => $this->push()->state()->value,
             'verification' => $this->verification?->toArray(),
             'blocker' => $this->blocker()?->toStorage(),

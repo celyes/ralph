@@ -53,6 +53,7 @@ final class Workbench
         private readonly WorkspaceStager $stager,
         private readonly ChecksAuditor $checks,
         private readonly SatisfactionAuditor $satisfaction,
+        private readonly CompletionRecorder $completions,
         private readonly TaskCommitter $committer,
         private readonly TaskPublisher $publisher,
         private readonly WorktreeCleaner $cleaner,
@@ -91,6 +92,7 @@ final class Workbench
             WorkspaceStager::forProject($configuration, $executable, $processes),
             new ChecksAuditor($executable, $processes),
             new SatisfactionAuditor(),
+            new CompletionRecorder(),
             TaskCommitter::forProject($configuration, $generations, $executable, $processes),
             TaskPublisher::forProject($configuration, $generations, $executable, $processes),
             WorktreeCleaner::forProject($configuration, $generations, $executable, $processes),
@@ -150,6 +152,15 @@ final class Workbench
     public function satisfaction(): SatisfactionAuditor
     {
         return $this->satisfaction;
+    }
+
+    /**
+     * What keeps the evidence behind a ticked box (PROJECT.md section G,
+     * item 7).
+     */
+    public function completions(): CompletionRecorder
+    {
+        return $this->completions;
     }
 
     public function committer(): TaskCommitter

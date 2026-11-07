@@ -15,6 +15,7 @@ use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\CommitMessage;
+use Celyes\RalphPhp\Git\StagedChanges;
 use Celyes\RalphPhp\Git\TaskPublisher;
 use Celyes\RalphPhp\Git\TaskWorktree;
 use Celyes\RalphPhp\Log\AttemptLog;
@@ -33,6 +34,7 @@ use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\State\WorktreeOwnership;
 use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Support\SystemClock;
+use Celyes\RalphPhp\Tasks\CheckboxEdit;
 use Celyes\RalphPhp\Tasks\ChecklistSnapshot;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskSnapshot;
@@ -410,6 +412,7 @@ final class TaskPass
                 $attempt,
                 $result,
                 $verification,
+                $staged,
                 $log,
                 $satisfaction,
             );
@@ -532,12 +535,28 @@ final class TaskPass
     /**
      * The end of a pass whose work was verified, committed and published.
      *
-     * The order here is PROJECT.md section G, item 7, and it is not
-     * interchangeable. The checklist is reconciled before it is written,
-     * because an edit to the task under the pass means a tick would be applied
-     * to work nobody asked for. The box is ticked before the pass is completed,
-     * because a complete pass whose box could not be written is the one case
-     * that must be recognisable afterwards as needing only the write.
+     * PROJECT.md section G, item 7 in both its halves. The condition first:
+     * the checks, the Git requirements and any required publication are read
+     * off the evidence as one reading ({@see CompletionEvidence::unmet()})
+     * before the checklist is touched, so what permits the tick is a question
+     * asked here rather than a property of how the pass happened to arrive. The
+     * sequence above already guarantees every one of them, which is exactly why
+     * the reading is cheap and worth having: the one write this package makes
+     * to a file the user owns should not depend on nobody ever reordering the
+     * code above it.
+     *
+     * Then the record: every fact the tick rests on is kept together beside the
+     * attempt's logs, because by the end of a pass they are spread across the
+     * verification rows, the generation's columns, the attempt's claim and a
+     * line in a Markdown file, and none of those answers "why is this ticked
+     * off" on its own.
+     *
+     * The rest of the order is not interchangeable either. The checklist is
+     * reconciled before it is written, because an edit to the task under the
+     * pass means a tick would be applied to work nobody asked for. The box is
+     * ticked before the pass is completed, because a complete pass whose box
+     * could not be written is the one case that must be recognisable
+     * afterwards as needing only the write.
      */
     private function finalize(
         Task $task,
@@ -546,13 +565,39 @@ final class TaskPass
         AttemptRecord $attempt,
         ExecutionResult $result,
         VerificationReport $verification,
+        StagedChanges $staged,
         AttemptLog $log,
         ?Satisfaction $satisfaction = null,
     ): TaskResult {
         $record = $this->journal->generations()->enterPhase($record, Phase::Finalizing);
         $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Finalizing);
 
-        $blocker = $this->movedUnderUs($task, $snapshot) ?? $this->tick($task, $record);
+        $evidence = CompletionEvidence::of(
+            $record,
+            $task->description(),
+            $attempt->number(),
+            $this->base,
+            $verification,
+            $staged,
+            $satisfaction,
+            $result->claim(),
+            $this->configuration->tasksPath(),
+        );
+
+        // The conditions before the reconciliation, and both before the write:
+        // whether the task moved under the pass does not matter about work that
+        // did not earn a tick in the first place.
+        $blocker = $this->unearned($evidence) ?? $this->movedUnderUs($task, $snapshot);
+
+        if ($blocker === null) {
+            $written = $this->tick($task, $record);
+
+            if ($written instanceof Blocker) {
+                $blocker = $written;
+            } else {
+                $evidence = $evidence->ticked($written);
+            }
+        }
 
         if ($blocker !== null) {
             $log->note('not checked off: ' . $blocker->reason());
@@ -566,11 +611,13 @@ final class TaskPass
                     LifecycleState::Blocked,
                     $result->exitCode(),
                     $this->milliseconds($result),
+                    evidence: $evidence->evidence(),
                     blocker: $blocker,
                 ),
                 $verification,
                 $blocker->reason(),
                 $satisfaction,
+                $this->keep($evidence, $record, $attempt, $log),
             );
         }
 
@@ -584,11 +631,6 @@ final class TaskPass
             $this->milliseconds($result),
         );
 
-        $log->note(sprintf(
-            'completed: %s, box ticked',
-            $record->isNoChange() ? 'nothing to commit' : 'commit ' . substr((string) $record->commitSha(), 0, 8),
-        ));
-
         return TaskResult::of(
             $task,
             $record,
@@ -597,6 +639,45 @@ final class TaskPass
             true,
             $record->isNoChange() ? $this->describeNoChange($satisfaction) : 'verified and committed',
             $satisfaction,
+            $this->keep($evidence, $record, $attempt, $log),
+        );
+    }
+
+    /**
+     * Refuse a tick the pass has not earned, with what is missing.
+     *
+     * Blocked rather than failed when it happens, like the other two readings
+     * that stop a green run ({@see self::weakened()}, {@see self::unsatisfied()})
+     * and for the same reason: nothing here is a failing check, so there is
+     * nothing a further attempt would be told that it does not already know.
+     */
+    private function unearned(CompletionEvidence $evidence): ?Blocker
+    {
+        if ($evidence->isEarned()) {
+            return null;
+        }
+
+        return Blocker::raised($evidence->summary(), implode(' ', $evidence->hints()));
+    }
+
+    /**
+     * Keep the completion's evidence, and say on the log what it holds.
+     *
+     * Written for a refusal as well as for a tick: a pass that reached the end
+     * and found a condition unmet is the case most worth being able to read
+     * afterwards. The record is a copy of facts the state store already holds,
+     * so a write that fails is noted and nothing about the outcome changes.
+     */
+    private function keep(
+        CompletionEvidence $evidence,
+        GenerationRecord $record,
+        AttemptRecord $attempt,
+        AttemptLog $log,
+    ): CompletionEvidence {
+        return $this->workbench->completions()->record(
+            $evidence,
+            $this->workbench->logs()->completionRecord($record->generation(), $attempt->number()),
+            $log,
         );
     }
 
@@ -607,13 +688,15 @@ final class TaskPass
      * runs, so a checklist that cannot be written is a blocker and not a lost
      * pass: the next action is to make the file writable, and nothing is
      * implemented again.
+     *
+     * The edit is returned rather than discarded because the completion record
+     * names the line it changed, which is the one part of the evidence that
+     * exists nowhere else.
      */
-    private function tick(Task $task, GenerationRecord $record): ?Blocker
+    private function tick(Task $task, GenerationRecord $record): CheckboxEdit|Blocker
     {
         try {
-            $this->workbench->checkboxes()->tick($this->configuration, $task->id());
-
-            return null;
+            return $this->workbench->checkboxes()->tick($this->configuration, $task->id());
         } catch (RalphException $failure) {
             return Blocker::raised(
                 'the task is done, but its box could not be ticked: ' . $failure->getMessage(),
@@ -1013,8 +1096,18 @@ final class TaskPass
         ?VerificationReport $verification,
         string $reason,
         ?Satisfaction $satisfaction = null,
+        ?CompletionEvidence $completion = null,
     ): TaskResult {
-        return TaskResult::of($task, $record, $attempt, $verification, false, $reason, $satisfaction);
+        return TaskResult::of(
+            $task,
+            $record,
+            $attempt,
+            $verification,
+            false,
+            $reason,
+            $satisfaction,
+            $completion,
+        );
     }
 
     /**

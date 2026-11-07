@@ -172,6 +172,80 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * The other half of section G, item 7: what the ticked box rests on, kept
+     * as one document.
+     *
+     * By the end of a pass these facts are scattered — the checks are rows in
+     * `verification_results`, the commit is a column on the generation, the
+     * publication is three more, the agent's claim is on the attempt, and the
+     * tick is a line in a file the package does not own. Every one is
+     * reachable, and none of them answers the question a reviewer actually
+     * arrives with. So the assertions here are about one file holding all of
+     * them, written at the moment they were true.
+     */
+    #[Test]
+    public function a_checked_off_task_records_the_evidence_for_the_tick_together(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([
+            FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])
+                ->saying('added the option and a test for it'),
+        ]);
+
+        $terminal = new CapturingOutput();
+        $result = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal)->results()[0];
+
+        // The conditions were read, and the write they permitted landed.
+        $completion = $result->completion();
+        self::assertNotNull($completion);
+        self::assertTrue($completion->isEarned());
+        self::assertSame([], $completion->unmet());
+        self::assertTrue($completion->wasChecked());
+        self::assertNotNull($completion->edit());
+
+        // Beside the attempt's logs, where `ralph logs` sends a reader.
+        $record = (string) $completion->recordPath();
+        self::assertSame(
+            $this->project->path(sprintf(
+                '.ralph/runtime/logs/%s/attempt-01-completed.md',
+                $result->generation()->slug(),
+            )),
+            $record,
+        );
+        self::assertFileExists($record);
+
+        $written = (string) file_get_contents($record);
+
+        // Each condition on ticking a box, with this pass's answer to it.
+        self::assertStringContainsString('- [x] **Verification passed', $written);
+        self::assertStringContainsString('- [x] **An implementation is recorded', $written);
+        self::assertStringContainsString('- [x] **Publication is settled', $written);
+
+        // The checks the package ran, named with the command it ran them with.
+        self::assertStringContainsString('**tests** — `php -v`', $written);
+
+        // The commit a reviewer will read, and what is in it.
+        self::assertStringContainsString((string) $result->commitSha(), $written);
+        self::assertStringContainsString('`src/Import.php`', $written);
+
+        // The agent that produced it, by name and without a credential.
+        self::assertStringContainsString('Carried out by ', $written);
+
+        // The line in the user's file that was changed, which is the one fact
+        // here that exists nowhere else.
+        self::assertStringContainsString('.ralph/tasks.md` line', $written);
+
+        // The agent's words, kept as words.
+        self::assertStringContainsString('added the option and a test for it', $written);
+        self::assertStringContainsString('Nothing in them has been checked', $written);
+
+        // And the limit, where a reader meets it rather than in a docblock.
+        self::assertStringContainsString('does not say that any configured check tests', $written);
+
+        self::assertStringContainsString('completion evidence kept at', $terminal->standardOutput());
+    }
+
+    /**
      * The checks are run by the package, against the workspace, with the
      * agent's work in it and before anything is staged.
      */

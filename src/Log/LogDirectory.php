@@ -32,9 +32,10 @@ use InvalidArgumentException;
  * section G, item 2 can sit beside the agent's as `attempt-02-check-tests.log`
  * without either having to be found by elimination. The same naming carries
  * what is not output at all: `attempt-02-staged.diff` is the patch an attempt's
- * commit would have contained, and `attempt-02-satisfied.md` is why a task was
- * completed without one. Both are preserved where the attempt's own logs are,
- * because they are read together.
+ * commit would have contained, `attempt-02-satisfied.md` is why a task was
+ * completed without one, and `attempt-02-completed.md` is what a ticked box
+ * rests on. All of them are preserved where the attempt's own logs are, because
+ * they are read together.
  *
  * **Known limit of the padding.** Past attempt 99 the names stop sorting as
  * bytes in the order they were made. The per-task attempt limit is in single
@@ -88,6 +89,11 @@ final class LogDirectory
      * The kind suffix on the evidence behind a no-change outcome.
      */
     public const string SATISFIED = 'satisfied';
+
+    /**
+     * The kind suffix on the evidence behind a ticked box.
+     */
+    public const string COMPLETED = 'completed';
 
     /**
      * Digits the attempt number is padded to.
@@ -195,6 +201,25 @@ final class LogDirectory
     public function satisfactionRecord(TaskGeneration $generation, int $attempt): string
     {
         return $this->fileFor($generation, $attempt, self::SATISFIED, self::RECORD_EXTENSION);
+    }
+
+    /**
+     * The path one attempt's completion evidence is written to.
+     *
+     * Beside the no-change record and the preserved diff, because the three
+     * answer the same question for the three ways a pass can end, and whoever
+     * is asking why a box is ticked should find the answer where `ralph logs`
+     * already sends them.
+     *
+     * Written when a pass reaches the checklist write — see
+     * {@see \Celyes\RalphPhp\Run\CompletionRecorder} — so this is a path that
+     * holds a file for a completed task and usually none for any other.
+     *
+     * @throws InvalidArgumentException when the attempt number is not positive
+     */
+    public function completionRecord(TaskGeneration $generation, int $attempt): string
+    {
+        return $this->fileFor($generation, $attempt, self::COMPLETED, self::RECORD_EXTENSION);
     }
 
     /**
