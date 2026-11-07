@@ -816,6 +816,73 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * A second, deliberately new run picks up where the checklist stands, with
+     * its limits whole and nothing the first run finished lost.
+     *
+     * The other half of PROJECT.md section H, item 3, and the reason the
+     * iteration limit of the case above is safe to hit: a user whose run
+     * stopped at a limit starts another one, and what they get is the rest of
+     * the checklist rather than the whole of it again. Completed work belongs
+     * to the task rows and the repository, not to the run that did it — so
+     * what is asserted is that the new run's counters start at zero *and* that
+     * the first task is not touched a second time.
+     */
+    #[Test]
+    public function a_second_run_starts_its_limits_afresh_without_losing_what_the_first_completed(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $worker = $this->givenAWorker([
+            FixtureStep::success(['src/Import.php' => "<?php\n\n// first\n"]),
+            FixtureStep::success(['README.md' => "An example project.\n\n## Import\n"]),
+        ]);
+
+        $first = $this->loopOver(ScriptedVerifier::passing(), ['limits' => ['iterations' => 1]]);
+        self::assertSame(1, $first->remaining(), 'The first run stopped one task short.');
+
+        $second = $this->loopOver(ScriptedVerifier::passing(), ['limits' => ['iterations' => 1]]);
+
+        // It took on the task the first run did not reach, and only that one:
+        // the checked box is what the loop reads, so the finished task is not
+        // offered to the agent again.
+        self::assertCount(1, $second->results());
+        self::assertSame(self::SECOND, $second->results()[0]->description());
+        self::assertTrue($second->results()[0]->isCompleted());
+        self::assertCount(2, $worker->attempts(), 'The first task was handed to the agent once, in all.');
+
+        $journal = $this->journal();
+        $row = $journal->runs()->get($second->run()->rowId());
+
+        // A fresh start, and identifiable as one: its iteration limit of 1 was
+        // whole, which is what let it take on a task at all.
+        self::assertTrue($row->isFreshStart());
+        self::assertNull($row->resumedFromRunId());
+        self::assertSame(1, $row->iterations());
+        self::assertSame(1, $row->ownIterations());
+        self::assertSame(0, $row->carriedIterations());
+        self::assertCount(1, $journal->runs()->lineage($row));
+
+        // And the first run is still there, with its own count and its own
+        // completed task underneath it.
+        $earlier = $journal->runs()->get($first->run()->rowId());
+        self::assertSame(1, $earlier->iterations());
+        self::assertSame(LifecycleState::Completed, $earlier->state());
+
+        $finished = $this->recorded(self::FIRST);
+        self::assertSame(Completion::RunnerVerified, $finished->completion());
+
+        $generations = $journal->generations()->forTask($finished->id());
+        self::assertCount(1, $generations, 'The completed task was not passed over again.');
+        self::assertSame($earlier->rowId(), $generations[0]->runId());
+        self::assertSame(LifecycleState::Completed, $generations[0]->state());
+
+        // On disk: both boxes ticked, one commit per task.
+        $markdown = $this->tasksFile();
+        self::assertStringContainsString('- [x] ' . self::FIRST, $markdown);
+        self::assertStringContainsString('- [x] ' . self::SECOND, $markdown);
+        self::assertCount(2, $this->commitsBeyondBase());
+    }
+
+    /**
      * A checklist with nothing pending is not an error, and nothing is written
      * to the repository over it.
      */

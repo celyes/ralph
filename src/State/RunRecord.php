@@ -49,8 +49,11 @@ final class RunRecord
         private readonly ?string $host,
         private readonly ?int $pid,
         private readonly ?int $resumedFrom,
+        private readonly ?string $resumedFromRunId,
         private readonly int $iterations,
         private readonly int $activeSeconds,
+        private readonly int $carriedIterations,
+        private readonly int $carriedSeconds,
         private readonly Timestamp $startedAt,
         private readonly Timestamp $updatedAt,
         private readonly ?Timestamp $finishedAt,
@@ -87,8 +90,11 @@ final class RunRecord
             self::nullableText($row, 'host'),
             isset($row['pid']) ? (int) $row['pid'] : null,
             isset($row['resumed_from']) ? (int) $row['resumed_from'] : null,
+            self::nullableText($row, 'resumed_from_run_id'),
             (int) ($row['iterations_used'] ?? 0),
             (int) ($row['active_seconds'] ?? 0),
+            (int) ($row['carried_iterations'] ?? 0),
+            (int) ($row['carried_seconds'] ?? 0),
             Timestamp::fromStorage(self::text($row, 'started_at')),
             Timestamp::fromStorage(self::text($row, 'updated_at')),
             Timestamp::recorded(self::nullableText($row, 'finished_at')),
@@ -256,20 +262,53 @@ final class RunRecord
     }
 
     /**
-     * The run this one is continuing, when it is a resume.
+     * The row id of the run this one is continuing, when it is a resume.
      */
     public function resumedFrom(): ?int
     {
         return $this->resumedFrom;
     }
 
+    /**
+     * The identifier of the run this one is continuing, as a person reads it.
+     */
+    public function resumedFromRunId(): ?string
+    {
+        return $this->resumedFromRunId;
+    }
+
+    /**
+     * Whether this run continues an earlier one rather than starting over.
+     */
     public function isResume(): bool
     {
         return $this->resumedFrom !== null;
     }
 
     /**
-     * How many tasks the loop has taken on in this run.
+     * Whether this run was deliberately started anew.
+     *
+     * The other half of PROJECT.md section H, item 3, and the reason the
+     * distinction is recorded at all: a fresh start gets the configured limits
+     * whole, a resume gets what its predecessor left of them. Which of the two
+     * a row is must be legible afterwards, because it is the difference
+     * between a run that did two tasks and a run that did two tasks on top of
+     * three — and the counters alone cannot say.
+     *
+     * Starting afresh costs nothing already finished: completed tasks belong
+     * to the checklist and its task rows, not to the run that completed them.
+     */
+    public function isFreshStart(): bool
+    {
+        return $this->resumedFrom === null;
+    }
+
+    /**
+     * How many tasks have been taken on, counting the runs this one continues.
+     *
+     * The figure {@see \Celyes\RalphPhp\Run\RunBudget} is measured against,
+     * and a total rather than this run's own work on purpose: a limit that
+     * only counted the current process would be reset by every interruption.
      */
     public function iterations(): int
     {
@@ -277,11 +316,52 @@ final class RunRecord
     }
 
     /**
-     * How long the run has spent working, in seconds.
+     * How long has been spent working, in seconds, counting the runs this one
+     * continues.
      */
     public function activeSeconds(): int
     {
         return $this->activeSeconds;
+    }
+
+    /**
+     * The iteration count this run began with, inherited from the run it
+     * continues; zero for a fresh start.
+     */
+    public function carriedIterations(): int
+    {
+        return $this->carriedIterations;
+    }
+
+    /**
+     * The active seconds this run began with, inherited from the run it
+     * continues; zero for a fresh start.
+     */
+    public function carriedSeconds(): int
+    {
+        return $this->carriedSeconds;
+    }
+
+    /**
+     * Tasks this run took on itself, leaving out what it inherited.
+     *
+     * What `status` should show against a resumed run: the totals are what the
+     * limits are measured against, and this is what the run actually did. The
+     * floor at zero is for a predecessor whose counters somehow exceed its
+     * continuation's, which the store cannot write but a hand-edited database
+     * could hold.
+     */
+    public function ownIterations(): int
+    {
+        return max(0, $this->iterations - $this->carriedIterations);
+    }
+
+    /**
+     * Seconds this run spent working itself, leaving out what it inherited.
+     */
+    public function ownActiveSeconds(): int
+    {
+        return max(0, $this->activeSeconds - $this->carriedSeconds);
     }
 
     public function startedAt(): Timestamp
@@ -301,6 +381,10 @@ final class RunRecord
 
     /**
      * One line for `status` and the run's log header.
+     *
+     * A continuation says both figures, because neither is the whole answer on
+     * its own: the tasks it took on are what it did, and the total is what its
+     * limits are measured against.
      */
     public function describe(): string
     {
@@ -309,7 +393,7 @@ final class RunRecord
             $this->runId,
             $this->state->value,
             $this->agent->describe(),
-            $this->iterations === 1 ? '1 task' : $this->iterations . ' tasks',
+            $this->tasksTaken(),
             $this->baseReference,
         );
 
@@ -318,6 +402,26 @@ final class RunRecord
         }
 
         return $described;
+    }
+
+    /**
+     * The tasks taken on, said so that a resume's inherited count cannot be
+     * mistaken for work this run did.
+     */
+    private function tasksTaken(): string
+    {
+        $own = sprintf('%d task%s', $this->ownIterations(), $this->ownIterations() === 1 ? '' : 's');
+
+        if ($this->isFreshStart()) {
+            return $own;
+        }
+
+        return sprintf(
+            '%s continuing %s (%d in all)',
+            $own,
+            $this->resumedFromRunId ?? 'an earlier run',
+            $this->iterations,
+        );
     }
 
     /**
@@ -335,8 +439,14 @@ final class RunRecord
             'checks' => $this->checkNames(),
             'base_reference' => $this->baseReference,
             'base_sha' => $this->baseSha,
+            // Null for a deliberately new run, the predecessor's identifier
+            // for a continuation: the one field that tells the two apart
+            // (section H, item 3).
+            'resumed_from' => $this->resumedFromRunId,
             'iterations' => $this->iterations,
+            'iterations_here' => $this->ownIterations(),
             'active_seconds' => $this->activeSeconds,
+            'active_seconds_here' => $this->ownActiveSeconds(),
             'started_at' => $this->startedAt->value(),
             'finished_at' => $this->finishedAt?->value(),
         ];

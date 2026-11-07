@@ -37,6 +37,21 @@ final class RunStore
      */
     public const int SUFFIX_LENGTH = 6;
 
+    /**
+     * How a run row is read: with the run it continues beside it.
+     *
+     * The left join is what lets a {@see RunRecord} say what it is without a
+     * second query — whether it is a deliberately new run or a continuation,
+     * which run it continues, and how much of its counters it inherited rather
+     * than spent (PROJECT.md section H, item 3). Nothing is joined for a fresh
+     * start, and the three columns come back null, which is the same answer.
+     */
+    private const string SELECT = 'SELECT runs.*,
+                previous.run_id AS resumed_from_run_id,
+                previous.iterations_used AS carried_iterations,
+                previous.active_seconds AS carried_seconds
+            FROM runs LEFT JOIN runs previous ON previous.id = runs.resumed_from';
+
     public function __construct(
         private readonly Database $database,
         private readonly Clock $clock = new SystemClock(),
@@ -44,7 +59,19 @@ final class RunStore
     }
 
     /**
-     * Open a run.
+     * Open a run: a deliberately new one, with its limits whole.
+     *
+     * The fresh start of PROJECT.md section H, item 3. Its counters begin at
+     * zero, which is the point of it: a user who starts a run after one that
+     * stopped at a limit is asking for the limits again, not for the leftovers
+     * of the run before. {@see resume()} is the other case, and the two are
+     * told apart by `resumed_from` being null here.
+     *
+     * **Nothing of what earlier runs finished is lost by starting one.** A
+     * task's identity, its completion and its generations belong to the task
+     * and not to the run that worked on it, so a new run reads the same
+     * verified history ({@see TaskStore::verified()}) and takes on only what
+     * is still pending. The run row is new; the checklist's past is not.
      *
      * @param AgentSelection $agent         the resolved agent, with where it was
      *        selected from — recorded so that `resume` can refuse an implicit
@@ -54,7 +81,6 @@ final class RunStore
      *        {@see VerificationSnapshot}
      * @param string|null    $baseSha       the resolved base commit, when the
      *        reference has already been resolved
-     * @param RunRecord|null $resumedFrom   the run this one continues
      *
      * @throws StateException         when the row cannot be written
      * @throws ConfigurationException when the configuration states no usable
@@ -64,7 +90,79 @@ final class RunStore
         AgentSelection $agent,
         Configuration $configuration,
         ?string $baseSha = null,
-        ?RunRecord $resumedFrom = null,
+    ): RunRecord {
+        return $this->insert($agent, $configuration, $baseSha, null);
+    }
+
+    /**
+     * Open a run that continues an interrupted one, counters and all.
+     *
+     * The preserved counters of PROJECT.md section H, item 3. The new row
+     * starts at the iteration count and the active seconds the run being
+     * continued had reached, so the limits of section H, item 2 bound the work
+     * rather than the process: a run interrupted three tasks into a limit of
+     * five is resumed with two tasks left, and resuming it again does not buy
+     * five more. Resume exists to continue work that was interrupted, not to
+     * reset what that work had already spent.
+     *
+     * The counters are carried rather than summed over the chain at reading
+     * time, because the figure a continuation inherits is already a total: each
+     * resume carries forward what its predecessor had, so a row holds what the
+     * whole chain has spent and {@see RunBudget} can be measured from one row.
+     * What this run spent by itself is still legible — see
+     * {@see RunRecord::ownIterations()}.
+     *
+     * The agent is taken from the caller rather than from `$previous`, because
+     * it is the caller — `ralph resume` — that must refuse an implicit change
+     * of agent (section H, item 6) and it needs the recorded one to say so.
+     * What is refused here is only what the store can see: a run that ended in
+     * the ordinary way has nothing left to continue, and continuing it would
+     * be a fresh run wearing a finished run's budget.
+     *
+     * @param RunRecord $previous the run being continued, which may still claim
+     *        to be running: a crashed runner never closed its row, and that is
+     *        the commonest thing there is to resume
+     *
+     * @throws StateException         when the previous run completed, or the
+     *                                row cannot be written
+     * @throws ConfigurationException when the configuration states no usable
+     *         set of checks to freeze
+     */
+    public function resume(
+        RunRecord $previous,
+        AgentSelection $agent,
+        Configuration $configuration,
+        ?string $baseSha = null,
+    ): RunRecord {
+        if ($previous->state() === LifecycleState::Completed) {
+            throw new StateException(
+                sprintf(
+                    'Run %s ended as completed; there is nothing in it to resume.',
+                    $previous->runId(),
+                ),
+                [
+                    sprintf('It stopped because: %s.', $previous->stopReason() ?? 'no reason recorded'),
+                    'Start a new run with `ralph run`, which begins with the configured limits whole.',
+                    'Tasks completed by earlier runs stay completed and are not taken on again.',
+                ],
+            );
+        }
+
+        return $this->insert($agent, $configuration, $baseSha ?? $previous->baseSha(), $previous);
+    }
+
+    /**
+     * Write a run row, fresh or continuing.
+     *
+     * @throws StateException         when the row cannot be written
+     * @throws ConfigurationException when the configuration states no usable
+     *         set of checks to freeze
+     */
+    private function insert(
+        AgentSelection $agent,
+        Configuration $configuration,
+        ?string $baseSha,
+        ?RunRecord $previous,
     ): RunRecord {
         $record = AgentRecord::of($agent);
         $columns = $record->toColumns();
@@ -75,7 +173,7 @@ final class RunStore
                  (run_id, state, agent, adapter, agent_source, agent_settings, configuration,
                   checks, tasks_path, base_reference, base_sha, host, pid, resumed_from,
                   iterations_used, active_seconds, started_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)',
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 $this->identifier($now),
                 LifecycleState::Running->value,
@@ -94,7 +192,11 @@ final class RunStore
                 $baseSha,
                 $this->host(),
                 getmypid() === false ? null : getmypid(),
-                $resumedFrom?->rowId(),
+                $previous?->rowId(),
+                // Zero for a fresh start, the predecessor's totals for a
+                // continuation: section H, item 3, in two columns.
+                $previous?->iterations() ?? 0,
+                $previous?->activeSeconds() ?? 0,
                 $now->value(),
                 $now->value(),
             ],
@@ -120,7 +222,7 @@ final class RunStore
      */
     public function find(string $runId): ?RunRecord
     {
-        $rows = $this->database->query('SELECT * FROM runs WHERE run_id = ?', [$runId]);
+        $rows = $this->database->query(self::SELECT . ' WHERE runs.run_id = ?', [$runId]);
 
         return $rows === [] ? null : RunRecord::fromRow($rows[0]);
     }
@@ -132,7 +234,7 @@ final class RunStore
      */
     public function latest(): ?RunRecord
     {
-        $rows = $this->database->query('SELECT * FROM runs ORDER BY id DESC LIMIT 1');
+        $rows = $this->database->query(self::SELECT . ' ORDER BY runs.id DESC LIMIT 1');
 
         return $rows === [] ? null : RunRecord::fromRow($rows[0]);
     }
@@ -149,7 +251,7 @@ final class RunStore
     public function running(): ?RunRecord
     {
         $rows = $this->database->query(
-            'SELECT * FROM runs WHERE state = ? ORDER BY id DESC LIMIT 1',
+            self::SELECT . ' WHERE runs.state = ? ORDER BY runs.id DESC LIMIT 1',
             [LifecycleState::Running->value],
         );
 
@@ -167,8 +269,55 @@ final class RunStore
     {
         return array_map(
             static fn (array $row): RunRecord => RunRecord::fromRow($row),
-            $this->database->query('SELECT * FROM runs ORDER BY id DESC'),
+            $this->database->query(self::SELECT . ' ORDER BY runs.id DESC'),
         );
+    }
+
+    /**
+     * The run this one continues, or null when it is a fresh start.
+     *
+     * @throws StateException when the row cannot be read
+     */
+    public function predecessor(RunRecord $run): ?RunRecord
+    {
+        $rowId = $run->resumedFrom();
+
+        return $rowId === null ? null : $this->read($rowId);
+    }
+
+    /**
+     * A run and everything it continues, newest first.
+     *
+     * What a resumed run's history is: a fresh start is one row, and each
+     * resume adds one in front of it. `status` and `logs` read it to show the
+     * work as the one continued effort it is rather than as a series of
+     * unrelated runs that happen to share a checklist.
+     *
+     * A row whose predecessor has been deleted ends the chain where the
+     * deletion did — `resumed_from` is `ON DELETE SET NULL`, so the lineage is
+     * as much of the history as still exists, which is the honest answer. The
+     * loop over it is bounded by the ids already seen as well: a cycle cannot
+     * be written through this store, and a database that somehow held one must
+     * not hang the command that reads it.
+     *
+     * @return list<RunRecord>
+     *
+     * @throws StateException when a row cannot be read
+     */
+    public function lineage(RunRecord $run): array
+    {
+        $chain = [$run];
+        $seen = [$run->rowId() => true];
+        $rowId = $run->resumedFrom();
+
+        while ($rowId !== null && !isset($seen[$rowId])) {
+            $seen[$rowId] = true;
+            $previous = $this->read($rowId);
+            $chain[] = $previous;
+            $rowId = $previous->resumedFrom();
+        }
+
+        return $chain;
     }
 
     /**
@@ -313,7 +462,7 @@ final class RunStore
      */
     private function read(int $rowId): RunRecord
     {
-        $rows = $this->database->query('SELECT * FROM runs WHERE id = ?', [$rowId]);
+        $rows = $this->database->query(self::SELECT . ' WHERE runs.id = ?', [$rowId]);
 
         if ($rows === []) {
             throw new StateException(sprintf('There is no run with id %d in the state database.', $rowId));
