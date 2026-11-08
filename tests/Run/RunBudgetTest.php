@@ -133,6 +133,7 @@ final class RunBudgetTest extends TestCase
                 'seconds' => 7200,
                 'seconds_remaining' => 6000,
                 'allows_another_task' => true,
+                'spent_setting' => null,
             ],
             RunBudget::of($this->limits(10, 7200), 3, 1200)->toArray(),
         );

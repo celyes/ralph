@@ -226,7 +226,7 @@ final class StateBootstrapTest extends TestCase
 
         $halfway = new Migrator([
             ...Migrations::all(),
-            new Migration(2, 'a step that fails after its first statement', [
+            new Migration($this->nextVersion(), 'a step that fails after its first statement', [
                 'CREATE TABLE first_half (id INTEGER PRIMARY KEY)',
                 'CREATE TABLE runs (id INTEGER PRIMARY KEY)',
             ]),
@@ -248,7 +248,7 @@ final class StateBootstrapTest extends TestCase
             $reopened->database()->hasTable('first_half'),
             'The first statement of a failed migration was left behind.',
         );
-        self::assertSame([1], (new Migrator())->appliedVersions($reopened->database()));
+        self::assertSame($this->shippedVersions(), (new Migrator())->appliedVersions($reopened->database()));
     }
 
     #[Test]
@@ -259,20 +259,27 @@ final class StateBootstrapTest extends TestCase
 
         $broken = new Migrator([
             ...Migrations::all(),
-            new Migration(2, 'a step that cannot work', ['CREATE TABLE runs (id INTEGER PRIMARY KEY)']),
+            new Migration(
+                $this->nextVersion(),
+                'a step that cannot work',
+                ['CREATE TABLE runs (id INTEGER PRIMARY KEY)'],
+            ),
         ]);
 
         try {
             (new StateBootstrap($broken))->openAt($file);
             self::fail('A migration that cannot be applied was reported as applied.');
         } catch (StateException $failure) {
-            self::assertStringContainsString('2: a step that cannot work', $failure->getMessage());
+            self::assertStringContainsString(
+                sprintf('%d: a step that cannot work', $this->nextVersion()),
+                $failure->getMessage(),
+            );
         }
 
         $reopened = $this->bootstrap->openAt($file);
 
         self::assertSame(Schema::version(), $reopened->version());
-        self::assertSame([1], (new Migrator())->appliedVersions($reopened->database()));
+        self::assertSame($this->shippedVersions(), (new Migrator())->appliedVersions($reopened->database()));
     }
 
     /**
@@ -286,21 +293,23 @@ final class StateBootstrapTest extends TestCase
         $file = $this->stateFile();
         $store = $this->bootstrap->openAt($file);
 
-        $later = new Migration(2, 'a later step', ['CREATE TABLE later (id INTEGER PRIMARY KEY)']);
-        $skipped = new Migration(3, 'a step applied out of order', [
+        $later = new Migration($this->nextVersion(), 'a later step', [
+            'CREATE TABLE later (id INTEGER PRIMARY KEY)',
+        ]);
+        $skipped = new Migration($this->nextVersion() + 1, 'a step applied out of order', [
             'CREATE TABLE skipped (id INTEGER PRIMARY KEY)',
         ]);
 
         (new Migrator([...Migrations::all(), $later, $skipped]))->migrate($store->database());
         $store->database()->execute(
-            sprintf('DELETE FROM %s WHERE version = 2', Schema::LEDGER),
+            sprintf('DELETE FROM %s WHERE version = %d', Schema::LEDGER, $this->nextVersion()),
         );
         $store->database()->execute('DROP TABLE later');
 
         $migrator = new Migrator([...Migrations::all(), $later, $skipped]);
 
         self::assertSame(
-            [2],
+            [$this->nextVersion()],
             array_map(
                 static fn (Migration $migration): int => $migration->version(),
                 $migrator->pending($store->database()),
@@ -310,7 +319,10 @@ final class StateBootstrapTest extends TestCase
         $result = $migrator->migrate($store->database());
 
         self::assertTrue($store->database()->hasTable('later'));
-        self::assertSame([1, 2, 3], $migrator->appliedVersions($store->database()));
+        self::assertSame(
+            [...$this->shippedVersions(), $this->nextVersion(), $this->nextVersion() + 1],
+            $migrator->appliedVersions($store->database()),
+        );
         self::assertCount(1, $result->applied());
     }
 
@@ -498,6 +510,32 @@ final class StateBootstrapTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         new Migration(1, '   ', ['SELECT 1']);
+    }
+
+    /**
+     * A version beyond everything the package ships.
+     *
+     * The cases that need a migration to fail, to be skipped or to arrive out
+     * of order invent one, and inventing it at a fixed number would collide
+     * with the next version the package itself adds — which is how a test that
+     * is supposed to watch a migration fail quietly stops running it at all.
+     */
+    private function nextVersion(): int
+    {
+        return Migrations::latestVersion() + 1;
+    }
+
+    /**
+     * The versions a fresh database has, oldest first.
+     *
+     * @return list<int>
+     */
+    private function shippedVersions(): array
+    {
+        return array_map(
+            static fn (Migration $migration): int => $migration->version(),
+            Migrations::all(),
+        );
     }
 
     private function stateFile(): string

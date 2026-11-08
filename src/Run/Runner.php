@@ -85,6 +85,17 @@ use Throwable;
  * a run works through, and the attempt limit bounds how long it stays on one
  * item.
  *
+ * **However it ends, it ends with a next action** ({@see RunStop}, section H,
+ * item 9). Each of the six endings — the checklist worked through, a task given
+ * up on, a decision nobody but a person can make, a limit, a stop asked for,
+ * and a failure — is recorded as a reason together with what the user is
+ * expected to do about it, printed on the last line and written to the run's
+ * row so that the answer outlives the terminal that saw it. The three endings
+ * that wait on somebody are the three that item asks about, and the actions are
+ * the pass's own wherever the pass recorded one: the judgement was made there,
+ * and a second description of it here is one more thing that could disagree
+ * with the row.
+ *
  * **The run's own limits stop it between tasks** ({@see RunBudget}, section H,
  * item 2). The iteration limit and the total active run-time budget are read
  * before each task is taken on, off the run's row, and a run with neither left
@@ -378,7 +389,7 @@ final class Runner
             $budget = RunBudget::of($limits, $run->iterations(), $run->activeSeconds());
 
             if (!$budget->allowsAnotherTask()) {
-                $stopped = $this->outOfBudget($budget, $tasks, $results);
+                $stopped = RunStop::limitReached($budget, $this->untaken($tasks, $results));
 
                 break;
             }
@@ -401,9 +412,12 @@ final class Runner
             $drift = $this->noticeDrift($checks, $drift);
 
             if ($result->stopsTheRun()) {
+                // Two different stops, and the difference is whose decision it
+                // was: an interrupted pass is the user's, and a blocked one is
+                // a question the pass recorded with its own next action.
                 $stopped = $result->isInterrupted()
                     ? $this->wasStopped($this->interruptions->requested(), $tasks, $results)
-                    : sprintf('%s needs human input', $result->taskId()->value());
+                    : RunStop::decision($result);
 
                 break;
             }
@@ -414,7 +428,7 @@ final class Runner
 
         $report = RunReport::of($run, $agent, $base, $tasks, $results, $stopped, $drift);
 
-        $this->terminal?->line($report->describe());
+        $this->terminal?->lines([$report->describe(), '  next: ' . $stopped->nextAction()]);
 
         return $report;
     }
@@ -521,86 +535,84 @@ final class Runner
      *
      * @throws RalphException when the row cannot be written
      */
-    private function endOfRun(Journal $journal, RunRecord $run, string $stopped): RunRecord
+    private function endOfRun(Journal $journal, RunRecord $run, RunStop $stopped): RunRecord
     {
         return $this->interruptions->requested() === null
-            ? $journal->runs()->complete($run, $stopped)
-            : $journal->runs()->interrupt($run, $stopped);
+            ? $journal->runs()->complete($run, $stopped->reason(), $stopped->nextAction(), $stopped->kind())
+            : $journal->runs()->interrupt($run, $stopped->reason(), $stopped->nextAction(), $stopped->kind());
     }
 
     /**
      * Why the loop stopped because it was told to, and what it left.
      *
-     * The pending count is the same arithmetic {@see self::outOfBudget()} does
-     * and for the same reason: "stopped by Ctrl+C" with one task left and with
-     * nine left are different situations, and the user who pressed the key is
-     * the one who has to decide what to do about it.
+     * The pending count is the same arithmetic {@see self::untaken()} does for
+     * a spent budget and for the same reason: "stopped by Ctrl+C" with one task
+     * left and with nine left are different situations, and the user who
+     * pressed the key is the one who has to decide what to do about them.
      *
      * @param list<TaskResult> $results
      */
-    private function wasStopped(?Interruption $interruption, TaskList $tasks, array $results): string
+    private function wasStopped(?Interruption $interruption, TaskList $tasks, array $results): RunStop
     {
         $pending = max(0, $tasks->pendingCount() - count(array_filter(
             $results,
             static fn (TaskResult $result): bool => $result->isCompleted(),
         )));
 
-        return sprintf(
-            '%s, with %d task%s still pending',
-            $interruption === null ? 'the run was stopped' : $interruption->reason(),
-            $pending,
-            $pending === 1 ? '' : 's',
-        );
+        return RunStop::interrupted($interruption, $pending);
     }
 
     /**
-     * Why the loop stopped short of the checklist.
+     * How much of the checklist the run never took on.
      *
-     * The limit is named together with what it left undone, because the two
-     * together are the decision the user has to make: a run that stopped with
-     * one task pending and a run that stopped with nine want different answers,
-     * and neither is visible from the limit alone.
+     * Counted from the reading the run started with, less the tasks it worked
+     * on, because that is what is still pending: a run stopped by a limit left
+     * them untouched, which is the difference between a limit and a task that
+     * was given up on.
      *
      * @param list<TaskResult> $results
      */
-    private function outOfBudget(RunBudget $budget, TaskList $tasks, array $results): string
+    private function untaken(TaskList $tasks, array $results): int
     {
-        $pending = max(0, $tasks->pendingCount() - count($results));
-
-        return sprintf(
-            '%s with %d task%s still pending',
-            $budget->exhausted() ?? 'the run stopped',
-            $pending,
-            $pending === 1 ? '' : 's',
-        );
+        return max(0, $tasks->pendingCount() - count($results));
     }
 
     /**
      * Why the loop ran out of work.
      *
+     * The three ordinary endings, and the one that is not: a run that reached
+     * the end of the checklist having given up on something names it, because
+     * section H, item 9's "exhausted attempts" is a stop whether or not it was
+     * the loop that stopped. The attempt limit is read from the configuration
+     * rather than from a result, since what makes a task given-up-on is the
+     * limit it was measured against.
+     *
      * @param list<TaskResult> $results
      */
-    private function whyItEnded(TaskList $tasks, array $results): string
+    private function whyItEnded(TaskList $tasks, array $results): RunStop
     {
         if ($tasks->isEmpty()) {
-            return sprintf('%s states no tasks', $this->configuration->tasksPath());
+            return RunStop::noTasks($this->configuration->tasksPath());
         }
 
         if ($results === []) {
-            return 'there was nothing pending: every task in the checklist is already checked';
+            return RunStop::nothingPending($this->configuration->tasksPath());
         }
 
-        $unfinished = count(array_filter($results, static fn (TaskResult $r): bool => !$r->isCompleted()));
+        $unfinished = array_values(array_filter(
+            $results,
+            static fn (TaskResult $result): bool => !$result->isCompleted(),
+        ));
 
-        if ($unfinished > 0) {
-            return sprintf(
-                'every pending task was taken on; %d of %d did not pass',
-                $unfinished,
-                count($results),
-            );
+        if ($unfinished === []) {
+            return RunStop::everythingCompleted(count($results), $this->configuration->tasksPath());
         }
 
-        return 'every pending task was completed';
+        return RunStop::unfinished(
+            $unfinished,
+            count($results),
+            $this->configuration->limits()->attemptsPerTask(),
+        );
     }
 
     /**
@@ -664,15 +676,28 @@ final class Runner
             // say `interrupted` for those too, because that is what resume
             // looks for (section H, item 4).
             if ($failure instanceof InterruptionException) {
-                $journal->runs()->interrupt($current, $failure->interruption()->reason());
+                // No pending count: this stop surfaced outside the loop, which
+                // is where the count is kept, and a figure guessed at here
+                // would read as the checklist's own.
+                $stop = RunStop::interrupted($failure->interruption());
+
+                $journal->runs()->interrupt($current, $stop->reason(), $stop->nextAction(), $stop->kind());
 
                 return;
             }
 
-            $journal->runs()->fail(
-                $current,
+            // The failure's own hints are the next action, which is where a
+            // setup step that found ambiguous ownership — a branch unrelated
+            // work owns, a checkout holding changes that are not the run's to
+            // touch — has always said what to do about it (section H, item 9).
+            // They are copied onto the row rather than left to the one terminal
+            // that saw them.
+            $stop = RunStop::failure(
                 sprintf('%s: %s', $this->describe($failure), $failure->getMessage()),
+                $failure instanceof RalphException ? $failure->hints() : [],
             );
+
+            $journal->runs()->fail($current, $stop->reason(), $stop->nextAction(), $stop->kind());
         } catch (Throwable) {
             // Nothing useful can be done here, and the failure that matters is
             // the one on its way out.

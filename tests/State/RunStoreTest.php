@@ -17,6 +17,7 @@ use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\State\RunStore;
 use Celyes\RalphPhp\State\StateBootstrap;
+use Celyes\RalphPhp\State\StopKind;
 use Celyes\RalphPhp\Support\FrozenClock;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -360,6 +361,60 @@ final class RunStoreTest extends TestCase
         $run = $this->spent($this->runs->open($this->agent(), $this->configuration()), 1, 60);
 
         self::assertStringContainsString('1 task from HEAD', $run->describe());
+    }
+
+    /**
+     * PROJECT.md section H, item 9's two halves, kept where `ralph status`
+     * will read them rather than only where the terminal saw them.
+     */
+    #[Test]
+    public function a_closed_run_records_the_next_action_and_the_kind_of_stop(): void
+    {
+        $closed = $this->runs->complete(
+            $this->runs->open($this->agent(), $this->configuration()),
+            'TASK-1A2B3C4D needs human input: which importer should this wrap?',
+            'Read `ralph logs TASK-1A2B3C4D`, answer it, then run `ralph retry TASK-1A2B3C4D`.',
+            StopKind::Decision,
+        );
+
+        $read = $this->runs->get($closed->rowId());
+
+        self::assertSame(
+            'Read `ralph logs TASK-1A2B3C4D`, answer it, then run `ralph retry TASK-1A2B3C4D`.',
+            $read->stopAction(),
+        );
+        self::assertSame(StopKind::Decision, $read->stopKind());
+        self::assertSame($read->stopAction(), $read->toArray()['stop_action']);
+        self::assertSame('decision', $read->toArray()['stop_kind']);
+    }
+
+    /**
+     * The reason is required and the action is not, because the closing methods
+     * are also called from a `finally` on the way out of a failure: losing the
+     * reason a run died for want of a sentence of advice would be the worse
+     * trade.
+     */
+    #[Test]
+    public function a_run_closed_without_an_action_records_none_rather_than_an_empty_one(): void
+    {
+        $closed = $this->runs->interrupt(
+            $this->runs->open($this->agent(), $this->configuration()),
+            'stopped by SIGINT (Ctrl+C)',
+            '   ',
+        );
+
+        self::assertNull($this->runs->get($closed->rowId())->stopAction());
+        self::assertSame(StopKind::Interrupted, $closed->stopKind(), 'The kind defaults to how it was closed.');
+    }
+
+    #[Test]
+    public function a_run_that_is_still_going_has_neither(): void
+    {
+        $open = $this->runs->open($this->agent(), $this->configuration());
+
+        self::assertNull($open->stopReason());
+        self::assertNull($open->stopAction());
+        self::assertNull($open->stopKind());
     }
 
     /**

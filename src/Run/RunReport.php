@@ -18,6 +18,12 @@ use Celyes\RalphPhp\Tasks\TaskList;
  * row plus the per-task results, because the row cannot hold the sequence and
  * the sequence cannot hold the limits.
  *
+ * **Why it ended is a value, not a sentence.** {@see RunStop} carries the
+ * reason, the next action and which kind of ending it was, because PROJECT.md
+ * section H, item 9 asks for both halves and because a caller choosing an exit
+ * code or a status line must not have to parse prose to find out whether
+ * anything is waiting for a person.
+ *
  * **It reports, it does not decide.** Nothing here is read back to drive
  * behaviour; the durable record is the database, and a caller holding this
  * after the process ends is holding history.
@@ -33,7 +39,7 @@ final class RunReport
         private readonly BaseCommit $base,
         private readonly TaskList $tasks,
         private readonly array $results,
-        private readonly string $stopReason,
+        private readonly RunStop $stop,
         private readonly VerificationDrift $drift,
     ) {
     }
@@ -42,6 +48,8 @@ final class RunReport
      * @param array<TaskResult>      $results in the order the tasks were taken
      *        on; any array, so a caller that filtered its results keeps the
      *        order without having to reindex first
+     * @param RunStop                $stop    why the loop ended and what the
+     *        user is expected to do about it (PROJECT.md section H, item 9)
      * @param VerificationDrift|null $drift   whether the configured checks were
      *        edited while the run was going. The run was held to the set it
      *        froze either way (section G, item 3); this is how the edit reaches
@@ -53,7 +61,7 @@ final class RunReport
         BaseCommit $base,
         TaskList $tasks,
         array $results,
-        string $stopReason,
+        RunStop $stop,
         ?VerificationDrift $drift = null,
     ): self {
         return new self(
@@ -62,7 +70,7 @@ final class RunReport
             $base,
             $tasks,
             array_values($results),
-            $stopReason,
+            $stop,
             $drift ?? VerificationDrift::none(),
         );
     }
@@ -217,11 +225,43 @@ final class RunReport
     }
 
     /**
-     * Why the loop stopped.
+     * Why the loop ended, and what to do about it.
+     */
+    public function stop(): RunStop
+    {
+        return $this->stop;
+    }
+
+    /**
+     * Why the loop stopped, in one line.
      */
     public function stopReason(): string
     {
-        return $this->stopReason;
+        return $this->stop->reason();
+    }
+
+    /**
+     * What the user is expected to do about the way it ended.
+     *
+     * Never empty: a {@see RunStop} cannot be built without one, including for
+     * the endings where the answer is that there is nothing to do.
+     */
+    public function nextAction(): string
+    {
+        return $this->stop->nextAction();
+    }
+
+    /**
+     * Whether the way it ended wants a person.
+     *
+     * Read off the stop's kind rather than inferred from the task results: a
+     * run can end with every task it took on finished and still be a run that
+     * stopped short, and the three section H, item 9 situations are exactly the
+     * ones this is true for.
+     */
+    public function stoppedForAttention(): bool
+    {
+        return $this->stop->needsAttention();
     }
 
     /**
@@ -249,7 +289,7 @@ final class RunReport
             $this->count(),
             $this->agent->name(),
             $this->remaining(),
-            $this->stopReason,
+            $this->stop->reason(),
         );
     }
 
@@ -282,7 +322,8 @@ final class RunReport
             'run' => $this->run->toArray(),
             'agent' => $this->agent->toArray(),
             'base' => ['reference' => $this->base->reference(), 'sha' => $this->base->sha()],
-            'stop_reason' => $this->stopReason,
+            'stop' => $this->stop->toArray(),
+            'stop_reason' => $this->stop->reason(),
             'completed' => $this->completedCount(),
             'remaining' => $this->remaining(),
             'verification_drift' => $this->drift->toArray(),

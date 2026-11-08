@@ -59,6 +59,23 @@ final class Schema
     }
 
     /**
+     * Which kind of thing ended a run.
+     *
+     * Built from {@see StopKind} so the column cannot hold a kind the enum
+     * does not have. Unlike {@see self::RUN_STATES}, this
+     * is not a second spelling of the lifecycle: a run that ended `completed`
+     * may have ended because its checklist was worked through, because a task
+     * ran out of attempts, or because a limit stopped it, and the three want
+     * different next actions (PROJECT.md section H, item 9).
+     *
+     * @return list<string>
+     */
+    public static function stopKinds(): array
+    {
+        return StopKind::values();
+    }
+
+    /**
      * The kinds of Git fact worth recording.
      *
      * @var list<string>

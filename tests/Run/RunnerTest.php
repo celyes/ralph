@@ -12,6 +12,7 @@ use Celyes\RalphPhp\Exception\CheckoutException;
 use Celyes\RalphPhp\Exception\InterruptionException;
 use Celyes\RalphPhp\Exception\LockException;
 use Celyes\RalphPhp\Exception\PreparationException;
+use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Process\Interruption;
 use Celyes\RalphPhp\Process\Interruptions;
 use Celyes\RalphPhp\Process\KnownProcesses;
@@ -29,6 +30,7 @@ use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Phase;
 use Celyes\RalphPhp\State\PushState;
 use Celyes\RalphPhp\State\StateBootstrap;
+use Celyes\RalphPhp\State\StopKind;
 use Celyes\RalphPhp\State\TaskRecord;
 use Celyes\RalphPhp\State\VerificationStore;
 use Celyes\RalphPhp\Support\Clock;
@@ -592,6 +594,101 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * PROJECT.md section H, item 9, for the two situations that reach it
+     * through a task: an unresolved decision, and attempts that ran out.
+     *
+     * The run's row is what is read, not the report, because the user who has
+     * to act on this is usually reading `ralph status` the next morning. A
+     * reason with no action beside it is where a tool like this loses people:
+     * "the attempt limit of 2 per task is spent" leaves them to guess, and the
+     * guess most of them make — retry it — would continue the same pass with
+     * the same spent attempts and stop again without invoking the agent.
+     */
+    #[Test]
+    public function a_run_that_gave_up_on_a_task_says_what_would_get_it_moving(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// not good enough\n"])]);
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(
+            ScriptedVerifier::scripted([false, false, true]),
+            ['limits' => ['attempts_per_task' => 2]],
+            $terminal,
+        );
+
+        $given = $report->results()[0];
+        self::assertSame(2, $given->attempts());
+        self::assertTrue($given->isFailure());
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+
+        // The run itself worked through the rest of the checklist: the task
+        // after a failed one is independent work.
+        self::assertTrue($report->results()[1]->isCompleted());
+
+        $stop = $report->stop();
+
+        self::assertSame(StopKind::Attempts, $stop->kind());
+        self::assertTrue($report->stoppedForAttention());
+        self::assertStringContainsString(
+            $given->taskId()->value() . ' ran out of attempts',
+            $stop->reason(),
+        );
+        self::assertStringContainsString('limits.attempts_per_task', $stop->nextAction());
+        self::assertStringNotContainsString('ralph retry', $stop->nextAction());
+
+        // The pass's own blocker says the same thing, and says it about the
+        // attempt limit rather than inviting a retry that would do nothing.
+        $blocker = (string) $given->blocker()?->nextAction();
+        self::assertStringContainsString('attempt limit of 2 per task is spent', $blocker);
+        self::assertStringContainsString('limits.attempts_per_task', $blocker);
+        self::assertStringContainsString('restate the task in .ralph/tasks.md', $blocker);
+        self::assertStringContainsString((string) $given->record()->worktree()->path(), $blocker);
+
+        // Both halves are on the row, so they outlive the process that printed
+        // them.
+        $run = $this->journal()->runs()->get($report->run()->rowId());
+
+        self::assertSame($stop->reason(), $run->stopReason());
+        self::assertSame($stop->nextAction(), $run->stopAction());
+        self::assertSame(StopKind::Attempts, $run->stopKind());
+
+        self::assertStringContainsString('next: ' . $stop->nextAction(), $terminal->standardOutput());
+    }
+
+    /**
+     * An unresolved decision: the run stops, and the action it reports is the
+     * pass's own rather than a second description of it.
+     */
+    #[Test]
+    public function a_run_that_stopped_on_a_decision_reports_the_pass_s_own_next_action(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $this->givenAWorker([
+            FixtureStep::blocking('Which importer should this wrap?', 'Name the importer in the task.'),
+        ]);
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(ScriptedVerifier::passing(), [], $terminal);
+
+        $blocked = $report->results()[0];
+        $stop = $report->stop();
+
+        self::assertSame(StopKind::Decision, $stop->kind());
+        self::assertSame($blocked->taskId(), $stop->task());
+        self::assertStringContainsString('Which importer should this wrap?', $stop->reason());
+        self::assertSame('Name the importer in the task.', $stop->nextAction());
+        self::assertSame($blocked->blocker()?->nextAction(), $stop->nextAction());
+
+        $run = $this->journal()->runs()->get($report->run()->rowId());
+
+        self::assertSame('Name the importer in the task.', $run->stopAction());
+        self::assertSame(StopKind::Decision, $run->stopKind());
+
+        self::assertStringContainsString('next: Name the importer in the task.', $terminal->standardOutput());
+    }
+
+    /**
      * A failed task does not end the run: the tasks after it are independent
      * work.
      */
@@ -770,6 +867,13 @@ final class RunnerTest extends TestCase
         self::assertCount(1, $report->results());
         self::assertStringContainsString('iteration limit of 1', $report->stopReason());
         self::assertSame(1, $report->remaining());
+
+        // A limit is not a problem to be looked into: the run did what it was
+        // configured to do, and the action says both ways out of it.
+        self::assertSame(StopKind::Limit, $report->stop()->kind());
+        self::assertFalse($report->stoppedForAttention());
+        self::assertStringContainsString('limits.iterations', $report->nextAction());
+        self::assertStringContainsString('run `ralph run` again', $report->nextAction());
         self::assertStringContainsString('- [ ] ' . self::SECOND, $this->tasksFile());
         self::assertSame(1, $this->journal()->runs()->get($report->run()->rowId())->iterations());
 
@@ -832,6 +936,10 @@ final class RunnerTest extends TestCase
         self::assertSame(1, $run->iterations());
         self::assertGreaterThanOrEqual(90, $run->activeSeconds());
         self::assertSame(LifecycleState::Completed, $run->state());
+
+        // The spent limit names its own setting rather than the other one.
+        self::assertSame(StopKind::Limit, $run->stopKind());
+        self::assertStringContainsString('limits.run_timeout', (string) $run->stopAction());
 
         // One commit, for the one task that ran.
         self::assertCount(1, $this->commitsBeyondBase());
@@ -970,6 +1078,47 @@ final class RunnerTest extends TestCase
             'checks could not be run',
             (string) $pass->blocker()?->reason(),
         );
+    }
+
+    /**
+     * A run that cannot carry on closes its row with the failure's own hints as
+     * the next action.
+     *
+     * The third of PROJECT.md section H, item 9's situations — ambiguous
+     * ownership — arrives this way when it is found before a task can be taken
+     * on: a branch unrelated work owns, a workspace registered somewhere the
+     * configuration no longer places it, a file the run cannot read. Each of
+     * those exceptions already documents what to do about itself; what is
+     * asserted here is that the advice reaches the row rather than only the one
+     * terminal that saw the failure.
+     */
+    #[Test]
+    public function a_run_that_could_not_carry_on_records_the_failures_own_next_action(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker();
+
+        // Unreadable rather than absent, so the checkout stays clean and the
+        // failure happens inside the loop — after the run's row exists, which
+        // is the whole point of the case.
+        chmod($this->project->path('.ralph/tasks.md'), 0o000);
+
+        try {
+            $this->loopOver(ScriptedVerifier::passing());
+            self::fail('A run carried on past a checklist it could not read.');
+        } catch (RalphException $failure) {
+            self::assertNotSame([], $failure->hints(), 'The failure documents nothing to do about itself.');
+
+            chmod($this->project->path('.ralph/tasks.md'), 0o600);
+
+            $run = $this->journal()->runs()->latest();
+
+            self::assertNotNull($run);
+            self::assertSame(LifecycleState::Failed, $run->state());
+            self::assertSame(StopKind::Failed, $run->stopKind());
+            self::assertStringContainsString($failure->getMessage(), (string) $run->stopReason());
+            self::assertSame(implode(' ', $failure->hints()), $run->stopAction());
+        }
     }
 
     /**
@@ -1800,6 +1949,13 @@ final class RunnerTest extends TestCase
         self::assertSame(LifecycleState::Interrupted, $run->state());
         self::assertStringContainsString('stopped by SIGINT', (string) $run->stopReason());
         self::assertSame(1, $run->iterations());
+
+        // And what to do about it: a stop the user asked for is answered by a
+        // resume, not by a new run, and the row says so rather than leaving
+        // them to remember which command keeps the kept workspace.
+        self::assertSame(StopKind::Interrupted, $run->stopKind());
+        self::assertStringContainsString('ralph resume', (string) $run->stopAction());
+        self::assertFalse($report->stoppedForAttention(), 'A stop the user asked for is not a problem to look into.');
 
         // The files: the workspace is kept exactly as the stopped agent left
         // it, which is the evidence a person needs (section F, item 10).

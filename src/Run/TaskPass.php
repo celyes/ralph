@@ -405,7 +405,7 @@ final class TaskPass
             $log->note('verification: ' . $verification->describe());
 
             if (!$verification->passed()) {
-                return $this->unverified($task, $record, $attempt, $result, $verification, $log);
+                return $this->unverified($task, $record, $attempt, $result, $verification, $budget, $log);
             }
 
             // The last boundary a stop is taken at. Past this point the pass
@@ -1436,6 +1436,20 @@ final class TaskPass
      * The task stays unchecked and the evidence is stored for the next attempt
      * to read. The workspace is kept: whoever looks at why a check failed needs
      * the files that failed it.
+     *
+     * **The next action depends on whether this was the last attempt allowed.**
+     * While the budget holds, another attempt follows inside this pass and a
+     * person reading the row is being told what they could do instead. Once it
+     * is spent there is no next attempt to wait for, and telling a user to
+     * retry would send them into
+     * {@see \Celyes\RalphPhp\Tasks\GenerationStart::Continued} — the same
+     * pass, with the same spent attempts, stopping again without invoking the
+     * agent. What actually gets another attempt out of it is a higher limit or
+     * a restated task, and section H, item 9 is about saying so rather than
+     * saying something that sounds like advice.
+     *
+     * @param ExecutionBudget $budget what this attempt was given, which is also
+     *        what says whether it was the last one
      */
     private function unverified(
         Task $task,
@@ -1443,16 +1457,19 @@ final class TaskPass
         AttemptRecord $attempt,
         ExecutionResult $result,
         VerificationReport $verification,
+        ExecutionBudget $budget,
         AttemptLog $log,
     ): TaskResult {
         $blocker = Blocker::raised(
             'verification failed: ' . $verification->describe(),
-            sprintf(
-                'The work is kept in %s for inspection. Fix it, or run `ralph retry %s` to let the '
-                . 'agent try again with the failure as evidence.',
-                (string) $record->worktree()->path(),
-                $task->id()->value(),
-            ),
+            !$budget->isLastAttempt()
+                ? sprintf(
+                    'The work is kept in %s for inspection. Fix it, or run `ralph retry %s` to let the '
+                    . 'agent try again with the failure as evidence.',
+                    (string) $record->worktree()->path(),
+                    $task->id()->value(),
+                )
+                : $this->nothingLeftToTry($task, $record, $budget),
         );
 
         $attempt = $this->journal->attempts()->finish(
@@ -1473,6 +1490,33 @@ final class TaskPass
             $attempt,
             $verification,
             $blocker->reason(),
+        );
+    }
+
+    /**
+     * What to do about a task whose attempts are spent.
+     *
+     * Both halves of the honest answer. The implementation is still there — the
+     * worktree is kept for exactly this (section F, item 10) — and nothing was
+     * checked off. And another pass needs something to change first: a retry
+     * continues this generation and inherits its attempt count
+     * ({@see \Celyes\RalphPhp\Tasks\GenerationStart::keepsAttemptCount()}),
+     * so the two things that do work are a higher limit or a restated task,
+     * which is new work with a generation of its own.
+     */
+    private function nothingLeftToTry(Task $task, GenerationRecord $record, ExecutionBudget $budget): string
+    {
+        $kept = $record->worktree()->path();
+
+        return sprintf(
+            '%s, and nothing was checked off. The attempt limit of %d per task is spent, and a retry '
+            . 'continues this pass rather than starting a new one: raise `limits.attempts_per_task`, '
+            . 'or restate the task in %s, then run `ralph run` again. `ralph logs %s` has what the '
+            . 'checks said.',
+            $kept === null ? 'No workspace was prepared for this pass' : 'The work is kept in ' . $kept,
+            $budget->attempts(),
+            $this->configuration->tasksPath(),
+            $task->id()->value(),
         );
     }
 
@@ -1781,13 +1825,14 @@ final class TaskPass
     private function spent(Task $task, GenerationRecord $record, ExecutionBudget $budget): TaskResult
     {
         $blocker = Blocker::raised(
-            $budget->exhausted() ?? 'there is nothing left in the budget for this task',
-            sprintf(
-                'Read `ralph logs %s`, then either fix the task\'s wording or run `ralph retry %s` '
-                . 'to start a new pass at it.',
-                $task->id()->value(),
-                $task->id()->value(),
-            ),
+            sprintf('%s is spent, and the task was passed over', $budget->exhausted() ?? 'the budget for this task'),
+            $budget->attemptsRemaining() < 1
+                ? $this->nothingLeftToTry($task, $record, $budget)
+                : sprintf(
+                    'The run\'s own time budget ran out rather than this task\'s attempts: run '
+                    . '`ralph run` again to carry on with it, or read `ralph logs %s` first.',
+                    $task->id()->value(),
+                ),
         );
 
         return $this->stopped(

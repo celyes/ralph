@@ -9,8 +9,12 @@ namespace Celyes\RalphPhp\State;
  *
  * There is no separate "current schema" definition to keep in step with the
  * migrations: a fresh database is a database with every migration applied, so
- * the two cannot disagree. Version 1 is therefore the whole of the first
- * release's schema in one step.
+ * the two cannot disagree. Version 1 is the whole of the first release's schema
+ * in one step; the versions after it are the additions made while the first
+ * release was being built, each one appended rather than folded back into
+ * version 1, so that a project already carrying runtime state is upgraded
+ * instead of being left with a database whose recorded version promises columns
+ * it has not got.
  *
  * Conventions the tables follow:
  *
@@ -61,7 +65,7 @@ final class Migrations
      */
     public static function all(): array
     {
-        return [self::initial()];
+        return [self::initial(), self::stopAction()];
     }
 
     /**
@@ -93,6 +97,30 @@ final class Migrations
             self::checklistSnapshots(),
             self::checklistUpdates(),
             ...self::indexes(),
+        ]);
+    }
+
+    /**
+     * Version 2: what the user is expected to do about a run that stopped.
+     *
+     * `stop_reason` has always said why a run ended. PROJECT.md section H,
+     * item 9 asks for the other half — the next action — and a column is where
+     * it has to live, because the user who needs it is usually not the one
+     * watching the terminal at the time: they are reading `ralph status` the
+     * next morning. {@see \Celyes\RalphPhp\Run\RunStop} writes both together.
+     *
+     * Nullable, and no backfill. A run recorded by an earlier build stopped for
+     * a reason nobody wrote an action for, and inventing one now would be
+     * putting words into a finished run's mouth.
+     */
+    private static function stopAction(): Migration
+    {
+        return new Migration(2, 'the next action for a stopped run', [
+            'ALTER TABLE runs ADD COLUMN stop_action TEXT',
+            sprintf(
+                'ALTER TABLE runs ADD COLUMN stop_kind TEXT CHECK (stop_kind IN (%s))',
+                Schema::literals(Schema::stopKinds()),
+            ),
         ]);
     }
 

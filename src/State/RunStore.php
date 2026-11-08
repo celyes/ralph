@@ -22,10 +22,11 @@ use Random\RandomException;
  * and an attempt both carry the run they belong to.
  *
  * **A run is closed once.** `completed`, `failed` and `interrupted` are the
- * three ways out, each with the reason the loop stopped, and a run already
- * closed is refused rather than reclosed: the first reason is the true one, and
- * a `finally` on the way out of a failed run must not be able to overwrite it
- * with something blander.
+ * three ways out, each with the reason the loop stopped, what the user is
+ * expected to do about it and which kind of stop it was ({@see StopKind}), and
+ * a run already closed is refused rather than reclosed: the first reason is the
+ * true one, and a `finally` on the way out of a failed run must not be able to
+ * overwrite it with something blander.
  */
 final class RunStore
 {
@@ -393,11 +394,20 @@ final class RunStore
     /**
      * Close the run as finished, with why the loop stopped.
      *
+     * @param string|null $nextAction what the user is expected to do about the
+     *        way it stopped, which PROJECT.md section H, item 9 asks for beside
+     *        every reason. Optional only so that a caller with nothing to add
+     *        does not have to invent something; the runner always has one.
+     *
      * @throws StateException when the run is already closed
      */
-    public function complete(RunRecord $run, string $stopReason): RunRecord
-    {
-        return $this->close($run, LifecycleState::Completed, $stopReason);
+    public function complete(
+        RunRecord $run,
+        string $stopReason,
+        ?string $nextAction = null,
+        ?StopKind $kind = null,
+    ): RunRecord {
+        return $this->close($run, LifecycleState::Completed, $stopReason, $nextAction, $kind);
     }
 
     /**
@@ -405,9 +415,13 @@ final class RunStore
      *
      * @throws StateException when the run is already closed
      */
-    public function fail(RunRecord $run, string $stopReason): RunRecord
-    {
-        return $this->close($run, LifecycleState::Failed, $stopReason);
+    public function fail(
+        RunRecord $run,
+        string $stopReason,
+        ?string $nextAction = null,
+        ?StopKind $kind = StopKind::Failed,
+    ): RunRecord {
+        return $this->close($run, LifecycleState::Failed, $stopReason, $nextAction, $kind);
     }
 
     /**
@@ -415,18 +429,33 @@ final class RunStore
      *
      * @throws StateException when the run is already closed
      */
-    public function interrupt(RunRecord $run, string $stopReason = 'interrupted'): RunRecord
-    {
-        return $this->close($run, LifecycleState::Interrupted, $stopReason);
+    public function interrupt(
+        RunRecord $run,
+        string $stopReason = 'interrupted',
+        ?string $nextAction = null,
+        ?StopKind $kind = StopKind::Interrupted,
+    ): RunRecord {
+        return $this->close($run, LifecycleState::Interrupted, $stopReason, $nextAction, $kind);
     }
 
     /**
      * Move a run to the state it ended in.
      *
+     * The reason, the action and the kind are written in one statement with the
+     * state, so a row can never be closed with half of why it closed: a
+     * `ralph status` that found a finished run with no action recorded would
+     * have no way of telling a build that did not write one from a write that
+     * went half way.
+     *
      * @throws StateException when it has already ended
      */
-    private function close(RunRecord $run, LifecycleState $state, string $stopReason): RunRecord
-    {
+    private function close(
+        RunRecord $run,
+        LifecycleState $state,
+        string $stopReason,
+        ?string $nextAction = null,
+        ?StopKind $kind = null,
+    ): RunRecord {
         $current = $this->read($run->rowId());
 
         if ($current->isFinished()) {
@@ -449,6 +478,8 @@ final class RunStore
         return $this->write($current, [
             'state' => $current->state()->transitionTo($state)->value,
             'stop_reason' => $this->reason($stopReason),
+            'stop_action' => $this->action($nextAction),
+            'stop_kind' => $kind?->value,
             'finished_at' => $now->value(),
         ], $now);
     }
@@ -545,6 +576,22 @@ final class RunStore
         }
 
         return $trimmed;
+    }
+
+    /**
+     * The next action as the column holds it, or null when there is none.
+     *
+     * Blank is stored as null rather than as an empty string, so that "nobody
+     * wrote one" has a single representation. Unlike the reason, an absent
+     * action is not refused: the three closing methods are also called from a
+     * `finally` on the way out of a failure, and losing the reason a run died
+     * because no sentence of advice came with it would be the worse trade.
+     */
+    private function action(?string $action): ?string
+    {
+        $trimmed = trim($action ?? '');
+
+        return $trimmed === '' ? null : $trimmed;
     }
 
     /**

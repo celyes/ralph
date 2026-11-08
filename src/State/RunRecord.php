@@ -39,6 +39,8 @@ final class RunRecord
         private readonly string $runId,
         private readonly LifecycleState $state,
         private readonly ?string $stopReason,
+        private readonly ?string $stopAction,
+        private readonly ?StopKind $stopKind,
         private readonly AgentRecord $agent,
         private readonly AgentSource $agentSource,
         private readonly array $configuration,
@@ -76,6 +78,8 @@ final class RunRecord
             self::text($row, 'run_id'),
             $state,
             self::nullableText($row, 'stop_reason'),
+            self::nullableText($row, 'stop_action'),
+            self::recordedKind($row),
             AgentRecord::fromStorage(
                 self::text($row, 'agent'),
                 self::text($row, 'adapter'),
@@ -145,6 +149,33 @@ final class RunRecord
     public function stopReason(): ?string
     {
         return $this->stopReason;
+    }
+
+    /**
+     * What the user is expected to do about the way it stopped.
+     *
+     * The other half of PROJECT.md section H, item 9, and null for two
+     * different reasons: a run that is still going has not stopped, and a run
+     * recorded by a build older than schema 2 stopped without anybody writing
+     * an action down. Neither is invented here — {@see \Celyes\RalphPhp\Run\RunStop}
+     * is where the two halves are produced together.
+     */
+    public function stopAction(): ?string
+    {
+        return $this->stopAction;
+    }
+
+    /**
+     * Which kind of thing ended the run, where it was recorded.
+     *
+     * Not a second spelling of {@see self::state()}: a run that ended
+     * `completed` may have worked through its checklist, reached a limit, or
+     * left a task that ran out of attempts, and those want different words and
+     * (section I, item 5) different exit codes.
+     */
+    public function stopKind(): ?StopKind
+    {
+        return $this->stopKind;
     }
 
     /**
@@ -433,6 +464,8 @@ final class RunRecord
             'run_id' => $this->runId,
             'state' => $this->state->value,
             'stop_reason' => $this->stopReason,
+            'stop_action' => $this->stopAction,
+            'stop_kind' => $this->stopKind?->value,
             'agent' => $this->agent->name(),
             'adapter' => $this->agent->adapter(),
             'agent_source' => $this->agentSource->value,
@@ -468,6 +501,24 @@ final class RunRecord
         }
 
         return $value;
+    }
+
+    /**
+     * The recorded stop kind, or null when the row has none.
+     *
+     * A value the enum does not know is read as null rather than refused: the
+     * column is a description of a finished run, and a row written by a newer
+     * build — or edited by hand — is not a reason to make the run unreadable.
+     * The reason and the action are the parts a user needs, and they are plain
+     * text.
+     *
+     * @param array<string, mixed> $row
+     */
+    private static function recordedKind(array $row): ?StopKind
+    {
+        $value = self::nullableText($row, 'stop_kind');
+
+        return $value === null ? null : StopKind::tryFrom($value);
     }
 
     /**

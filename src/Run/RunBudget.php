@@ -147,6 +147,27 @@ final class RunBudget
     }
 
     /**
+     * The configuration setting behind the spent limit, in dotted notation.
+     *
+     * Null while there is room. {@see self::exhausted()} says what ran out in
+     * words a user can read; this says which line of `.ralph/config.json` they
+     * would change, which is the other half of PROJECT.md section H, item 9's
+     * documented next action and the half prose cannot be parsed for.
+     */
+    public function spentSetting(): ?string
+    {
+        if ($this->iterationsRemaining < 1) {
+            return 'limits.iterations';
+        }
+
+        if ($this->secondsRemaining < 1) {
+            return 'limits.run_timeout';
+        }
+
+        return null;
+    }
+
+    /**
      * One line for a log header or a status display.
      */
     public function describe(): string
@@ -169,7 +190,7 @@ final class RunBudget
     /**
      * The budget as plain data, for a log or a structured event.
      *
-     * @return array<string, int|bool>
+     * @return array<string, int|bool|string|null>
      */
     public function toArray(): array
     {
@@ -179,6 +200,7 @@ final class RunBudget
             'seconds' => $this->seconds,
             'seconds_remaining' => $this->secondsRemaining,
             'allows_another_task' => $this->allowsAnotherTask(),
+            'spent_setting' => $this->spentSetting(),
         ];
     }
 }
