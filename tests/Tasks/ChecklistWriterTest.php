@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Tasks;
 
 use Celyes\RalphPhp\Config\ConfigurationLoader;
+use Celyes\RalphPhp\Exception\ChecklistConflictException;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Tasks\ChecklistFile;
@@ -29,6 +30,7 @@ use PHPUnit\Framework\TestCase;
  */
 #[CoversClass(ChecklistWriter::class)]
 #[CoversClass(ChecklistFile::class)]
+#[CoversClass(ChecklistConflictException::class)]
 final class ChecklistWriterTest extends TestCase
 {
     private TemporaryProject $project;
@@ -242,5 +244,160 @@ final class ChecklistWriterTest extends TestCase
         }
 
         self::assertSame($contents, (string) file_get_contents($file));
+    }
+
+    /**
+     * A checklist edited since the write was decided on is not written to.
+     *
+     * The caller's half of PROJECT.md section H, item 8. A run that recorded
+     * "I will tick this task in a checklist that reads thus" may not get to
+     * make the write for minutes, and in that time the user may add a task or
+     * save the file from an editor. Deriving the new document from the file as
+     * it read before would undo that edit, so the write is refused and the
+     * file is left holding exactly what was found.
+     */
+    #[Test]
+    public function a_checklist_edited_since_the_write_was_decided_on_is_refused(): void
+    {
+        $decidedOn = "- [ ] Add a --dry-run option\n";
+        $file = $this->project->write('.ralph/tasks.md', $decidedOn);
+
+        $edited = "- [ ] Add a --dry-run option\n- [ ] Write the README\n";
+        self::assertNotFalse(file_put_contents($file, $edited));
+
+        try {
+            $this->writer->tickFile(
+                $file,
+                TaskId::fromDescription('Add a --dry-run option'),
+                ChecklistFile::hash($decidedOn),
+            );
+            self::fail('Expected the stale write to be refused.');
+        } catch (ChecklistConflictException $conflict) {
+            self::assertStringContainsString('has changed since this checkbox write was decided on', $conflict->getMessage());
+            self::assertSame($file, $conflict->path());
+            self::assertSame(ChecklistFile::hash($decidedOn), $conflict->expected());
+            self::assertSame(ChecklistFile::hash($edited), $conflict->found());
+            self::assertStringContainsString('Nothing was written', implode(' ', $conflict->hints()));
+        }
+
+        self::assertSame($edited, (string) file_get_contents($file), "The user's edit is kept as it was made.");
+        self::assertSame(['tasks.md'], array_values(array_diff(
+            (array) scandir(dirname($file)),
+            ['.', '..'],
+        )));
+    }
+
+    #[Test]
+    public function a_checklist_that_still_reads_as_planned_is_ticked(): void
+    {
+        $contents = "- [ ] Add a --dry-run option\n";
+        $file = $this->project->write('.ralph/tasks.md', $contents);
+
+        $edit = $this->writer->tickFile(
+            $file,
+            TaskId::fromDescription('Add a --dry-run option'),
+            ChecklistFile::hash($contents),
+        );
+
+        self::assertTrue($edit->isChanged());
+        self::assertSame("- [x] Add a --dry-run option\n", (string) file_get_contents($file));
+    }
+
+    /**
+     * The caller's check comes before the marker is looked at.
+     *
+     * A run resuming a write it turns out to have already made must still be
+     * told the file moved: what it goes on to record about the checklist's
+     * contents would otherwise describe a document that is not on disk.
+     */
+    #[Test]
+    public function an_already_ticked_task_is_still_refused_when_the_file_has_moved(): void
+    {
+        $decidedOn = "- [x] Written last time\n";
+        $file = $this->project->write('.ralph/tasks.md', $decidedOn);
+
+        $edited = "- [x] Written last time\n- [ ] Added since\n";
+        self::assertNotFalse(file_put_contents($file, $edited));
+
+        try {
+            $this->writer->tickFile(
+                $file,
+                TaskId::fromDescription('Written last time'),
+                ChecklistFile::hash($decidedOn),
+            );
+            self::fail('Expected the stale write to be refused.');
+        } catch (ChecklistConflictException $conflict) {
+            self::assertSame(ChecklistFile::hash($edited), $conflict->found());
+        }
+
+        self::assertSame($edited, (string) file_get_contents($file));
+    }
+
+    /**
+     * The replacement itself is a compare-and-swap.
+     *
+     * The other half of section H, item 8, and the narrow window the caller's
+     * check cannot cover: the file is compared again after the replacement has
+     * been written and immediately before the rename, so an edit arriving in
+     * the moment between reading the document and putting the new one back is
+     * still seen. Calling {@see ChecklistFile::replace()} directly is how that
+     * instant is reached deterministically — it is the same code path a real
+     * concurrent save takes.
+     */
+    #[Test]
+    public function a_replacement_is_abandoned_when_the_file_moved_while_it_was_written(): void
+    {
+        $readFrom = "- [ ] One\n";
+        $file = $this->project->write('.ralph/tasks.md', $readFrom);
+
+        $concurrent = "- [ ] One\n- [ ] Saved while the box was being written\n";
+        self::assertNotFalse(file_put_contents($file, $concurrent));
+
+        try {
+            ChecklistFile::replace($file, "- [x] One\n", ChecklistFile::hash($readFrom));
+            self::fail('Expected the replacement to be refused.');
+        } catch (ChecklistConflictException $conflict) {
+            self::assertStringContainsString('changed while its checkbox was being written', $conflict->getMessage());
+            self::assertSame(ChecklistFile::hash($concurrent), $conflict->found());
+        }
+
+        self::assertSame($concurrent, (string) file_get_contents($file), 'The concurrent save survived.');
+        self::assertSame(['tasks.md'], array_values(array_diff(
+            (array) scandir(dirname($file)),
+            ['.', '..'],
+        )), 'The replacement was cleaned up rather than left beside the file.');
+    }
+
+    #[Test]
+    public function a_replacement_whose_file_has_been_deleted_is_abandoned(): void
+    {
+        $readFrom = "- [ ] Gone while it was being ticked\n";
+        $file = $this->project->write('.ralph/tasks.md', $readFrom);
+        self::assertTrue(unlink($file));
+
+        try {
+            ChecklistFile::replace($file, "- [x] Gone while it was being ticked\n", ChecklistFile::hash($readFrom));
+            self::fail('Expected the replacement to be refused.');
+        } catch (ChecklistConflictException $conflict) {
+            self::assertStringContainsString('could not be read back', $conflict->getMessage());
+            self::assertNull($conflict->found());
+        }
+
+        self::assertFileDoesNotExist($file, 'A deleted checklist is not recreated from a stale document.');
+        self::assertSame([], array_values(array_diff(
+            (array) scandir(dirname($file)),
+            ['.', '..'],
+        )));
+    }
+
+    #[Test]
+    public function a_replacement_with_no_expected_content_is_written_unconditionally(): void
+    {
+        $file = $this->project->write('.ralph/tasks.md', "- [ ] Whatever is there\n");
+        self::assertNotFalse(file_put_contents($file, "- [ ] Changed since\n"));
+
+        ChecklistFile::replace($file, "- [x] Written anyway\n");
+
+        self::assertSame("- [x] Written anyway\n", (string) file_get_contents($file));
     }
 }

@@ -12,6 +12,7 @@ use Celyes\RalphPhp\Agent\ExecutionResult;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Exception\ChecklistConflictException;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\InterruptionException;
@@ -809,7 +810,7 @@ final class TaskPass
      */
     private function tick(Task $task, GenerationRecord $record, AttemptLog $log): CheckboxEdit|Blocker
     {
-        return $this->apply($task, $record, $this->plan($task, $record), $log);
+        return $this->apply($task, $record, $this->plan($task, $record, $log), $log);
     }
 
     /**
@@ -817,21 +818,41 @@ final class TaskPass
      *
      * The checklist is hashed as it reads now rather than as the run first read
      * it: this is the state the write is about to be applied to, and it is what
-     * a later retry has to compare against to know the file has not moved under
-     * it. The task's own hash goes with it for the same reason — a retry must
-     * be able to tell "the same write, not yet made" from "a different task on
-     * that line now".
+     * the write itself is then made conditional on, so the document that lands
+     * is the document this row describes plus one character (section H,
+     * item 8). The task's own hash goes with it for the same reason — a retry
+     * must be able to tell "the same write, not yet made" from "a different
+     * task on that line now".
+     *
+     * A write that was already owed and whose file has moved since is noted
+     * before the row is refreshed. It is not a refusal: an edit elsewhere in
+     * the document is the user's own and is preserved by writing the box
+     * against the file as it now reads, and an edit to *this task* is caught by
+     * {@see self::movedUnderUs()} instead, which runs before any of this. What
+     * would be wrong is to say nothing and leave the row claiming a reading of
+     * the file that nobody would recognise.
      *
      * @throws RalphException when the checklist cannot be read, or the plan
      *         cannot be recorded
      */
-    private function plan(Task $task, GenerationRecord $record): ChecklistUpdate
+    private function plan(Task $task, GenerationRecord $record, AttemptLog $log): ChecklistUpdate
     {
+        $checklistHash = ChecklistFile::hash(ChecklistFile::read($this->configuration->tasksFile()));
+        $owed = $this->journal->checklists()->outstandingFor($record);
+
+        if ($owed !== null && !$owed->describes($checklistHash)) {
+            $log->note(sprintf(
+                '%s has been edited since this write was planned; the box is written against the file '
+                    . 'as it now reads and the edit is kept',
+                $this->configuration->tasksPath(),
+            ));
+        }
+
         return $this->journal->checklists()->plan(
             $record,
             $this->run->rowId(),
             $this->configuration->tasksPath(),
-            ChecklistFile::hash(ChecklistFile::read($this->configuration->tasksFile())),
+            $checklistHash,
             TaskSnapshot::hash($task->description(), $task->details()),
         );
     }
@@ -839,10 +860,20 @@ final class TaskPass
     /**
      * Make the planned write, and settle its row either way.
      *
-     * The two failures are kept apart because they call for opposite things.
+     * The write is conditional on the reading the row was just recorded with,
+     * so the bytes that land are the bytes it describes plus one character:
+     * a checklist somebody edits in the moment between the plan and the rename
+     * is seen, and their edit is left alone rather than overwritten by a
+     * document derived from the file as it read before it (section H, item 8).
+     *
+     * The three failures are kept apart because they call for different things.
      * A {@see FilesystemException} is the file saying no — unwritable, full,
      * a rename that could not happen — and the plan stays outstanding, because
      * the work is done and retrying the write unchanged is exactly right.
+     * A {@see ChecklistConflictException} is somebody else's edit arriving
+     * mid-write: nothing was written, the plan stays outstanding too, and the
+     * next run writes the box against the file as it then reads — the work must
+     * not be repeated over a save in a text editor.
      * A {@see ChecklistException} means what the plan was made against has
      * changed, and retrying it would tick a line nobody asked about, so the
      * plan is closed and the pass stops for reconciliation.
@@ -856,7 +887,16 @@ final class TaskPass
         AttemptLog $log,
     ): CheckboxEdit|Blocker {
         try {
-            $edit = $this->workbench->checkboxes()->tick($this->configuration, $task->id());
+            $edit = $this->workbench->checkboxes()->tick(
+                $this->configuration,
+                $task->id(),
+                $planned->expectedHash(),
+            );
+        } catch (ChecklistConflictException $edited) {
+            $owed = $this->journal->checklists()->deferred($planned, $edited->getMessage());
+            $log->note('pending finalization: ' . $owed->describe());
+
+            return $this->editedUnderUs($record, $edited);
         } catch (FilesystemException $refused) {
             $owed = $this->journal->checklists()->deferred($planned, $refused->getMessage());
             $log->note('pending finalization: ' . $owed->describe());
@@ -897,6 +937,30 @@ final class TaskPass
                     . 'and a resume writes only the box. Make %s writable, then run `ralph resume`.',
                 $this->keptCommit($record),
                 $this->configuration->tasksPath(),
+            ),
+        );
+    }
+
+    /**
+     * A pass that earned its tick and found the checklist being edited.
+     *
+     * The same pending finalization as an unwritable file — the write is still
+     * owed and still the only thing owed — with a different next action, since
+     * there is nothing to fix: somebody saved the file, their save is intact,
+     * and running again writes the box into it. Said explicitly, because a user
+     * who reads that a checkbox write was refused will otherwise go looking for
+     * what they lost.
+     */
+    private function editedUnderUs(GenerationRecord $record, ChecklistConflictException $edited): Blocker
+    {
+        return Blocker::raised(
+            'the task is done, but its box was not ticked: ' . $edited->getMessage(),
+            sprintf(
+                'The edit to %s was kept and nothing was overwritten. The implementation is kept%s and '
+                    . 'is not repeated: the pass is pending finalization, and a resume writes only the '
+                    . 'box, against the checklist as it then reads.',
+                $this->configuration->tasksPath(),
+                $this->keptCommit($record),
             ),
         );
     }
@@ -1071,6 +1135,13 @@ final class TaskPass
      * time the task may have been reworded or removed — in which case nothing
      * is applied to whatever is on that line now.
      *
+     * Reconciled against the plan as well as against the snapshot, because on
+     * a resume they answer different questions. The snapshot is this run's
+     * reading, so an edit made between the runs is already in it and compares
+     * equal; the plan was recorded by the run that did the work, and what it
+     * holds is what the task said when the checks passed against it
+     * ({@see self::editedWhileOwed()}).
+     *
      * @param ChecklistUpdate|null $owed the write already planned, when one
      *        was; a pass that stopped at `publishing` never got as far as
      *        planning one, and {@see self::plan()} records it when the time
@@ -1088,7 +1159,7 @@ final class TaskPass
         string $summary,
         AttemptLog $log,
     ): TaskResult {
-        $blocker = $this->movedUnderUs($task, $snapshot);
+        $blocker = $this->movedUnderUs($task, $snapshot) ?? $this->editedWhileOwed($task, $record, $owed);
 
         if ($blocker !== null) {
             if ($owed !== null) {
@@ -1124,6 +1195,45 @@ final class TaskPass
             $verification,
             true,
             $summary,
+        );
+    }
+
+    /**
+     * Refuse a write whose task has been rewritten since it was earned.
+     *
+     * The second of section H, item 8's source-content checks, and the one that
+     * only a resume can need: the box's own line may have been left alone while
+     * the acceptance criteria indented under it were rewritten, and a checklist
+     * write made from the plan would then record a verified completion against
+     * criteria nothing was ever checked against. The run that did the work
+     * wrote down what the task said at the time, so that is what this compares
+     * — the reading this run started from already contains the edit and would
+     * find nothing wrong with it.
+     *
+     * Blocked rather than retried, like every other way the plan's subject can
+     * change: the implementation stays on its branch and is not repeated, and
+     * what has to happen is a person deciding whether the work still satisfies
+     * the task as it now reads.
+     */
+    private function editedWhileOwed(Task $task, GenerationRecord $record, ?ChecklistUpdate $owed): ?Blocker
+    {
+        if ($owed === null || $owed->stillDescribes(TaskSnapshot::hash($task->description(), $task->details()))) {
+            return null;
+        }
+
+        return Blocker::raised(
+            sprintf(
+                'the task is done, but %s states it differently now than when its checks passed, so its '
+                    . 'box was not ticked',
+                $this->configuration->tasksPath(),
+            ),
+            sprintf(
+                'The edit was kept and nothing was overwritten. The implementation is kept%s and is not '
+                    . 'repeated: decide whether it satisfies the task as it now reads, then run '
+                    . '`ralph retry %s`.',
+                $this->keptCommit($record),
+                $task->id()->value(),
+            ),
         );
     }
 

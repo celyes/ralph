@@ -1440,6 +1440,77 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * A task whose criteria were rewritten while its write was owed is not
+     * ticked either.
+     *
+     * Section H, item 8's other source-content check, and the case rewording
+     * cannot reach: the box's own line is untouched, so the task keeps its
+     * identity and this run's reading of the checklist finds nothing wrong with
+     * it — but the acceptance criteria indented under it are no longer the ones
+     * the checks passed against. Ticking the box would record a runner-verified
+     * completion against criteria nothing was ever verified against, so the
+     * pass blocks and its plan is closed rather than retried. The work itself
+     * is kept: the agent is not invoked again and no second commit appears,
+     * because what has to happen is a person deciding whether the commit still
+     * satisfies the task as it now reads.
+     */
+    #[Test]
+    public function a_task_whose_criteria_changed_while_its_write_was_owed_is_not_ticked(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenTheCriteria('It prints the plan it would carry out');
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $first = $this->whileTheChecklistCannotBeWritten(
+            fn (): RunReport => $this->loopOver(ScriptedVerifier::passing()),
+        );
+        $blocked = $first->results()[0];
+        self::assertFalse($blocked->wasChecked());
+
+        // The user rewrites what is indented under the task, leaving the task's
+        // own line — and so its identity — exactly as it was.
+        $this->givenTheCriteria('It prints the diff it would apply');
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
+        $result = $report->results()[0];
+
+        // The same task and the same pass, with the work kept, not repeated.
+        self::assertSame($blocked->taskId()->value(), $result->taskId()->value());
+        self::assertSame($blocked->generation()->number(), $result->generation()->number());
+        self::assertCount(1, $worker->attempts(), 'The agent was not invoked again.');
+        self::assertSame(1, $result->attempts());
+        self::assertSame($blocked->commitSha(), $result->commitSha());
+        self::assertCount(1, $this->commitsBeyondBase());
+
+        // And the box is as the user left it.
+        self::assertFalse($result->wasChecked());
+        self::assertFalse($result->isCompleted());
+        self::assertStringNotContainsString('- [x]', $this->tasksFile());
+
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Blocked, $pass->state());
+        self::assertSame(Phase::Finalizing, $pass->phase());
+        self::assertStringContainsString('states it differently now', (string) $pass->blocker()?->reason());
+        self::assertStringContainsString('ralph retry', (string) $pass->blocker()?->nextAction());
+
+        // The plan is closed rather than left outstanding: retrying it would
+        // tick a line nobody asked about.
+        self::assertNull($journal->checklists()->outstandingFor($pass));
+        $closed = $journal->checklists()->latestFor($pass);
+        self::assertNotNull($closed);
+        self::assertSame(ChecklistUpdateState::Failed, $closed->state());
+        self::assertNull($closed->appliedAt());
+
+        // Not the user's completion either, and not the runner's.
+        self::assertSame(
+            Completion::Pending,
+            $journal->tasks()->get($result->taskId())->completion(),
+        );
+    }
+
+    /**
      * A push the remote refuses leaves the pass owing its publication and
      * nothing else.
      *
@@ -2197,6 +2268,21 @@ final class RunnerTest extends TestCase
     private function givenAWorker(array $steps = []): FixtureWorker
     {
         return FixtureWorker::install($this->tools, $steps);
+    }
+
+    /**
+     * Rewrite the acceptance criteria indented under the first task.
+     *
+     * The checklist is a managed path, so editing it here is not the
+     * unrelated uncommitted work a run refuses to start over — it is exactly
+     * what a user does to the file between two runs.
+     */
+    private function givenTheCriteria(string $criteria): void
+    {
+        $this->project->write(
+            '.ralph/tasks.md',
+            "# Tasks\n\n- [ ] " . self::FIRST . "\n  - " . $criteria . "\n",
+        );
     }
 
     /**

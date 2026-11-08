@@ -485,6 +485,68 @@ final class ChecklistStoreTest extends TestCase
     /**
      * A pass carried as far as a commit: the state a planned write belongs to.
      */
+    /**
+     * The reading of the file a plan was made against, as the write reads it
+     * back.
+     *
+     * PROJECT.md section H, item 8 makes the checkbox write conditional on
+     * this, so the row has to be able to answer it plainly: the document the
+     * write is derived from is the one this reading describes, and anything
+     * else on disk is an edit that arrived since.
+     */
+    #[Test]
+    public function a_plan_knows_the_reading_of_the_file_it_was_made_against(): void
+    {
+        $owed = $this->plan($this->committed(), checklistHash: 'the-file-as-it-read');
+
+        self::assertTrue($owed->describes('the-file-as-it-read'));
+        self::assertFalse($owed->describes('edited-since'));
+    }
+
+    /**
+     * And the task it was earned by, which is the check that refuses rather
+     * than retries.
+     */
+    #[Test]
+    public function a_plan_knows_whether_its_task_still_reads_as_it_did(): void
+    {
+        $owed = $this->plan($this->committed(), taskHash: 'the-task-as-it-read');
+
+        self::assertTrue($owed->stillDescribes('the-task-as-it-read'));
+        self::assertFalse($owed->stillDescribes('reworded-since'));
+    }
+
+    /**
+     * A refused write keeps its subject, and a refreshed plan takes the new
+     * one.
+     *
+     * The two readings move for different reasons. A write that was refused is
+     * still owed and still about the same task, so nothing about what it
+     * describes may drift while it waits. When the next run comes to make it,
+     * it re-reads the file and plans again — and because that reuses the
+     * outstanding row rather than adding to it, the row then describes the file
+     * as it now reads, which is what the write will be conditional on.
+     */
+    #[Test]
+    public function a_refused_plan_keeps_its_subject_until_the_next_run_refreshes_it(): void
+    {
+        $pass = $this->committed();
+        $owed = $this->checklists->deferred(
+            $this->plan($pass, checklistHash: 'the-file-as-it-read', taskHash: 'the-task-as-it-read'),
+            'Unable to write the task checklist',
+        );
+
+        self::assertTrue($owed->describes('the-file-as-it-read'));
+        self::assertTrue($owed->stillDescribes('the-task-as-it-read'));
+
+        $refreshed = $this->plan($pass, checklistHash: 'the-file-with-a-task-added', taskHash: 'the-task-as-it-read');
+
+        self::assertSame($owed->rowId(), $refreshed->rowId(), 'The same claim on the same line.');
+        self::assertTrue($refreshed->describes('the-file-with-a-task-added'));
+        self::assertFalse($refreshed->describes('the-file-as-it-read'));
+        self::assertTrue($refreshed->stillDescribes('the-task-as-it-read'));
+    }
+
     private function committed(
         ?TaskGeneration $generation = null,
         string $description = self::DESCRIPTION,

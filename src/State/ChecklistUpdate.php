@@ -22,9 +22,11 @@ use InvalidArgumentException;
  * write was planned and `taskHash` is what the task said then. Together they
  * are what makes a retry safe to perform without re-reading the user's
  * intentions: a file or a task that has moved since is a reconciliation rather
- * than a retry, and the row carries enough to tell the two apart. Comparing
- * them before writing, and preserving a concurrent edit when they disagree, is
- * section H, item 8's job; this is the record it will read.
+ * than a retry, and the row carries enough to tell the two apart. Both are read
+ * before the write is made — {@see self::describes()} guards the bytes the
+ * write is derived from and {@see self::stillDescribes()} the task it was
+ * earned by — so an edit that arrives in between is preserved rather than
+ * overwritten and the write is refused (section H, item 8).
  *
  * **What it is not.** It is not where the tick's justification lives — that is
  * {@see \Celyes\RalphPhp\Run\CompletionEvidence}, which collects the checks,
@@ -253,6 +255,39 @@ final class ChecklistUpdate
     public function wasRefused(): bool
     {
         return $this->isOutstanding() && $this->attempts > 0;
+    }
+
+    /**
+     * Whether the checklist still reads as this row was planned against.
+     *
+     * The byte-level half of PROJECT.md section H, item 8. A write is derived
+     * from the file it was read from, so the reading the row holds is what the
+     * write may safely be applied to; a file that hashes to something else has
+     * been edited since, and the answer decides between applying the planned
+     * write and reading the file again. What it must not decide on its own is
+     * whether to refuse: an edit elsewhere in the document is the user's and is
+     * preserved by writing the box against the file as it now reads. The edit
+     * that does refuse a write is one to the task itself, which
+     * {@see self::stillDescribes()} answers.
+     */
+    public function describes(string $checklistHash): bool
+    {
+        return $this->expectedHash === $checklistHash;
+    }
+
+    /**
+     * Whether the task still says what it said when the write was planned.
+     *
+     * The other check, and the one that closes a plan rather than retrying it:
+     * a task reworded or replaced on that line is not the task this write was
+     * earned by, and ticking its box would mark work done that nobody verified.
+     * Compared against {@see \Celyes\RalphPhp\Tasks\TaskSnapshot::hash()},
+     * which ignores formatting, so reflowing a task's details is not an edit
+     * for this purpose.
+     */
+    public function stillDescribes(string $taskHash): bool
+    {
+        return $this->taskHash === $taskHash;
     }
 
     /**
