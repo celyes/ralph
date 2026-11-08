@@ -27,6 +27,7 @@ use Celyes\RalphPhp\State\ChecklistMarker;
 use Celyes\RalphPhp\State\ChecklistUpdateState;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Phase;
+use Celyes\RalphPhp\State\PushState;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\State\TaskRecord;
 use Celyes\RalphPhp\State\VerificationStore;
@@ -98,6 +99,13 @@ final class RunnerTest extends TestCase
      */
     private string $tools;
 
+    /**
+     * Bare repositories a case added as a remote, to be removed afterwards.
+     *
+     * @var list<string>
+     */
+    private array $remotes = [];
+
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
@@ -127,6 +135,12 @@ final class RunnerTest extends TestCase
         Git::tryRun($this->project->root(), 'worktree', 'prune');
         TemporaryDirectory::remove($this->tools);
         $this->project->remove();
+
+        foreach ($this->remotes as $remote) {
+            TemporaryDirectory::remove($remote);
+        }
+
+        $this->remotes = [];
     }
 
     /**
@@ -1426,6 +1440,231 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * A push the remote refuses leaves the pass owing its publication and
+     * nothing else.
+     *
+     * Section H, item 7's precondition, and the state the resume below reads.
+     * The remote is deliberately absent — `origin` is in the configuration and
+     * not in the repository, which is the mistake a user actually makes when
+     * they turn pushing on. Everything before the push succeeded, so the three
+     * things that must survive it are asserted: the commit is on its branch at
+     * the SHA the row recorded, the row says the publication failed, and the
+     * box is as the user left it.
+     */
+    #[Test]
+    public function a_push_the_remote_refuses_leaves_the_pass_owing_only_its_publication(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'), $terminal);
+
+        $result = $report->results()[0];
+
+        // The work: committed, verified, and not thrown away.
+        self::assertTrue($result->wasVerified());
+        self::assertFalse($result->wasChecked());
+        self::assertFalse($result->isCompleted());
+        self::assertCount(1, $this->commitsBeyondBase());
+
+        $sha = (string) $result->commitSha();
+        self::assertSame($sha, $this->tipOf((string) $result->branch()));
+
+        // The box is as the user left it.
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Failed, $pass->state());
+        self::assertSame(Phase::Publishing, $pass->phase());
+        self::assertSame(PushState::Failed, $pass->push()->state());
+        self::assertSame('origin', $pass->push()->remote());
+        self::assertNotNull($pass->push()->error(), 'The reason the push failed is kept.');
+        self::assertTrue($pass->awaitsPublication(), 'The push is the only thing outstanding.');
+        self::assertFalse($pass->isFinalizable());
+        self::assertStringContainsString(
+            'retry the push alone',
+            (string) $pass->blocker()?->nextAction(),
+        );
+
+        // No checklist write was ever planned: the pass stopped before it.
+        self::assertNull($journal->checklists()->outstandingFor($pass));
+    }
+
+    /**
+     * The item itself: a resume retries the push and nothing before it.
+     *
+     * The agent is not invoked, no second commit appears, no attempt is spent,
+     * and the commit the first run made is the one that reaches the remote and
+     * the one the completed task points at. The worker is given no further
+     * steps on purpose — a run that reached it would fail rather than quietly
+     * produce a second implementation.
+     */
+    #[Test]
+    public function a_pass_owing_a_publication_is_finished_by_retrying_only_the_push(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $first = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'));
+        $failed = $first->results()[0];
+        self::assertFalse($failed->wasChecked());
+
+        // The user adds the remote they had not got round to adding.
+        $remote = $this->givenABareRemote();
+
+        $terminal = new CapturingOutput();
+        $second = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'), $terminal);
+        $result = $second->results()[0];
+
+        // The same pass, the same attempt, the same commit.
+        self::assertSame($failed->generation()->number(), $result->generation()->number());
+        self::assertSame(1, $result->attempts());
+        self::assertSame($failed->commitSha(), $result->commitSha());
+        self::assertCount(1, $this->commitsBeyondBase(), 'One commit, not two.');
+
+        // The agent was invoked once, by the run that implemented the task.
+        self::assertCount(1, $worker->attempts());
+
+        // Read out of the remote rather than from the row that claims it.
+        self::assertSame(
+            $failed->commitSha(),
+            $this->remoteTipOf($remote, (string) $result->branch()),
+        );
+
+        // And now it is done.
+        self::assertTrue($result->isCompleted());
+        self::assertTrue($result->wasChecked());
+        self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
+
+        $journal = $this->journal();
+        $pass = $journal->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Completed, $pass->state());
+        self::assertNull($pass->phase());
+        self::assertSame(PushState::Published, $pass->push()->state());
+        self::assertNull($pass->push()->error(), 'The refusal is not still on the row.');
+        self::assertNull($pass->blocker(), 'Nor the reason it stopped for.');
+        self::assertSame(
+            Completion::RunnerVerified,
+            $journal->tasks()->get($result->taskId())->completion(),
+        );
+
+        // The checks were not run again: the report the task completed on is
+        // the one the first run recorded.
+        self::assertTrue($result->wasVerified());
+        $attempt = $journal->attempts()->get($pass, 1);
+        self::assertNotNull($attempt);
+        self::assertCount(1, (new VerificationStore($journal->database()))->forAttempt($attempt));
+
+        // One plan for the box, made by the run that wrote it.
+        $applied = $journal->checklists()->latestFor($pass);
+        self::assertNotNull($applied);
+        self::assertSame(ChecklistUpdateState::Applied, $applied->state());
+        self::assertSame(1, $applied->attempts());
+        self::assertCount(1, $journal->checklists()->forGeneration($pass));
+
+        self::assertStringContainsString('retrying only the push', $terminal->standardOutput());
+    }
+
+    /**
+     * A remote that refuses twice is recorded twice, and still nothing is
+     * repeated.
+     *
+     * The failure mode this rules out is a resume that treats "the push failed
+     * again" as "the task failed", goes back to the agent, and commits the work
+     * a second time. The remote is never added here, so the second run's push
+     * is refused for the same reason the first one was.
+     */
+    #[Test]
+    public function a_publication_that_is_refused_again_repeats_no_implementation(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $first = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'));
+        $failed = $first->results()[0];
+
+        $terminal = new CapturingOutput();
+        $second = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'), $terminal);
+        $result = $second->results()[0];
+
+        self::assertFalse($result->wasChecked());
+        self::assertSame($failed->commitSha(), $result->commitSha());
+        self::assertCount(1, $this->commitsBeyondBase(), 'The commit was not made again.');
+        self::assertCount(1, $worker->attempts(), 'The agent was not invoked again.');
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+
+        // Still owed, still retryable, and the attempt limit was not spent on
+        // somebody else's server.
+        $pass = $this->journal()->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Failed, $pass->state());
+        self::assertSame(Phase::Publishing, $pass->phase());
+        self::assertTrue($pass->awaitsPublication());
+        self::assertSame(1, $pass->attempts());
+    }
+
+    /**
+     * A branch moved off the recorded commit while the push was owed stops the
+     * pass instead of publishing whatever is there now.
+     *
+     * {@see \Celyes\RalphPhp\Git\TaskPublisher} publishes the commit the row
+     * records and refuses anything else, and a resume has to carry that
+     * refusal rather than fall back to another attempt: what is on the branch
+     * now has passed no check of this run, and a remote other people fetch is
+     * the wrong place to find that out.
+     */
+    #[Test]
+    public function a_branch_moved_while_the_push_was_owed_blocks_rather_than_publishing(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $first = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'));
+        $failed = $first->results()[0];
+        $branch = (string) $failed->branch();
+
+        $remote = $this->givenABareRemote();
+
+        // A failed pass keeps its worktree for inspection (section F, item 10),
+        // and a person who went to look made a commit of their own in it. The
+        // branch is now past the commit the row records.
+        $worktree = (string) $this->journal()
+            ->generations()
+            ->get($failed->generation())
+            ->worktree()
+            ->path();
+        file_put_contents($worktree . '/NOTES.md', "Mine.\n");
+        Git::run($worktree, 'add', 'NOTES.md');
+        Git::commit($worktree, 'Somebody looks at the work and adds to it');
+
+        $report = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'));
+        $result = $report->results()[0];
+
+        self::assertFalse($result->wasChecked());
+        self::assertCount(1, $worker->attempts(), 'The agent was not invoked again.');
+        self::assertNull($this->remoteTipOf($remote, $branch), 'Nothing reached the remote.');
+
+        // The commit itself is untouched, which is what the hints send a person
+        // to look at.
+        self::assertNotNull($failed->commitSha());
+        self::assertSame(
+            $failed->commitSha(),
+            trim(Git::run($this->project->root(), 'rev-parse', (string) $failed->commitSha())->standardOutput),
+        );
+
+        $pass = $this->journal()->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Blocked, $pass->state());
+        self::assertTrue($pass->awaitsPublication(), 'The push is still owed.');
+        self::assertStringContainsString('could not be published', (string) $pass->blocker()?->reason());
+        self::assertStringContainsString('diverged', (string) $pass->blocker()?->reason());
+        self::assertStringContainsString(
+            'Nothing was implemented or committed again.',
+            (string) $pass->blocker()?->nextAction(),
+        );
+    }
+
+    /**
      * Ctrl+C while an agent is working: PROJECT.md section H, item 4, end to
      * end.
      *
@@ -2121,6 +2360,45 @@ final class RunnerTest extends TestCase
     private function tipOf(string $branch): ?string
     {
         $result = Git::tryRun($this->project->root(), 'rev-parse', '--verify', $branch);
+
+        return $result->exitCode === 0 ? trim($result->standardOutput) : null;
+    }
+
+    /**
+     * Publication turned on, aimed at a remote by name.
+     *
+     * The name is all the configuration carries: whether a repository has a
+     * remote by that name is a fact about the repository, which is what makes
+     * "pushing is on and `origin` does not exist yet" something a case can set
+     * up by saying nothing more.
+     *
+     * @return array<string, mixed>
+     */
+    private function pushingTo(string $remote): array
+    {
+        return ['git' => ['push' => ['enabled' => true, 'remote' => $remote]]];
+    }
+
+    /**
+     * A bare repository on the same disk, added to the project as `origin`.
+     *
+     * A real remote with a real `git push` behind it and no network or
+     * credentials involved (PROJECT.md section J, items 6 and 8).
+     */
+    private function givenABareRemote(): string
+    {
+        $remote = TemporaryDirectory::create('ralph-remote-');
+        $this->remotes[] = $remote;
+
+        Git::initialise($remote, bare: true);
+        Git::run($this->project->root(), 'remote', 'add', 'origin', $remote);
+
+        return $remote;
+    }
+
+    private function remoteTipOf(string $remote, string $branch): ?string
+    {
+        $result = Git::tryRun($remote, 'rev-parse', '--verify', '--quiet', 'refs/heads/' . $branch);
 
         return $result->exitCode === 0 ? trim($result->standardOutput) : null;
     }

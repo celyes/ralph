@@ -740,6 +740,117 @@ final class GenerationStoreTest extends TestCase
         }
     }
 
+    /**
+     * The way back into a pass that owes nothing but its push (PROJECT.md
+     * section H, item 7).
+     *
+     * The attempt counter does not move here either, and for the same reason it
+     * does not move for a refused checkbox write: a remote that is down has
+     * nothing to do with how many tries the task itself deserves.
+     */
+    #[Test]
+    public function a_failed_pass_whose_only_debt_is_the_push_resumes_at_publishing(): void
+    {
+        $failed = $this->generations->fail(
+            $this->generations->recordPush(
+                $this->generations->recordCommit(
+                    $this->generations->beginAttempt(
+                        $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
+                    ),
+                    'f1e2d3c4b5a6',
+                ),
+                PushResult::failed('origin', 'fatal: "origin" does not appear to be a Git repository'),
+            ),
+            Blocker::raised('the push to origin was refused', 'Resolve the remote, then resume.'),
+        );
+        self::assertSame(1, $failed->attempts());
+
+        $resumed = $this->generations->resumePublishing($failed);
+
+        self::assertSame(LifecycleState::Running, $resumed->state());
+        self::assertSame(Phase::Publishing, $resumed->phase());
+        self::assertSame(1, $resumed->attempts(), 'A push is not an attempt at the task.');
+        self::assertSame('f1e2d3c4b5a6', $resumed->commitSha(), 'The implementation is kept.');
+        self::assertTrue($resumed->awaitsPublication(), 'The push is still the thing that is owed.');
+
+        // The reason it stopped was the thing now being done again, so it is
+        // not left on the row for `ralph status` to report against a task that
+        // goes on to publish.
+        self::assertNull($resumed->blocker());
+    }
+
+    /**
+     * An interrupted pass reaches the same place: a stop between the commit and
+     * the push leaves the publication owed, not the implementation.
+     */
+    #[Test]
+    public function an_interrupted_pass_that_had_committed_resumes_at_publishing(): void
+    {
+        $interrupted = $this->generations->interrupt(
+            $this->generations->recordCommit(
+                $this->generations->beginAttempt(
+                    $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
+                ),
+                'f1e2d3c4b5a6',
+            ),
+        );
+
+        $resumed = $this->generations->resumePublishing($interrupted);
+
+        self::assertSame(LifecycleState::Running, $resumed->state());
+        self::assertSame(Phase::Publishing, $resumed->phase());
+        self::assertSame(1, $resumed->attempts());
+    }
+
+    #[Test]
+    public function a_pass_with_nothing_recorded_cannot_resume_at_publishing(): void
+    {
+        $generation = $this->generations->beginAttempt(
+            $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
+        );
+
+        try {
+            $this->generations->resumePublishing($generation);
+            self::fail('A pass with nothing committed has work to redo, not a push to retry.');
+        } catch (StateException $refused) {
+            self::assertStringContainsString('is not waiting to be published', $refused->getMessage());
+            self::assertStringContainsString('no-change result', $refused->getMessage());
+        }
+    }
+
+    /**
+     * A push that already succeeded is not retried: that pass owes the
+     * checklist write, and pushing again would report an obligation it has
+     * discharged.
+     */
+    #[Test]
+    public function a_pass_whose_push_is_settled_cannot_resume_at_publishing(): void
+    {
+        $published = $this->generations->recordPush(
+            $this->generations->recordCommit(
+                $this->generations->beginAttempt(
+                    $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
+                ),
+                'f1e2d3c4b5a6',
+            ),
+            PushResult::published('origin'),
+        );
+
+        try {
+            $this->generations->resumePublishing($published);
+            self::fail('A published pass does not owe a push.');
+        } catch (StateException $refused) {
+            self::assertStringContainsString('is not waiting to be published', $refused->getMessage());
+            self::assertStringContainsString('pushed "origin"', $refused->getMessage());
+        }
+
+        // The other resumption is the one it does qualify for.
+        self::assertSame(
+            Phase::Finalizing,
+            $this->generations->resumeFinalizing($published)->phase(),
+        );
+    }
+
     #[Test]
     public function completing_a_pass_records_it_as_complete(): void
     {

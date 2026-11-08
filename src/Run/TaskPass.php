@@ -15,6 +15,7 @@ use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\InterruptionException;
+use Celyes\RalphPhp\Exception\PublicationException;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\CommitMessage;
@@ -183,6 +184,17 @@ final class TaskPass
 
         if ($owed !== null) {
             return $this->finishTheChecklist($task, $snapshot, $record, $owed);
+        }
+
+        // And before that, the other thing a pass can owe on its own: a push
+        // that the remote refused, or one a stop arrived in the middle of
+        // (section H, item 7). The commit is made and the checks have passed,
+        // so an attempt would invoke the agent over work that is already in the
+        // repository and commit it a second time — which is the duplicate
+        // acceptance criterion 6 rules out, arriving by a different route than
+        // the crash of item 5.
+        if ($record->awaitsPublication()) {
+            return $this->finishThePublication($task, $snapshot, $record);
         }
 
         $unverified = null;
@@ -944,63 +956,259 @@ final class TaskPass
         ChecklistUpdate $owed,
     ): TaskResult {
         $attempt = $this->journal->attempts()->latestFor($record);
-        $log = $attempt === null
-            ? AttemptLog::toTerminal($this->terminal)
-            : AttemptLog::open(
-                $this->workbench->logs(),
-                $record->generation(),
-                $attempt->number(),
-                $this->terminal,
-            );
+        $log = $this->reopen($record, $attempt);
 
         try {
             $log->note('resuming finalization: ' . $owed->describe());
             $this->announceFinalization($task, $record, $owed);
 
-            $record = $this->journal->generations()->resumeFinalizing($record);
+            return $this->writeTheBox(
+                $task,
+                $snapshot,
+                $this->journal->generations()->resumeFinalizing($record),
+                $attempt,
+                $attempt === null ? null : $this->journal->verifications()->reportFor($attempt),
+                $owed,
+                'the box was written; the commit and the checks are the ones this pass already recorded',
+                $log,
+            );
+        } finally {
+            $this->sweep($record, $log);
+            $log->close();
+        }
+    }
+
+    /**
+     * Finish a pass that owes nothing but a push to its remote.
+     *
+     * PROJECT.md section H, item 7. The same shape as
+     * {@see self::finishTheChecklist()} and for the same reason: everything the
+     * task needed has been produced, so nothing here prepares a workspace,
+     * invokes the agent, runs a check or commits, and no attempt is spent. What
+     * {@see TaskPublisher} is handed is the row and only the row, which is what
+     * makes this possible at all — the worktree the commit was made in may well
+     * have been cleaned up, and pushing touches neither a working tree nor an
+     * index.
+     *
+     * A push that succeeds leaves the pass finalizable, and the box is still
+     * owed at that point: the first run stopped at `publishing`, before it ever
+     * planned a checklist write. So this carries straight on to the write
+     * rather than returning and leaving a second resume to notice.
+     *
+     * A push the remote refuses again is recorded again, with the reason it
+     * gave this time, and the task stays unchecked. Nothing is undone: a run
+     * that cannot reach its remote twice has still produced the work, and the
+     * next resume retries the same push.
+     *
+     * @throws RalphException when the outcome cannot be recorded
+     */
+    private function finishThePublication(
+        Task $task,
+        ChecklistSnapshot $snapshot,
+        GenerationRecord $record,
+    ): TaskResult {
+        $attempt = $this->journal->attempts()->latestFor($record);
+        $log = $this->reopen($record, $attempt);
+
+        try {
+            $log->note('resuming publication: ' . $record->push()->describe());
+            $this->announcePublication($task, $record);
+
+            $record = $this->journal->generations()->resumePublishing($record);
             $verification = $attempt === null ? null : $this->journal->verifications()->reportFor($attempt);
 
-            $blocker = $this->movedUnderUs($task, $snapshot);
-
-            if ($blocker !== null) {
-                $this->journal->checklists()->abandoned($owed, $blocker->reason());
-            } else {
-                // The same plan-then-write as a first-time finalization:
-                // {@see self::plan()} reuses the outstanding row rather than
-                // adding to it, so the retry refreshes what the write is about
-                // to be applied against instead of recording a second claim on
-                // the same line.
-                $written = $this->tick($task, $record, $log);
-                $blocker = $written instanceof Blocker ? $written : null;
+            try {
+                $publication = $this->workbench->publisher()->publish($record, $log);
+            } catch (PublicationException $refused) {
+                // The branch is not where the row says it is, which is section
+                // F, item 9's reconciliation rather than a push that can be
+                // retried. Blocked rather than failed, and the commit is left
+                // exactly where it is: what the publisher refused to do was put
+                // a commit nothing here has seen onto a remote other people
+                // fetch.
+                return $this->unpublishable($task, $record, $attempt, $verification, $refused, $log);
             }
 
-            if ($blocker !== null) {
-                $log->note('still not checked off: ' . $blocker->reason());
+            $record = $publication->recorded();
+            $log->note('publication: ' . $publication->describe());
+
+            if (!$publication->isSettled()) {
+                $blocker = $this->pushRefused($record, $publication->error());
+                $log->note('still not published: ' . $blocker->reason());
 
                 return $this->stopped(
                     $task,
-                    $this->journal->generations()->block($record, $blocker),
+                    $this->journal->generations()->fail($record, $blocker),
                     $attempt,
                     $verification,
                     $blocker->reason(),
                 );
             }
 
-            $this->journal->tasks()->markVerified($task->id());
-            $record = $this->journal->generations()->complete($record);
-
-            return TaskResult::of(
+            return $this->writeTheBox(
                 $task,
-                $record,
+                $snapshot,
+                $this->journal->generations()->resumeFinalizing($record),
                 $attempt,
                 $verification,
-                true,
-                'the box was written; the commit and the checks are the ones this pass already recorded',
+                $this->journal->checklists()->outstandingFor($record),
+                'the push succeeded; the commit and the checks are the ones this pass already recorded',
+                $log,
             );
         } finally {
             $this->sweep($record, $log);
             $log->close();
         }
+    }
+
+    /**
+     * Tick the box and finish a pass that was resumed rather than attempted.
+     *
+     * Shared by both resumptions so that the one write this package makes to a
+     * file the user owns happens in a single place, whichever thing the pass
+     * was owing. The task is reconciled first either way: a pass can sit owing
+     * a push or a write for as long as it takes someone to notice, and in that
+     * time the task may have been reworded or removed — in which case nothing
+     * is applied to whatever is on that line now.
+     *
+     * @param ChecklistUpdate|null $owed the write already planned, when one
+     *        was; a pass that stopped at `publishing` never got as far as
+     *        planning one, and {@see self::plan()} records it when the time
+     *        comes
+     *
+     * @throws RalphException when the outcome cannot be recorded
+     */
+    private function writeTheBox(
+        Task $task,
+        ChecklistSnapshot $snapshot,
+        GenerationRecord $record,
+        ?AttemptRecord $attempt,
+        ?VerificationReport $verification,
+        ?ChecklistUpdate $owed,
+        string $summary,
+        AttemptLog $log,
+    ): TaskResult {
+        $blocker = $this->movedUnderUs($task, $snapshot);
+
+        if ($blocker !== null) {
+            if ($owed !== null) {
+                $this->journal->checklists()->abandoned($owed, $blocker->reason());
+            }
+        } else {
+            // The same plan-then-write as a first-time finalization:
+            // {@see self::plan()} reuses an outstanding row rather than adding
+            // to it, so a retry refreshes what the write is about to be applied
+            // against instead of recording a second claim on the same line.
+            $written = $this->tick($task, $record, $log);
+            $blocker = $written instanceof Blocker ? $written : null;
+        }
+
+        if ($blocker !== null) {
+            $log->note('still not checked off: ' . $blocker->reason());
+
+            return $this->stopped(
+                $task,
+                $this->journal->generations()->block($record, $blocker),
+                $attempt,
+                $verification,
+                $blocker->reason(),
+            );
+        }
+
+        $this->journal->tasks()->markVerified($task->id());
+
+        return TaskResult::of(
+            $task,
+            $this->journal->generations()->complete($record),
+            $attempt,
+            $verification,
+            true,
+            $summary,
+        );
+    }
+
+    /**
+     * Reopen the log of the attempt that earned the work being resumed.
+     *
+     * Reopened rather than replaced, so the retry reads as the end of the
+     * attempt that produced the commit instead of as an attempt of its own. A
+     * pass with no attempt recorded has no log to append to and says what it is
+     * doing on the terminal alone.
+     */
+    private function reopen(GenerationRecord $record, ?AttemptRecord $attempt): AttemptLog
+    {
+        if ($attempt === null) {
+            return AttemptLog::toTerminal($this->terminal);
+        }
+
+        return AttemptLog::open(
+            $this->workbench->logs(),
+            $record->generation(),
+            $attempt->number(),
+            $this->terminal,
+        );
+    }
+
+    /**
+     * A pass whose commit the remote would not take, as a blocker.
+     *
+     * One wording for the first refusal and for every retry of it, because the
+     * situation is the same one and the next action does not change: the remote
+     * has to be put right, and what follows is a push and nothing else.
+     */
+    private function pushRefused(GenerationRecord $record, ?string $error): Blocker
+    {
+        return Blocker::raised(
+            sprintf(
+                'the push to %s was refused: %s',
+                (string) $record->push()->remote(),
+                $error ?? 'no reason given',
+            ),
+            sprintf(
+                'The commit is kept on %s and the implementation is not repeated. Resolve the '
+                . 'remote, then run `ralph resume` to retry the push alone.',
+                (string) $record->branch(),
+            ),
+        );
+    }
+
+    /**
+     * A pass whose publication cannot be attempted at all.
+     *
+     * {@see TaskPublisher} refuses to push when the branch is missing or has
+     * moved off the recorded commit, and that is a decision about the
+     * repository rather than a failed push: a retry would refuse identically
+     * for as long as the reference says what it says. Blocked, with the
+     * publisher's own words and hints kept, since they name the commit and the
+     * command that puts the reference back.
+     *
+     * @throws RalphException when the outcome cannot be recorded
+     */
+    private function unpublishable(
+        Task $task,
+        GenerationRecord $record,
+        ?AttemptRecord $attempt,
+        ?VerificationReport $verification,
+        PublicationException $refused,
+        AttemptLog $log,
+    ): TaskResult {
+        $blocker = Blocker::raised(
+            'the commit could not be published: ' . $refused->getMessage(),
+            implode(' ', [
+                ...$refused->hints(),
+                'Nothing was implemented or committed again.',
+            ]),
+        );
+
+        $log->note('not published: ' . $blocker->reason());
+
+        return $this->stopped(
+            $task,
+            $this->journal->generations()->block($record, $blocker),
+            $attempt,
+            $verification,
+            $blocker->reason(),
+        );
     }
 
     /**
@@ -1016,6 +1224,24 @@ final class TaskPass
             '  %s: %s; writing only the box%s',
             $task->id()->value(),
             $owed->state()->describe(),
+            $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
+        ));
+    }
+
+    /**
+     * Say that the pass is being published rather than attempted.
+     *
+     * The same reason as {@see self::announceFinalization()}, and the same risk
+     * of being misread: a user who enabled pushing and resumed after fixing
+     * their remote is watching for whether the task is about to be implemented
+     * all over again, and this is the line that answers them.
+     */
+    private function announcePublication(Task $task, GenerationRecord $record): void
+    {
+        $this->terminal?->line(sprintf(
+            '  %s: %s; retrying only the push%s',
+            $task->id()->value(),
+            $record->push()->describe(),
             $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
         ));
     }
@@ -1246,8 +1472,9 @@ final class TaskPass
      *
      * The local commit is kept and the task is left unchecked, because a push
      * the configuration requires is part of what completes a task. The phase on
-     * the row stays `publishing` and the commit is recorded, which is what lets
-     * the publication be retried without the implementation being repeated.
+     * the row stays `publishing` and the commit is recorded, which is what
+     * {@see self::finishThePublication()} reads to retry the publication
+     * without the implementation being repeated (section H, item 7).
      */
     private function unpublished(
         Task $task,
@@ -1258,18 +1485,7 @@ final class TaskPass
         ?string $error,
         AttemptLog $log,
     ): TaskResult {
-        $blocker = Blocker::raised(
-            sprintf(
-                'the push to %s was refused: %s',
-                (string) $record->push()->remote(),
-                $error ?? 'no reason given',
-            ),
-            sprintf(
-                'The commit is kept on %s and the implementation is not repeated. Resolve the '
-                . 'remote, then run `ralph resume` to retry the push alone.',
-                (string) $record->branch(),
-            ),
-        );
+        $blocker = $this->pushRefused($record, $error);
 
         $attempt = $this->journal->attempts()->finish(
             $attempt,

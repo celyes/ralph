@@ -321,13 +321,76 @@ final class GenerationStore
             );
         }
 
+        return $this->reopenAt($generation, Phase::Finalizing);
+    }
+
+    /**
+     * Put a pass back into `running` at {@see Phase::Publishing}, without
+     * spending an attempt.
+     *
+     * The one way back into a pass that owes nothing but its push (PROJECT.md
+     * section H, item 7). The implementation is committed and the checks have
+     * passed; what is missing is a remote that would take the commit, and a
+     * remote being down or a reference having moved is not something an attempt
+     * at the task would put right. So no attempt is counted here either: a
+     * rejected push must not be able to eat the budget of work that is already
+     * done, any more than a read-only checklist can.
+     *
+     * Refused for a pass whose publication is not the only thing outstanding.
+     * A pass with no implementation recorded has work to redo rather than a
+     * push to retry, and a pass whose push is already settled is
+     * {@see self::resumeFinalizing()}'s case — pushing again would be a second
+     * attempt at something that succeeded, reported as though it were owed.
+     *
+     * @throws StateException when the pass has no implementation recorded, its
+     *                        publication is already settled, or it cannot be
+     *                        run from the state it is in
+     */
+    public function resumePublishing(GenerationRecord $generation): GenerationRecord
+    {
+        if (!$generation->awaitsPublication()) {
+            throw new StateException(
+                sprintf(
+                    'Generation %s is not waiting to be published: %s.',
+                    $generation->slug(),
+                    $generation->hasImplementation()
+                        ? $generation->push()->describe()
+                        : 'neither a commit nor a recorded no-change result',
+                ),
+                [
+                    'Only a pass whose work is recorded and whose push is still owed can be resumed at '
+                    . 'publication; anything earlier is another attempt, and anything later is the '
+                    . 'checklist write.',
+                ],
+            );
+        }
+
+        return $this->reopenAt($generation, Phase::Publishing);
+    }
+
+    /**
+     * Put a pass back into `running` at a phase it already reached.
+     *
+     * Shared by the two resumptions that spend no attempt, and the blocker is
+     * cleared by both. The reason a pass in either of those states stopped was
+     * the thing that is now being done again — a push to retry, a box to write
+     * — so leaving the old reason on the row would have `ralph status` report a
+     * refused push against a task that went on to publish and complete. A
+     * retry that stops again records its own.
+     *
+     * @throws StateException when the pass cannot be run from the state it is
+     *                        in
+     */
+    private function reopenAt(GenerationRecord $generation, Phase $phase): GenerationRecord
+    {
         $state = $generation->state()->isRunning()
             ? LifecycleState::Running
             : $generation->state()->transitionTo(LifecycleState::Running);
 
         return $this->write($generation, [
             'state' => $state->value,
-            'phase' => Phase::Finalizing->value,
+            'phase' => $phase->value,
+            'blocker' => null,
         ]);
     }
 
