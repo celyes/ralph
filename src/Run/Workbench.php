@@ -64,6 +64,7 @@ final class Workbench
         private readonly ChecklistWriter $checkboxes,
         private readonly ChecklistReconciler $reconciler,
         private readonly GenerationSelector $passes,
+        private readonly PassRecovery $recovery,
     ) {
     }
 
@@ -103,6 +104,7 @@ final class Workbench
             new ChecklistWriter(),
             new ChecklistReconciler(),
             new GenerationSelector(),
+            PassRecovery::forProject($configuration, $generations, $executable, $processes),
         );
     }
 
@@ -214,5 +216,14 @@ final class Workbench
     public function passes(): GenerationSelector
     {
         return $this->passes;
+    }
+
+    /**
+     * What puts an interrupted pass's row back in step with the repository
+     * before anything resumes it (PROJECT.md section H, item 5).
+     */
+    public function recovery(): PassRecovery
+    {
+        return $this->recovery;
     }
 }
