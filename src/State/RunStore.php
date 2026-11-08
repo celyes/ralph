@@ -113,9 +113,16 @@ final class RunStore
      * {@see RunRecord::ownIterations()}.
      *
      * The agent is taken from the caller rather than from `$previous`, because
-     * it is the caller — `ralph resume` — that must refuse an implicit change
-     * of agent (section H, item 6) and it needs the recorded one to say so.
-     * What is refused here is only what the store can see: a run that ended in
+     * it is the caller — {@see \Celyes\RalphPhp\Run\AgentContinuity}, for
+     * `ralph resume` — that has to *explain* a refused change of agent, naming
+     * what to type instead (section H, item 6). What is checked here is only
+     * that the two agree: a continuation recording an agent other than the one
+     * its predecessor used would attribute that run's commits and its cost to a
+     * tool that did not produce them, and the column is the only record of
+     * which did. The settings are not compared, only the agent and its adapter
+     * — see {@see AgentRecord::isSameAgent()}.
+     *
+     * Also refused is what the store can see on its own: a run that ended in
      * the ordinary way has nothing left to continue, and continuing it would
      * be a fresh run wearing a finished run's budget.
      *
@@ -123,7 +130,8 @@ final class RunStore
      *        to be running: a crashed runner never closed its row, and that is
      *        the commonest thing there is to resume
      *
-     * @throws StateException         when the previous run completed, or the
+     * @throws StateException         when the previous run completed, when the
+     *                                agent is not the one it recorded, or the
      *                                row cannot be written
      * @throws ConfigurationException when the configuration states no usable
      *         set of checks to freeze
@@ -144,6 +152,25 @@ final class RunStore
                     sprintf('It stopped because: %s.', $previous->stopReason() ?? 'no reason recorded'),
                     'Start a new run with `ralph run`, which begins with the configured limits whole.',
                     'Tasks completed by earlier runs stay completed and are not taken on again.',
+                ],
+            );
+        }
+
+        if (!$previous->agent()->isSameAgent(AgentRecord::of($agent))) {
+            throw new StateException(
+                sprintf(
+                    'Run %s was carried out with the agent "%s"; a run continuing it cannot record "%s".',
+                    $previous->runId(),
+                    $previous->agent()->name(),
+                    $agent->name(),
+                ),
+                [
+                    'A resume continues interrupted work with the agent that produced it (PROJECT.md section H, item 6).',
+                    sprintf(
+                        'To use "%s", start a new run instead: `ralph run --agent %s`, which begins with the configured limits whole.',
+                        $agent->name(),
+                        $agent->name(),
+                    ),
                 ],
             );
         }

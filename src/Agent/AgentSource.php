@@ -24,6 +24,17 @@ enum AgentSource: string
     case CommandLine = 'command_line';
 
     /**
+     * The run being continued, read back from its row.
+     *
+     * What a resume's agent comes from, and the reason this is a third case
+     * rather than the recorded source copied forward: the agent a resumed run
+     * uses was not chosen by today's configuration or today's command line, and
+     * a row saying it was would be read as a fresh decision taken under
+     * settings that may since have changed (PROJECT.md section H, item 6).
+     */
+    case ResumedRun = 'resumed_run';
+
+    /**
      * The source phrased for an error message or a status line.
      */
     public function describe(): string
@@ -31,6 +42,7 @@ enum AgentSource: string
         return match ($this) {
             self::ProjectDefault => 'the project configuration',
             self::CommandLine => 'the --agent option',
+            self::ResumedRun => 'the run being continued',
         };
     }
 }
