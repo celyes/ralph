@@ -67,10 +67,11 @@ final class ResumeCommand extends LoopCommand
             'stay completed and are not taken on again, and their commits and attempt history',
             'stay attributed to the agent that earned them.',
             '',
-            'Exits as "ralph run" does: 75 when the resumed run stopped with something',
-            'waiting for a person, and 0 when it finished, reached a limit, or was stopped',
-            'again. A pass that cannot be reconciled without a person stops the resume',
-            'before any agent is invoked, with the reading that stopped it.',
+            'Exits as "ralph run" does: 0 when the resumed run finished the checklist, 1',
+            'when a task was given up on, 75 when it stopped on a decision, 124 when it',
+            'reached a configured limit, and 130 when it was stopped again. A pass that',
+            'cannot be reconciled without a person stops the resume before any agent is',
+            'invoked, with the reading that stopped it.',
         ];
     }
 

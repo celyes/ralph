@@ -287,14 +287,21 @@ final class RunStop
     }
 
     /**
-     * The run could not carry on.
+     * The run could not carry on, or stopped on something a person must settle.
      *
      * @param list<string> $hints the failure's own next actions, which are
      *        where ambiguous ownership found during setup says what to do about
      *        itself — a branch owned by unrelated work, a checkout with changes
      *        that are not the run's to touch
+     * @param StopKind     $kind  which of the two it was.
+     *        {@see StopKind::Failed} by default, since most failures are; a
+     *        refusal raised after an agent has run is
+     *        {@see StopKind::Decision}, because the work exists and what is
+     *        missing is a judgement. The caller decides, from the failure's own
+     *        exit status ({@see \Celyes\RalphPhp\Console\ExitCode::stopKindFor()}),
+     *        rather than this guessing from the reason text.
      */
-    public static function failure(string $reason, array $hints = []): self
+    public static function failure(string $reason, array $hints = [], StopKind $kind = StopKind::Failed): self
     {
         $action = trim(implode(' ', array_filter(
             $hints,
@@ -302,7 +309,7 @@ final class RunStop
         )));
 
         return self::of(
-            StopKind::Failed,
+            $kind,
             $reason,
             $action === ''
                 ? 'Read the failure above and the run\'s logs under `.ralph/runtime/logs/`; nothing '

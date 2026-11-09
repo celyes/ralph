@@ -23,10 +23,12 @@ use Celyes\RalphPhp\Git\CheckoutInspection;
  * user's, which is why the hints name three ways to deal with their own work
  * and the package takes none of them.
  *
- * Reported with {@see ExitCode::CONFIGURATION}, the status for "put something
- * right and run the command again", which is accurate about the remedy. The
- * dedicated blocking status of PROJECT.md section I, item 5 does not exist yet;
- * this class adopts it when it does.
+ * Reported with {@see ExitCode::CONFIGURATION} and settled there by PROJECT.md
+ * section I, item 5: that status is "the project is not in a state the command
+ * can run in, put it right and run it again", which is this exactly. The
+ * blocking status is for the refusals that come *after* an agent has run and
+ * have work to look after; here no worktree was made and no agent was started,
+ * so there is nothing to preserve and nothing to resume.
  */
 final class CheckoutException extends RalphException
 {

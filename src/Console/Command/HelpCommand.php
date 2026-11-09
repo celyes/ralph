@@ -112,7 +112,32 @@ final class HelpCommand implements CommandInterface
             '  -V, --version  Display the version and runtime information.',
             '  -v, --verbose  Include stack traces in error output.',
             '',
+            'Exit codes:',
+            ...$this->exitCodes(),
+            '',
             'Run "ralph help <command>" for details about one command.',
         ];
+    }
+
+    /**
+     * The documented exit statuses, every one of them.
+     *
+     * Listed in `ralph help` rather than only in the README because this is
+     * what somebody wiring `ralph` into a script has to hand, and because
+     * generating the lines from {@see ExitCode::documented()} means the help
+     * cannot drift from the constants the commands return (PROJECT.md section
+     * I, item 5). Each command's own help says which of these it can produce.
+     *
+     * @return list<string>
+     */
+    private function exitCodes(): array
+    {
+        $lines = [];
+
+        foreach (ExitCode::documented() as $code => $meaning) {
+            $lines[] = sprintf('  %-3d  %s', $code, $meaning);
+        }
+
+        return $lines;
     }
 }

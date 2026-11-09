@@ -29,10 +29,12 @@ use Celyes\RalphPhp\Git\BranchOwnership;
  * {@see self::ownership()} carries the reading, so a caller can record which
  * commit it refused to touch rather than only the sentence about it.
  *
- * Reported with {@see ExitCode::CONFIGURATION}, the status for "put something
- * right and run the command again", which is accurate about the remedy. The
- * dedicated blocking status of PROJECT.md section I, item 5 does not exist yet;
- * this class adopts it when it does.
+ * Reported with {@see ExitCode::CONFIGURATION} and settled there by PROJECT.md
+ * section I, item 5. Ambiguous ownership is one of the situations section H,
+ * item 9 has the loop stop on, and when it is found *during* a pass the run
+ * ends as a block — but this is found before the pass starts, with no agent run
+ * and nothing in the repository changed, and the status that says "put the
+ * project right and run it again" is the one that describes the remedy.
  */
 final class BranchException extends RalphException
 {

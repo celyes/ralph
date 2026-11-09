@@ -33,9 +33,11 @@ use Celyes\RalphPhp\Console\ExitCode;
  * remedy is `chmod`. Here the write could have been made and should not have
  * been.
  *
- * Reported with {@see ExitCode::CONFIGURATION}, the status for "look at a file
- * and run the command again", until section I, item 5 defines the blocking
- * status.
+ * Reported with {@see ExitCode::BLOCKED}, the blocking status of section I,
+ * item 5. The implementation and its commit are durable and the outstanding
+ * write is retried by `ralph resume`, so this is the case the status is for
+ * exactly: nothing failed, and nothing goes further until the person with the
+ * editor open has had their say.
  */
 final class ChecklistConflictException extends RalphException
 {
@@ -58,7 +60,7 @@ final class ChecklistConflictException extends RalphException
 
     public function exitCode(): int
     {
-        return ExitCode::CONFIGURATION;
+        return ExitCode::BLOCKED;
     }
 
     /**

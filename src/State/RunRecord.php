@@ -171,7 +171,11 @@ final class RunRecord
      * Not a second spelling of {@see self::state()}: a run that ended
      * `completed` may have worked through its checklist, reached a limit, or
      * left a task that ran out of attempts, and those want different words and
-     * (section I, item 5) different exit codes.
+     * different exit codes —
+     * {@see \Celyes\RalphPhp\Console\ExitCode::forStop()} is the mapping
+     * (section I, item 5), and this column is what it reads. A `failed` run
+     * whose kind is `decision` is the same distinction from the other side: the
+     * run could not carry on, and what it is waiting for is a person.
      */
     public function stopKind(): ?StopKind
     {

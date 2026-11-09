@@ -30,9 +30,11 @@ use Celyes\RalphPhp\Console\ExitCode;
  * Nothing is undone when this is raised, and nothing is pushed. The commit, the
  * branch and the worktree are all left for inspection.
  *
- * Reported with {@see ExitCode::CONFIGURATION}, the status for "put something
- * right and run the command again". The dedicated blocking status of PROJECT.md
- * section I, item 5 does not exist yet; this class adopts it when it does.
+ * Reported with {@see ExitCode::BLOCKED}, the blocking status of PROJECT.md
+ * section I, item 5. The commit exists and is unpublished, and the disagreement
+ * about what the pass produced is a person's to settle before anything is
+ * pushed under it — which is what the status says and what "fix a setting and
+ * run it again" would not.
  */
 final class PublicationException extends RalphException
 {
@@ -46,7 +48,7 @@ final class PublicationException extends RalphException
 
     public function exitCode(): int
     {
-        return ExitCode::CONFIGURATION;
+        return ExitCode::BLOCKED;
     }
 
     /**

@@ -29,8 +29,9 @@ use Celyes\RalphPhp\Console\ExitCode;
  * and run the command again.
  *
  * Reported with {@see ExitCode::CONFIGURATION}, like {@see WorktreeException},
- * and for the same reason — the status for "put something right and run the
- * command again" is accurate about the remedy.
+ * and for the same reason — nothing has been implemented, so the status for
+ * "the project is not in a state to run in, put it right and run it again" is
+ * accurate about the remedy (PROJECT.md section I, item 5).
  */
 final class PreparationException extends RalphException
 {

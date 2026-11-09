@@ -63,8 +63,9 @@ final class RetryCommand extends LoopCommand
             'Run "ralph status" to list the tasks with their identifiers and states, and',
             '"ralph logs TASK-ID" to read what the earlier attempts did.',
             '',
-            'Exits 0 when the task was verified, committed and checked off, and 75 when it',
-            'stopped again with something waiting for a person.',
+            'Exits as "ralph run" does: 0 when the task was verified, committed and checked',
+            'off, 1 when it spent its attempts again, 75 when it stopped on a decision, and',
+            '130 when it was stopped from outside.',
         ];
     }
 

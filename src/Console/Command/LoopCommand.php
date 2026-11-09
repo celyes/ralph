@@ -68,13 +68,18 @@ abstract class LoopCommand extends ProjectCommand
     /**
      * The exit status for a run that finished and reported itself.
      *
-     * Read off the stop's kind rather than counted from the task results: a
-     * run can finish every task it took on and still be a run that stopped
-     * short. {@see ExitCode::ATTENTION} says which, and PROJECT.md section I,
-     * item 5 is where it becomes a code for each of the four endings.
+     * One line, because the mapping from an ending to a status is
+     * {@see ExitCode::forStop()} and is the same for all three commands: a
+     * resume that stops on a decision and a run that stops on the same decision
+     * are the same event to whoever called them. Read off the stop's kind
+     * rather than counted from the task results — a run can finish every task
+     * it took on and still be a run that stopped short — and off the kind
+     * rather than {@see RunReport::stoppedForAttention()}, because the four
+     * unhappy endings now have a code each (PROJECT.md section I, item 5)
+     * instead of sharing one.
      */
     protected function status(RunReport $report): int
     {
-        return $report->stoppedForAttention() ? ExitCode::ATTENTION : ExitCode::SUCCESS;
+        return ExitCode::forStop($report->stop()->kind());
     }
 }

@@ -268,11 +268,12 @@ final class ResumeCommandTest extends TestCase
 
         $interrupted = $this->project->interrupt(['run'], self::WORKING);
 
-        // Successfully, because a run somebody stopped did what it was asked:
-        // {@see \Celyes\RalphPhp\State\StopKind::needsAttention()} decides
-        // which endings ask for a person, and `ralph status` is where the
-        // outstanding work is reported afterwards.
-        self::assertSame(ExitCode::SUCCESS, $interrupted->exitCode, $interrupted->describe());
+        // 130, which is 128 + SIGINT and what a shell reports for any
+        // interrupted process. Not a failure and not a block — nothing went
+        // wrong and nothing has to be decided — but not a success either: a
+        // caller must not read "stopped half way" as "the checklist is done"
+        // (PROJECT.md section I, item 5).
+        self::assertSame(ExitCode::INTERRUPTED, $interrupted->exitCode, $interrupted->describe());
         self::assertStringContainsString('Run `ralph resume`', $interrupted->standardOutput, $interrupted->describe());
         self::assertStringContainsString('- [ ] ' . self::TASK, $this->project->checklist());
     }

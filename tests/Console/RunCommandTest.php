@@ -9,6 +9,7 @@ use Celyes\RalphPhp\Console\Command\ProjectCommand;
 use Celyes\RalphPhp\Console\Command\RunCommand;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\State\LifecycleState;
+use Celyes\RalphPhp\State\StopKind;
 use Celyes\RalphPhp\Tests\Fixture\FixtureStep;
 use Celyes\RalphPhp\Tests\Support\Git;
 use Celyes\RalphPhp\Tests\Support\JsonDocument;
@@ -234,9 +235,10 @@ final class RunCommandTest extends TestCase
     /**
      * A run that gave up on a task exits with the status that says so.
      *
-     * Not a failure of the command — the run did what it was asked and recorded
-     * why it stopped — and not a success either, which is the distinction
-     * {@see ExitCode::ATTENTION} exists to make. The box stays unticked.
+     * {@see ExitCode::EXECUTION}, the status for work that was attempted and
+     * did not succeed: not a success, and not the blocking status either, since
+     * nothing is waiting on a decision — the task can simply be attempted
+     * again. The box stays unticked.
      */
     #[Test]
     public function a_task_it_gave_up_on_leaves_the_box_unticked_and_asks_for_attention(): void
@@ -248,11 +250,130 @@ final class RunCommandTest extends TestCase
 
         $result = $this->project->ralph(['run']);
 
-        self::assertSame(ExitCode::ATTENTION, $result->exitCode, $result->describe());
+        self::assertSame(ExitCode::EXECUTION, $result->exitCode, $result->describe());
         self::assertStringContainsString('ran out of attempts', $result->standardOutput, $result->describe());
         self::assertStringContainsString('next: ', $result->standardOutput, $result->describe());
         self::assertStringContainsString('- [ ] ' . self::TASK, $this->project->checklist());
         self::assertSame([], $this->project->taskBranches(), 'An unverified task committed nothing.');
+    }
+
+    /**
+     * A run the iteration limit stopped exits 124, and `ralph status`
+     * afterwards exits 0.
+     *
+     * The pair is the rule the whole set rests on (PROJECT.md section I,
+     * item 5): a code says what the command found, not what happened in the
+     * past. The run stopped short of the checklist, so chaining anything onto
+     * it must not go ahead — but what the project is *left* holding is a
+     * pending task, which is indistinguishable from the pending task of a
+     * project nobody has run, and a `status` that reported the limit again
+     * would make an untouched project's status depend on a run that is over.
+     */
+    #[Test]
+    public function a_run_the_limit_stopped_exits_with_the_limit_status_and_status_does_not(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK, 'Add a --quiet option to the import command'])
+            ->withConfiguration(['limits' => ['iterations' => 1]]);
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::LIMIT, $result->exitCode, $result->describe());
+        self::assertStringContainsString('still pending', $result->standardOutput, $result->describe());
+
+        // The first task was done properly on the way: the limit stops the
+        // loop, it does not undo the iteration that spent it.
+        self::assertStringContainsString('- [x] ' . self::TASK, $this->project->checklist());
+
+        $status = $this->project->ralph(['status']);
+
+        self::assertSame(ExitCode::SUCCESS, $status->exitCode, $status->describe());
+
+        // And the document agrees with the status, which is the field a script
+        // reads instead of the code when it has the report in a file.
+        $document = JsonDocument::parse($this->project->ralph(['status', '--json'])->standardOutput);
+
+        self::assertFalse($document->boolean('needs_attention'), 'A limit left something waiting for a person.');
+        self::assertSame(ExitCode::SUCCESS, $document->integer('exit_code'));
+    }
+
+    /**
+     * A task that asks a question exits 75, with the work preserved.
+     *
+     * The blocking status: not a failure — nothing went wrong and nothing was
+     * undone — and not a success, which is the distinction a caller cannot make
+     * from the summary line without parsing prose.
+     */
+    #[Test]
+    public function a_task_that_asks_a_question_exits_with_the_blocking_status(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::blocking('the import command has two option parsers', 'Say which one to use'))
+            ->withTasks([self::TASK])
+            ->withConfiguration();
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::BLOCKED, $result->exitCode, $result->describe());
+        self::assertStringContainsString('two option parsers', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('- [ ] ' . self::TASK, $this->project->checklist());
+
+        self::assertSame(
+            LifecycleState::Blocked,
+            $this->project->journal()->generations()->latestFor(
+                \Celyes\RalphPhp\Tasks\TaskId::fromDescription(self::TASK),
+            )?->state(),
+        );
+    }
+
+    /**
+     * A refusal raised after the agent has run exits 75, and `ralph status`
+     * afterwards says the same thing.
+     *
+     * The case the blocking status is really for: a worker that reworded the
+     * task in the project's own checklist while working on it, which the runner
+     * will not silently apply old progress to (section C, item 7). Work exists
+     * — the implementation is verified and committed on its branch — nothing
+     * was undone, and what is missing is the user's decision about which task
+     * the commit belongs to. An execution-failure status would send a reader to
+     * the logs looking for something that went wrong, and a success would hide
+     * it entirely.
+     *
+     * Both halves are asserted because they are produced by different code: the
+     * run's status comes from the ending it recorded, and `status`'s comes from
+     * reading the pass back out of the store afterwards.
+     */
+    #[Test]
+    public function a_refusal_after_the_agent_ran_exits_as_blocked_and_status_agrees(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success([
+                'src/Import.php' => "<?php\n\n// --dry-run\n",
+                // Out of the worktree and into the project's own checklist:
+                // .ralph/runtime/worktrees/TASK-X is three levels down.
+                '../../../tasks.md' => "# Tasks\n\n- [ ] Add a --wet-run option to the import command\n",
+            ]))
+            ->withTasks([self::TASK])
+            ->withConfiguration();
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::BLOCKED, $result->exitCode, $result->describe());
+        self::assertStringContainsString('no longer states', $result->standardOutput, $result->describe());
+
+        // The work the refusal was about is still there, which is what makes
+        // this a block rather than a failure.
+        self::assertNotSame([], $this->project->taskBranches());
+
+        $run = $this->project->journal()->runs()->latest();
+
+        self::assertNotNull($run);
+        self::assertSame(StopKind::Decision, $run->stopKind(), 'The row disagrees with the status it exited with.');
+
+        $status = $this->project->ralph(['status']);
+
+        self::assertSame(ExitCode::BLOCKED, $status->exitCode, $status->describe());
     }
 
     /**

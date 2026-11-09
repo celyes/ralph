@@ -138,8 +138,11 @@ final class StatusCommand extends ProjectCommand
             'Nothing is written and no agent is started, so this is safe to run at any time,',
             'including while a run is going on in another terminal.',
             '',
-            'Exits 0 when nothing is waiting for a person, and 75 when something is: a task',
-            'blocked on a decision, a failed pass, or an interrupted run to resume.',
+            'Exits 0 when nothing is waiting for a person, and otherwise the code for what',
+            'is: 75 for a task blocked on a decision, 1 for a pass that was given up on, 130',
+            'for an interrupted pass to resume. It reports what the project is holding now,',
+            'not how the last run ended, so a project whose last run reached a limit exits 0',
+            'when the tasks it left are simply pending.',
         ];
     }
 
@@ -225,6 +228,8 @@ final class StatusCommand extends ProjectCommand
             $rows[] = $this->taskDocument($task, $tasks, $record, $journal);
         }
 
+        $status = $this->status($run, $passes);
+
         $output->line(Json::document([
             'schema' => self::SCHEMA,
             'project' => [
@@ -249,7 +254,15 @@ final class StatusCommand extends ProjectCommand
             'tasks' => $rows,
             // Read off the same arithmetic the exit status uses, so the field
             // and the status cannot disagree about whether anything is waiting.
-            'needs_attention' => $this->status($run, $passes) === ExitCode::ATTENTION,
+            // Any status but success means something is: which thing is the
+            // code's job to say (PROJECT.md section I, item 5), and a consumer
+            // that only wants the yes/no should not have to enumerate them.
+            'needs_attention' => $status !== ExitCode::SUCCESS,
+            // The status the process will exit with and what it means, so a
+            // consumer reading this document out of a file rather than off a
+            // pipe is not the one caller that cannot see the code.
+            'exit_code' => $status,
+            'exit_meaning' => ExitCode::describe($status),
         ]));
 
         return $passes;
@@ -659,23 +672,99 @@ final class StatusCommand extends ProjectCommand
     }
 
     /**
-     * Whether anything in the project is waiting for a person.
+     * What, if anything, in the project is waiting for a person.
+     *
+     * `status` inspects; it does not run. So its exit code is about what the
+     * project is holding *now*, not about how the last run ended — which is the
+     * one place this command and `ralph run` are allowed to differ. A run that
+     * spent its iteration budget exits {@see ExitCode::LIMIT} because that run
+     * stopped short of the checklist; `status` afterwards exits
+     * {@see ExitCode::SUCCESS}, because what the project is left holding is
+     * pending tasks, and those are indistinguishable from the pending tasks of
+     * a project nobody has run yet. Reporting the limit again here would make
+     * the status of an untouched project depend on a run that is over.
+     *
+     * The passes come first and the run's row second: a pass is a thing that
+     * still exists and can be acted on, while the row is a record of an event.
+     * Among passes the order is blocked, then failed, then interrupted —
+     * {@see self::severity()} — because that is the order in which a person has
+     * to deal with them.
+     *
+     * Which pass is which is read off the lifecycle state, not off whether a
+     * blocker was recorded. A blocker is written for every pass that stopped
+     * with something to say, including one whose checks simply failed, so a
+     * pass holding one is only *blocked* when its state says so. A blocker on a
+     * pass in any other open state is work that was attempted and did not
+     * succeed, which is the last clause below and the reason it is last: the
+     * three states have already said what they are.
      *
      * @param list<GenerationRecord> $passes
      */
     private function status(?RunRecord $run, array $passes): int
     {
+        $outstanding = [];
+
         foreach ($passes as $record) {
-            if ($record->blocker() !== null || $record->state()->isFailure() || $record->state()->isResumable()) {
-                return ExitCode::ATTENTION;
+            if ($record->state()->requiresHumanInput()) {
+                $outstanding[] = ExitCode::BLOCKED;
+
+                continue;
+            }
+
+            if ($record->state()->isFailure()) {
+                $outstanding[] = ExitCode::EXECUTION;
+
+                continue;
+            }
+
+            if ($record->state()->isResumable()) {
+                $outstanding[] = ExitCode::INTERRUPTED;
+
+                continue;
+            }
+
+            if ($record->blocker() !== null && !$record->state()->isCompleted()) {
+                $outstanding[] = ExitCode::EXECUTION;
             }
         }
 
-        if ($run !== null && $run->stopKind()?->needsAttention() === true) {
-            return ExitCode::ATTENTION;
+        $kind = $run?->stopKind();
+
+        if ($kind !== null && $kind->needsAttention()) {
+            // The endings that need a person, as the code for that ending
+            // rather than as a second opinion about it: a run whose row says
+            // `decision` must not be reported here as the execution failure it
+            // was not.
+            $outstanding[] = ExitCode::forStop($kind);
         }
 
-        return ExitCode::SUCCESS;
+        if ($outstanding === []) {
+            return ExitCode::SUCCESS;
+        }
+
+        usort($outstanding, static fn (int $a, int $b): int => self::severity($a) <=> self::severity($b));
+
+        return $outstanding[0];
+    }
+
+    /**
+     * Which of two outstanding things a person should look at first.
+     *
+     * Lower sorts first. A decision waiting on them outranks work the loop gave
+     * up on, which outranks a pass waiting for a `ralph resume` — the resume
+     * needs nothing from them but the command. The numbers are an order and
+     * nothing else; the exit codes themselves are
+     * {@see ExitCode::documented()}, and their values follow convention rather
+     * than severity, so sorting on them would put failure above everything.
+     */
+    private static function severity(int $code): int
+    {
+        return match ($code) {
+            ExitCode::BLOCKED => 0,
+            ExitCode::EXECUTION => 1,
+            ExitCode::INTERRUPTED => 2,
+            default => 3,
+        };
     }
 
     /**

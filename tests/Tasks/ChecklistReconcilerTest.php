@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Tasks;
 
+use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\ReconciliationException;
 use Celyes\RalphPhp\Tasks\Checklist;
@@ -391,7 +392,11 @@ final class ChecklistReconcilerTest extends TestCase
         self::assertSame(TaskChange::Removed, $exception->change());
         self::assertSame($result->reason(), $exception->getMessage());
         self::assertSame($result->hints(), $exception->hints());
-        self::assertSame(78, $exception->exitCode());
+
+        // The blocking status, not the configuration one: an agent has run by
+        // the time a task can be found reworded, so the work exists and what is
+        // missing is the user's decision about it.
+        self::assertSame(ExitCode::BLOCKED, $exception->exitCode());
     }
 
     #[Test]

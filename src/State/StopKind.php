@@ -24,10 +24,12 @@ namespace Celyes\RalphPhp\State;
  * blocker says which kind of ambiguity it was — inventing a seventh case here
  * would mean the loop classifying a refusal it did not make.
  *
- * Nothing branches on this yet beyond what is printed. Section I, item 5 is
- * where consistent exit codes are defined, and this is the vocabulary they will
- * be defined over: a run that stopped on a decision and a run that finished its
- * checklist must not exit alike.
+ * This is the vocabulary the exit codes of section I, item 5 are defined over,
+ * and {@see \Celyes\RalphPhp\Console\ExitCode::forStop()} is the whole of the
+ * mapping: `finished` exits 0, a decision 75, exhausted attempts and a run that
+ * could not carry on 1, a limit 124, and a stop from outside 130. Nothing else
+ * branches on the kind beyond what is printed — and nothing else should, since
+ * a second reading of it is how a status and a summary line come to disagree.
  */
 enum StopKind: string
 {

@@ -24,9 +24,11 @@ use Celyes\RalphPhp\Console\ExitCode;
  * commit would contain, and a commit built on a reading it could not trust is
  * worse than no commit at all.
  *
- * Reported with {@see ExitCode::CONFIGURATION}, the status for "put something
- * right and run the command again". The dedicated blocking status of PROJECT.md
- * section I, item 5 does not exist yet; this class adopts it when it does.
+ * Reported with {@see ExitCode::BLOCKED}, the blocking status of PROJECT.md
+ * section I, item 5. The verified implementation is in the task's workspace and
+ * stays there, which is the difference between this and the refusals that exit
+ * {@see ExitCode::CONFIGURATION}: those happen before an agent runs and leave
+ * nothing to look after.
  */
 final class StagingException extends RalphException
 {
@@ -40,7 +42,7 @@ final class StagingException extends RalphException
 
     public function exitCode(): int
     {
-        return ExitCode::CONFIGURATION;
+        return ExitCode::BLOCKED;
     }
 
     /**

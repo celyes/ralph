@@ -12,6 +12,7 @@ use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\VerificationDrift;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
+use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Event\EventStream;
 use Celyes\RalphPhp\Exception\ChecklistException;
@@ -1228,9 +1229,18 @@ final class Runner
             // touch — has always said what to do about it (section H, item 9).
             // They are copied onto the row rather than left to the one terminal
             // that saw them.
+            //
+            // The ending is read off the status the failure will exit with, so
+            // the row and the process agree: a refusal raised after an agent
+            // has run — drift, a reworded checklist, a commit that could not be
+            // made — exits as a block, and a row calling that an execution
+            // failure would have `ralph status` contradict the run afterwards
+            // (section I, item 5). The run's own state is `failed` either way;
+            // what the kind adds is whether a person has to decide something.
             $stop = RunStop::failure(
                 sprintf('%s: %s', $this->describe($failure), $failure->getMessage()),
                 $failure instanceof RalphException ? $failure->hints() : [],
+                ExitCode::stopKindFor($failure instanceof RalphException ? $failure->exitCode() : ExitCode::SOFTWARE),
             );
 
             $journal->runs()->fail($current, $stop->reason(), $stop->nextAction(), $stop->kind());

@@ -351,7 +351,7 @@ final class TaskPublisherTest extends TestCase
 
         self::assertStringContainsString('has no recorded commit', $exception->getMessage());
         self::assertStringContainsString('published after it has committed', implode("\n", $exception->hints()));
-        self::assertSame(ExitCode::CONFIGURATION, $exception->exitCode());
+        self::assertSame(ExitCode::BLOCKED, $exception->exitCode());
         self::assertSame([], $this->remoteBranches());
     }
 

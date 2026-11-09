@@ -160,7 +160,10 @@ final class StatusCommandTest extends TestCase
 
         $result = $this->project->ralph(['status']);
 
-        self::assertSame(ExitCode::ATTENTION, $result->exitCode, $result->describe());
+        // The pass was given up on, so the status is the one for work that
+        // was attempted and did not succeed — not the blocking status, which
+        // would send a reader looking for a question to answer.
+        self::assertSame(ExitCode::EXECUTION, $result->exitCode, $result->describe());
         self::assertStringContainsString('— a task ran out of attempts', $result->standardOutput, $result->describe());
         self::assertMatchesRegularExpression('/failed\s+TASK-[0-9A-F]{8}\s+1\s+-\s+/', $result->standardOutput);
 
@@ -193,7 +196,7 @@ final class StatusCommandTest extends TestCase
 
         $result = $this->project->ralph(['status']);
 
-        self::assertSame(ExitCode::ATTENTION, $result->exitCode, $result->describe());
+        self::assertSame(ExitCode::EXECUTION, $result->exitCode, $result->describe());
 
         // The box stayed where it was: the checks are what decides, and they
         // decided against this.
@@ -350,6 +353,41 @@ final class StatusCommandTest extends TestCase
         self::assertSame('tests', $task->objects('verification.checks')[0]->string('name'));
 
         self::assertFalse($document->boolean('needs_attention'), $result->describe());
+
+        // And the status the process will exit with, so a consumer reading the
+        // document out of a file rather than off a pipe is not the one caller
+        // that cannot see the code (PROJECT.md section I, item 5).
+        self::assertSame(ExitCode::SUCCESS, $document->integer('exit_code'), $result->describe());
+        self::assertSame('the command did what it was asked', $document->string('exit_meaning'));
+    }
+
+    /**
+     * An interrupted pass exits 130, not the status of a failure.
+     *
+     * Nothing went wrong and nothing has to be decided: the pass gave way at a
+     * phase boundary with its workspace kept, and the next action is
+     * `ralph resume`. A caller that saw an execution failure here would go
+     * looking for a cause, and one that saw a success would never resume.
+     */
+    #[Test]
+    public function an_interrupted_pass_is_reported_with_the_interruption_status(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::slow(30))
+            ->withTasks([self::TASK])
+            ->withConfiguration(['limits' => ['attempts_per_task' => 2]]);
+
+        $this->project->interrupt(['run'], 'waiting 30 seconds');
+
+        $result = $this->project->ralph(['status']);
+
+        self::assertSame(ExitCode::INTERRUPTED, $result->exitCode, $result->describe());
+        self::assertStringContainsString('ralph resume', $result->standardOutput, $result->describe());
+
+        $document = JsonDocument::parse($this->project->ralph(['status', '--json'])->standardOutput);
+
+        self::assertTrue($document->boolean('needs_attention'), $result->describe());
+        self::assertSame(ExitCode::INTERRUPTED, $document->integer('exit_code'));
     }
 
     /**

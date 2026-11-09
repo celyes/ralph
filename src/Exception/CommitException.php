@@ -25,9 +25,11 @@ use Celyes\RalphPhp\Console\ExitCode;
  * resume retrying the implementation because the first commit could not be
  * recorded is precisely the duplicate work acceptance criterion 6 rules out.
  *
- * Reported with {@see ExitCode::CONFIGURATION}, the status for "put something
- * right and run the command again". The dedicated blocking status of PROJECT.md
- * section I, item 5 does not exist yet; this class adopts it when it does.
+ * Reported with {@see ExitCode::BLOCKED}, the blocking status of PROJECT.md
+ * section I, item 5, for the same reason as {@see StagingException}: the work
+ * is done, verified and staged, and a caller that read this as a configuration
+ * problem would go looking for the setting to fix rather than for the commit
+ * the message names.
  */
 final class CommitException extends RalphException
 {
@@ -41,7 +43,7 @@ final class CommitException extends RalphException
 
     public function exitCode(): int
     {
-        return ExitCode::CONFIGURATION;
+        return ExitCode::BLOCKED;
     }
 
     /**

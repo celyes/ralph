@@ -20,10 +20,14 @@ use Celyes\RalphPhp\Console\ExitCode;
  * the next action is usually to wait or to look at what is already running
  * rather than to change anything.
  *
- * {@see ExitCode::CONFIGURATION} for now, with the other "nothing ran, resolve
- * this and try again" failures. PROJECT.md section I, item 5 settles the
- * documented set of exit codes, and a status of its own for a lock conflict
- * belongs with that work rather than ahead of it.
+ * {@see ExitCode::CONFIGURATION}, with the other "nothing ran, resolve this and
+ * try again" failures, and settled there by PROJECT.md section I, item 5: a
+ * repository another runner holds is the environment not being available, which
+ * is what that status covers. It gets no code of its own because nothing a
+ * caller would do differs — the lock is released by the other runner finishing
+ * or by the user dealing with it, and this command has to be run again either
+ * way. It is not the blocking status, which is for a run of this package's own
+ * that stopped with work in hand.
  */
 final class LockException extends RalphException
 {

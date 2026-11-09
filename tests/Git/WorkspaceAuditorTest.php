@@ -413,7 +413,7 @@ final class WorkspaceAuditorTest extends TestCase
 
         self::assertTrue($audit->isBlocking());
         self::assertTrue($audit->has(DriftKind::BranchMoved));
-        self::assertSame(ExitCode::CONFIGURATION, $exception->exitCode());
+        self::assertSame(ExitCode::BLOCKED, $exception->exitCode());
         self::assertStringContainsString('the branch main moved from', $exception->getMessage() . implode(' ', $exception->hints()));
 
         // Nothing was tidied up: the stray commit is still main's tip, and the

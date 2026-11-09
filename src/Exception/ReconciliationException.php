@@ -22,10 +22,12 @@ use Celyes\RalphPhp\Tasks\TaskChange;
  * are left as they are, which is what makes restoring the old wording and
  * running again a complete remedy rather than a retry from scratch.
  *
- * Reported with {@see ExitCode::CONFIGURATION} for now, which is the status for
- * "correct a file and run the command again" and is accurate about the remedy.
- * The dedicated blocking status of PROJECT.md section I, item 5 does not exist
- * yet; this class adopts it when it does.
+ * Reported with {@see ExitCode::BLOCKED}, the blocking status of PROJECT.md
+ * section I, item 5. Restoring the old wording and running again is a complete
+ * remedy, so the "correct a file and run the command again" status would be
+ * accurate as far as it goes — but it would put this with the refusals that
+ * happen before anything runs, and the whole point of the class is that work
+ * has happened and is waiting on what the user says about it.
  */
 final class ReconciliationException extends RalphException
 {
@@ -42,7 +44,7 @@ final class ReconciliationException extends RalphException
 
     public function exitCode(): int
     {
-        return ExitCode::CONFIGURATION;
+        return ExitCode::BLOCKED;
     }
 
     /**

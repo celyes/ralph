@@ -30,9 +30,11 @@ use Celyes\RalphPhp\Git\WorkspaceAudit;
  * SHAs, and because the commits a blocked pass leaves behind may have no other
  * name anywhere.
  *
- * Reported with {@see ExitCode::CONFIGURATION}, the status for "put something
- * right and run the command again". The dedicated blocking status of PROJECT.md
- * section I, item 5 does not exist yet; this class adopts it when it does.
+ * Reported with {@see ExitCode::BLOCKED}, the blocking status of PROJECT.md
+ * section I, item 5, rather than with the "put something right and run it
+ * again" status the precondition refusals use: by the time this is raised an
+ * agent has run and its commits are in the repository, and what is wanted is
+ * not a correction but somebody's decision about work that already exists.
  */
 final class DriftException extends RalphException
 {
@@ -49,7 +51,7 @@ final class DriftException extends RalphException
 
     public function exitCode(): int
     {
-        return ExitCode::CONFIGURATION;
+        return ExitCode::BLOCKED;
     }
 
     /**

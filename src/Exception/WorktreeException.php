@@ -23,10 +23,10 @@ use Celyes\RalphPhp\Console\ExitCode;
  * the remedy is always to deal with the directory named in the message and run
  * the command again.
  *
- * Reported with {@see ExitCode::CONFIGURATION}, the status for "put something
- * right and run the command again", which is accurate about the remedy. The
- * dedicated blocking status of PROJECT.md section I, item 5 does not exist yet;
- * this class adopts it when it does.
+ * Reported with {@see ExitCode::CONFIGURATION} and settled there by PROJECT.md
+ * section I, item 5: the agent has not run, so this is the project not being in
+ * a state to run in rather than a block over work that exists. Deal with the
+ * directory the message names and run the command again.
  */
 final class WorktreeException extends RalphException
 {

@@ -89,14 +89,20 @@ final class InterruptionException extends RalphException
     }
 
     /**
-     * {@see ExitCode::CONFIGURATION} for now, as every recognised failure is
-     * until PROJECT.md section I, item 5 settles the documented set — where a
-     * status for an interrupted run belongs with the rest of them rather than
-     * ahead of them.
+     * {@see ExitCode::INTERRUPTED}: 128 + SIGINT, the status a shell reports for
+     * a process somebody stopped, and the interruption status of PROJECT.md
+     * section I, item 5.
+     *
+     * Not a failure and not a block. Nothing went wrong and nothing has to be
+     * decided; the pass gave way at a phase boundary with its workspace and
+     * branch intact, and `ralph resume` continues it. Agreeing with the shell's
+     * own number matters because the signal can arrive before this package is
+     * in a position to see it, and the same Ctrl+C should not produce two
+     * different statuses depending on when it landed.
      */
     public function exitCode(): int
     {
-        return ExitCode::CONFIGURATION;
+        return ExitCode::INTERRUPTED;
     }
 
     /**

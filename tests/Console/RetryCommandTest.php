@@ -108,7 +108,7 @@ final class RetryCommandTest extends TestCase
         // invoking anything; this one invokes the agent and fails again.
         $result = $this->project->ralph(['retry', TaskId::fromDescription(self::TASK)->value()]);
 
-        self::assertSame(ExitCode::ATTENTION, $result->exitCode, $result->describe());
+        self::assertSame(ExitCode::EXECUTION, $result->exitCode, $result->describe());
         self::assertStringContainsString('attempt 2', $result->standardOutput, $result->describe());
         self::assertSame(2, $this->pass()?->attempts());
     }
@@ -261,7 +261,7 @@ final class RetryCommandTest extends TestCase
 
         $run = $this->project->ralph(['run']);
 
-        self::assertSame(ExitCode::ATTENTION, $run->exitCode, $run->describe());
+        self::assertSame(ExitCode::EXECUTION, $run->exitCode, $run->describe());
         self::assertStringContainsString('- [ ] ' . self::TASK, $this->project->checklist());
     }
 

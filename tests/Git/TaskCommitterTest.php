@@ -254,7 +254,7 @@ final class TaskCommitterTest extends TestCase
 
         self::assertStringContainsString('already recorded commit ' . $commit->sha(), $exception->getMessage());
         self::assertStringContainsString('A pass commits once', implode("\n", $exception->hints()));
-        self::assertSame(ExitCode::CONFIGURATION, $exception->exitCode());
+        self::assertSame(ExitCode::BLOCKED, $exception->exitCode());
 
         // One commit on the branch, and the second file is still only staged.
         self::assertSame($commit->sha(), $this->tipOf($commit->branch()->value()));

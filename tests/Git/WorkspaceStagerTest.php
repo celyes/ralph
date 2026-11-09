@@ -469,7 +469,7 @@ final class WorkspaceStagerTest extends TestCase
             $hints = implode("\n", $exception->hints());
             self::assertStringContainsString('Nothing was staged and nothing was committed', $hints);
             self::assertStringContainsString('would be guessing', $hints);
-            self::assertSame(ExitCode::CONFIGURATION, $exception->exitCode());
+            self::assertSame(ExitCode::BLOCKED, $exception->exitCode());
         }
 
         // The conflict is still a conflict: refusing did not resolve it by

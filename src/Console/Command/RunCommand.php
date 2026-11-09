@@ -58,12 +58,17 @@ final class RunCommand extends LoopCommand
             'Ctrl+C stops the agent, records the interruption and preserves the workspace;',
             '"ralph resume" then continues from the phase it stopped in.',
             '',
-            'Exits 75 when the run stopped with something waiting for a person: a task',
-            'blocked on a decision, or a task it gave up on. A run that worked through the',
-            'checklist, reached a configured limit, or was stopped with Ctrl+C exits 0 —',
-            'each of those did what it was asked. Either way the reason and what to do',
-            'about it are the last line, and are kept on the run\'s record for',
-            '"ralph status".',
+            'The exit status says how the run ended, and "ralph help" lists every code:',
+            '',
+            '    0  the checklist was worked through',
+            '    1  a task was given up on after spending its attempts',
+            '   75  a task is blocked on a decision, or a refusal stopped the run with its',
+            '       work preserved',
+            '  124  a configured limit stopped the run with tasks still pending',
+            '  130  the run was stopped from outside; "ralph resume" continues it',
+            '',
+            'Whichever it is, the reason and what to do about it are the last line, and are',
+            'kept on the run\'s record for "ralph status".',
         ];
     }
 
