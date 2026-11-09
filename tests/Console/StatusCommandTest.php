@@ -70,6 +70,7 @@ final class StatusCommandTest extends TestCase
         self::assertStringContainsString('Ralph PHP status for ' . $this->project->root(), $result->standardOutput);
         self::assertStringContainsString('.ralph/tasks.md — 2 tasks, 0 checked, 2 pending', $result->standardOutput);
         self::assertStringContainsString('fixture (project default)', $result->standardOutput);
+        self::assertStringContainsString('progress       0 of 2 completed, 2 remaining', $result->standardOutput);
         self::assertStringNotContainsString('Latest run', $result->standardOutput, $result->describe());
 
         // The pending task, with the identifier `ralph logs` and `ralph retry`
@@ -103,6 +104,11 @@ final class StatusCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertStringContainsString('.ralph/tasks.md — 1 task, 1 checked, 0 pending', $result->standardOutput);
 
+        // The counts, and nothing about who ticked the box: every done task
+        // here was carried through by the runner, so there is nothing to split.
+        self::assertStringContainsString('progress       1 of 1 completed, 0 remaining', $result->standardOutput);
+        self::assertStringNotContainsString('ticked by hand', $result->standardOutput, $result->describe());
+
         $run = $this->project->journal()->runs()->latest();
         self::assertNotNull($run);
 
@@ -129,6 +135,10 @@ final class StatusCommandTest extends TestCase
             $result->describe(),
         );
         self::assertMatchesRegularExpression('/completed\s+TASK-[0-9A-F]{8}\s+1\s+/', $result->standardOutput);
+
+        // What the single configured check decided, not just that it exists:
+        // the run section above names it, this says how it came out.
+        self::assertStringContainsString('checks: 1 of 1 checks passed in', $result->standardOutput, $result->describe());
     }
 
     /**
@@ -155,6 +165,46 @@ final class StatusCommandTest extends TestCase
         // something is still doing.
         self::assertStringContainsString('stopped while waiting for the agent', $result->standardOutput);
         self::assertStringContainsString('next: read `ralph logs TASK-', $result->standardOutput);
+
+        // The worker never produced anything to check, so the absence of a
+        // verdict is reported rather than left to look like a passing one.
+        self::assertStringContainsString('checks: none ran against attempt 1', $result->standardOutput, $result->describe());
+    }
+
+    /**
+     * A pass the checks decided against reports which check failed, and names
+     * every check when there is more than one of them.
+     */
+    #[Test]
+    public function a_failing_check_is_reported_with_the_verdict_of_every_check(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK])
+            ->withConfiguration(['checks' => [
+                ['name' => 'lint', 'command' => ['php', '-v'], 'timeout' => 30],
+                ['name' => 'tests', 'command' => ['php', '-r', 'fwrite(STDERR, "1 assertion failed"); exit(3);'], 'timeout' => 30],
+            ]]);
+
+        $this->project->ralph(['run']);
+
+        $result = $this->project->ralph(['status']);
+
+        self::assertSame(ExitCode::ATTENTION, $result->exitCode, $result->describe());
+
+        // The box stayed where it was: the checks are what decides, and they
+        // decided against this.
+        self::assertStringContainsString('0 of 1 completed, 1 remaining', $result->standardOutput, $result->describe());
+
+        // The headline names the check that stopped the sequence, and because
+        // there is more than one check, each one's own verdict follows.
+        self::assertStringContainsString(
+            'checks: tests failed; 1 of 2 checks passed',
+            $result->standardOutput,
+            $result->describe(),
+        );
+        self::assertMatchesRegularExpression('/\n\s+lint passed in /', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('tests failed (exit 3)', $result->standardOutput, $result->describe());
     }
 
     /**
@@ -169,6 +219,15 @@ final class StatusCommandTest extends TestCase
 
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertStringContainsString('1 checked, 1 pending', $result->standardOutput);
+
+        // The count on its own would read as a third of the work being done.
+        // It says whose word that rests on, which here is nobody's but the
+        // user's.
+        self::assertStringContainsString(
+            'progress       1 of 2 completed, 1 remaining — all ticked by hand, none verified here',
+            $result->standardOutput,
+            $result->describe(),
+        );
         self::assertMatchesRegularExpression(
             '/done \(by you\)\s+TASK-[0-9A-F]{8}\s+-\s+-\s+Document the import command/',
             $result->standardOutput,

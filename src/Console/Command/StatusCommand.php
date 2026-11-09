@@ -31,7 +31,15 @@ use Celyes\RalphPhp\Tasks\TaskList;
  * checklist states them, because that is the order they are worked in and the
  * order the user is reading them in. Each row carries what the state store has
  * against that task: the pass's state and phase, how many attempts it has had,
- * the branch it owns and the commit it produced.
+ * the branch it owns, the commit it produced and how its checks came out.
+ *
+ * **The counts come before the detail, and the checks come from the store.**
+ * How much of the checklist is done and how much is left is the first thing
+ * anyone wants, so it is one line near the top; and a task's check results are
+ * read back from `verification_results` rather than from the configured check
+ * list, because what was meant to run and what was decided are different
+ * claims. The run section names the frozen checks; the task rows say how they
+ * came out.
  *
  * **A checked box and a verified commit are not the same claim.** An item the
  * user ticked by hand is shown as theirs and an item a run carried through is
@@ -85,9 +93,10 @@ final class StatusCommand extends ProjectCommand
             'Prints, for the project in the current directory:',
             '',
             '  the configuration in force, the checklist it reads, and the selected agent',
+            '  how many tasks are completed and how many remain',
             '  the latest run: its identifier, state, agent, limits used, and why it stopped',
-            '  every task in checklist order, with its identifier, state, attempts, branch',
-            '  and commit',
+            '  every task in checklist order, with its identifier, state, phase, attempts,',
+            '  branch, commit, and what its verification commands decided',
             '',
             'A task checked off by a verified run is reported as the runner\'s; one ticked by',
             'hand is reported as yours, because a box with no commit behind it is not work',
@@ -186,6 +195,47 @@ final class StatusCommand extends ProjectCommand
             $tasks->pendingCount(),
         ));
         $output->line(sprintf('  agent          %s (project default)', $configuration->defaultAgent()));
+
+        if ($tasks->count() > 0) {
+            $output->line(sprintf('  progress       %s', $this->progressOf($tasks)));
+        }
+    }
+
+    /**
+     * How much of the checklist is done, how much is left, and on whose word.
+     *
+     * Two counts a reader wants before any of the detail — what is finished and
+     * what is still coming (PROJECT.md section I, item 2) — and then the split
+     * that makes the first of them honest. "3 of 5 completed" is only a useful
+     * number if it says how many of the three this package stands behind: a
+     * checklist whose boxes were all ticked by hand is at 100% and has had no
+     * work done on it at all.
+     *
+     * The split is dropped when there is nothing to split, so a project that
+     * has only ever been run by Ralph PHP, or only ever been ticked by hand,
+     * reads as the one plain sentence it is.
+     */
+    private function progressOf(TaskList $tasks): string
+    {
+        $progress = sprintf(
+            '%d of %d completed, %d remaining',
+            $tasks->doneCount(),
+            $tasks->count(),
+            $tasks->pendingCount(),
+        );
+
+        $verified = count($tasks->runnerVerified());
+        $ticked = count($tasks->userCompleted());
+
+        if ($verified > 0 && $ticked > 0) {
+            return sprintf('%s — %d verified here, %d ticked by hand', $progress, $verified, $ticked);
+        }
+
+        if ($ticked > 0) {
+            return sprintf('%s — all ticked by hand, none verified here', $progress);
+        }
+
+        return $progress;
     }
 
     /**
@@ -281,7 +331,7 @@ final class StatusCommand extends ProjectCommand
                 $this->shorten($task->description()),
             ));
 
-            foreach ($this->notes($task, $tasks, $record) as $note) {
+            foreach ($this->notes($task, $tasks, $record, $journal) as $note) {
                 $output->line('                 ' . $note);
             }
         }
@@ -308,12 +358,16 @@ final class StatusCommand extends ProjectCommand
 
     /**
      * The lines under a task's row: the phase it is in, the branch it owns,
-     * what it is waiting for, and what to do about it.
+     * how its checks came out, what it is waiting for, and what to do about it.
      *
      * @return list<string>
      */
-    private function notes(Task $task, TaskList $tasks, ?GenerationRecord $record): array
-    {
+    private function notes(
+        Task $task,
+        TaskList $tasks,
+        ?GenerationRecord $record,
+        ?Journal $journal,
+    ): array {
         $notes = [];
 
         if ($record === null) {
@@ -347,6 +401,10 @@ final class StatusCommand extends ProjectCommand
             $notes[] = 'branch ' . (string) $record->branch();
         }
 
+        foreach ($this->checks($record, $journal) as $note) {
+            $notes[] = $note;
+        }
+
         if ($record->isNoChange()) {
             $notes[] = 'verified with no change needed';
         }
@@ -366,6 +424,56 @@ final class StatusCommand extends ProjectCommand
 
         if (!$record->state()->isCompleted() && !$record->state()->isRunning()) {
             $notes[] = 'next: ' . str_replace('TASK-ID', $task->id()->value(), $record->state()->nextAction());
+        }
+
+        return $notes;
+    }
+
+    /**
+     * How the checks came out for the last attempt at a pass.
+     *
+     * Read from `verification_results`, which is the record the pass's
+     * completion rested on — not from the configured check list, which says
+     * only what was meant to run. The run section above names the frozen
+     * checks; this says what they decided (PROJECT.md section I, item 2), and
+     * the two lines being separate is the point: a check that was configured
+     * and never reached is a different thing from one that passed.
+     *
+     * The last attempt's, because that is the one that stands: a task that
+     * failed twice and then passed is passing, and the earlier verdicts are
+     * what `ralph logs TASK-ID` is for. Each check is named individually only
+     * when there is more than one of them, since a single check's summary says
+     * the same thing the headline already did.
+     *
+     * @return list<string>
+     */
+    private function checks(GenerationRecord $record, ?Journal $journal): array
+    {
+        if ($journal === null) {
+            return [];
+        }
+
+        $attempt = $journal->attempts()->latestFor($record);
+
+        if ($attempt === null) {
+            return [];
+        }
+
+        $report = $journal->verifications()->reportFor($attempt);
+
+        if ($report === null) {
+            // Said rather than left out. A pass with no verdict behind it is
+            // the case where an unchecked box is right and a reader would
+            // otherwise go looking for the failing check that explains it.
+            return [sprintf('checks: none ran against attempt %d', $attempt->number())];
+        }
+
+        $notes = [sprintf('checks: %s', $report->describe())];
+
+        if ($report->count() > 1) {
+            foreach ($report->details() as $detail) {
+                $notes[] = '  ' . $detail;
+            }
         }
 
         return $notes;
