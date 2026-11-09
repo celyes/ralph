@@ -11,6 +11,7 @@ use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\Tests\Fixture\FixtureStep;
 use Celyes\RalphPhp\Tests\Support\Git;
+use Celyes\RalphPhp\Tests\Support\JsonDocument;
 use Celyes\RalphPhp\Tests\Support\LoopProject;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
@@ -93,6 +94,74 @@ final class RunCommandTest extends TestCase
         self::assertNotNull($run);
         self::assertSame('fixture', $run->agent()->name());
         self::assertSame(LifecycleState::Completed, $run->state());
+    }
+
+    /**
+     * The same run, written for a program: the event stream another process
+     * follows while the run is going on (PROJECT.md section I, item 3).
+     *
+     * Through the binary rather than against the runner, because what is worth
+     * pinning is that a real `ralph run` leaves the file behind at the path a
+     * supervising process would be told to watch — the stream's own behaviour
+     * is {@see \Celyes\RalphPhp\Tests\Event\EventStreamTest}.
+     */
+    #[Test]
+    public function it_writes_the_runs_events_as_json_lines(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK])
+            ->withConfiguration();
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+
+        $events = $this->project->events();
+
+        self::assertSame(
+            ['run.started', 'task.started', 'task.finished', 'run.finished'],
+            array_map(static fn (JsonDocument $event): string => $event->string('event'), $events),
+            $result->describe(),
+        );
+
+        $run = $this->project->journal()->runs()->latest();
+        self::assertNotNull($run);
+
+        // Every line carries the run the state store recorded, which is what a
+        // consumer correlates the stream by, and the sequence that orders it.
+        self::assertSame(
+            array_fill(0, 4, $run->runId()),
+            array_map(static fn (JsonDocument $event): string => $event->string('run'), $events),
+            $result->describe(),
+        );
+        self::assertSame(
+            [1, 2, 3, 4],
+            array_map(static fn (JsonDocument $event): int => $event->integer('seq'), $events),
+        );
+        self::assertSame(
+            array_fill(0, 4, 1),
+            array_map(static fn (JsonDocument $event): int => $event->integer('schema'), $events),
+        );
+
+        // The outcomes are the words the store uses, not a second vocabulary:
+        // the task's lifecycle state and the run's stop kind.
+        self::assertSame('completed', $events[2]->string('outcome'), $result->describe());
+        self::assertSame('finished', $events[3]->string('outcome'), $result->describe());
+
+        // The task is named on the task lines and on neither of the run's.
+        self::assertTrue($events[0]->isNull('task'), $result->describe());
+        self::assertTrue($events[3]->isNull('task'), $result->describe());
+        self::assertSame($events[1]->string('task'), $events[2]->string('task'));
+        self::assertMatchesRegularExpression('/^TASK-[0-9A-F]{8}$/', $events[1]->string('task'));
+
+        // Enough of the pass's own record to act on without opening the
+        // database: the commit it produced, and the branch it is on.
+        self::assertSame(
+            $this->project->headOf($this->project->taskBranches()[0]),
+            $events[2]->string('data.commit'),
+            $result->describe(),
+        );
     }
 
     /**

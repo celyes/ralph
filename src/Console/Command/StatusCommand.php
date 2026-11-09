@@ -14,6 +14,7 @@ use Celyes\RalphPhp\Run\Journal;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\State\StateBootstrap;
+use Celyes\RalphPhp\Support\Json;
 use Celyes\RalphPhp\Tasks\ChecklistReader;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskList;
@@ -54,11 +55,28 @@ use Celyes\RalphPhp\Tasks\TaskList;
  * A diagnostic that only works once everything is already working is not worth
  * having.
  *
- * `status --json` and the structured event stream are PROJECT.md section I,
- * item 3, and are not here yet.
+ * **`--json` is the same report for a program** (PROJECT.md section I, item 3).
+ * The table above is prose: it abbreviates a commit to twelve characters, cuts a
+ * long description, and is reworded whenever a clearer wording is found. The
+ * document `--json` prints is the same facts unabbreviated, with a schema
+ * version on it, for a wrapper script or an editor extension that has to act on
+ * them. The run's own progress as it happens is the event stream
+ * ({@see \Celyes\RalphPhp\Event\EventStream}); this is the state it left behind.
  */
 final class StatusCommand extends ProjectCommand
 {
+    /**
+     * Version of the `--json` document this build prints.
+     *
+     * Its own number, moved independently of the event stream's
+     * ({@see \Celyes\RalphPhp\Event\Event::SCHEMA}): the two are different
+     * documents read by different code, and tying them together would mean
+     * every change to one announcing a change to the other. Bumped when a field
+     * is removed or its meaning changes; a field being added is not something a
+     * reader has to be told about.
+     */
+    private const int SCHEMA = 1;
+
     /**
      * Characters of a task description shown in the table.
      */
@@ -85,10 +103,18 @@ final class StatusCommand extends ProjectCommand
     /**
      * @return list<string>
      */
+    protected function options(): array
+    {
+        return ['json'];
+    }
+
+    /**
+     * @return list<string>
+     */
     public function help(): array
     {
         return [
-            'Usage: ralph status',
+            'Usage: ralph status [--json]',
             '',
             'Prints, for the project in the current directory:',
             '',
@@ -101,6 +127,13 @@ final class StatusCommand extends ProjectCommand
             'A task checked off by a verified run is reported as the runner\'s; one ticked by',
             'hand is reported as yours, because a box with no commit behind it is not work',
             'this package can vouch for.',
+            '',
+            'Options:',
+            '',
+            '  --json  Print the same report as one JSON document, with a schema version,',
+            '          unabbreviated commit SHAs and full task descriptions, for a script',
+            '          to read. Problems still go to standard error, so the document on',
+            '          standard output stays machine-readable.',
             '',
             'Nothing is written and no agent is started, so this is safe to run at any time,',
             'including while a run is going on in another terminal.',
@@ -116,11 +149,33 @@ final class StatusCommand extends ProjectCommand
 
         $configuration = $this->configurationOrDefaults();
         $journal = $this->journal($configuration);
-        $tasks = $this->tasks($configuration, $journal, $output);
-
-        $this->reportProject($configuration, $tasks, $output);
-
+        $reading = $this->tasks($configuration, $journal, $output);
+        $tasks = $reading['tasks'];
         $run = $journal?->runs()->latest();
+
+        // The same facts, printed for whoever asked. Both renderings read the
+        // store the same way and both return the passes they read, so the exit
+        // status cannot depend on which one was asked for.
+        $passes = $input->hasOption('json')
+            ? $this->printDocument($configuration, $tasks, $reading['problem'], $run, $journal, $output)
+            : $this->printReport($configuration, $tasks, $run, $journal, $output);
+
+        return $this->status($run, $passes);
+    }
+
+    /**
+     * The report as a person reads it.
+     *
+     * @return list<GenerationRecord> the passes behind the rows
+     */
+    private function printReport(
+        Configuration $configuration,
+        TaskList $tasks,
+        ?RunRecord $run,
+        ?Journal $journal,
+        Output $output,
+    ): array {
+        $this->reportProject($configuration, $tasks, $output);
 
         if ($run !== null) {
             $output->line();
@@ -128,9 +183,124 @@ final class StatusCommand extends ProjectCommand
         }
 
         $output->line();
-        $passes = $this->reportTasks($tasks, $journal, $output);
 
-        return $this->status($run, $passes);
+        return $this->reportTasks($tasks, $journal, $output);
+    }
+
+    /**
+     * The report as a program reads it: one JSON document, on standard output.
+     *
+     * Everything the table shows, unabbreviated — the whole commit SHA, the
+     * whole task description, the phase and completion as the stored words
+     * rather than as the sentences they are printed as — plus the run's row and
+     * the verification verdicts behind the rows. A consumer that wants the
+     * sentences can write its own; one that wants the twelve-character SHA
+     * cannot get the other forty-eight back.
+     *
+     * Problems still go to standard error, and the document carries the
+     * checklist's problem as a field as well. `ralph status --json | jq` has to
+     * work on a project whose checklist is missing, which is exactly the project
+     * someone is most likely to be asking about.
+     *
+     * @return list<GenerationRecord> the passes behind the rows
+     */
+    private function printDocument(
+        Configuration $configuration,
+        TaskList $tasks,
+        ?string $problem,
+        ?RunRecord $run,
+        ?Journal $journal,
+        Output $output,
+    ): array {
+        $rows = [];
+        $passes = [];
+
+        foreach ($tasks->all() as $task) {
+            $record = $journal?->generations()->latestFor($task->id());
+
+            if ($record !== null) {
+                $passes[] = $record;
+            }
+
+            $rows[] = $this->taskDocument($task, $tasks, $record, $journal);
+        }
+
+        $output->line(Json::document([
+            'schema' => self::SCHEMA,
+            'project' => [
+                'root' => $configuration->projectRoot(),
+                'configuration' => $configuration->source(),
+                'checklist' => $configuration->tasksPath(),
+                'agent' => $configuration->defaultAgent(),
+                'checklist_problem' => $problem,
+            ],
+            'progress' => [
+                'total' => $tasks->count(),
+                'completed' => $tasks->doneCount(),
+                'remaining' => $tasks->pendingCount(),
+                // The split that makes the count honest, as two numbers rather
+                // than as the clause the table prints: a consumer deciding
+                // whether this project has been verified should not have to
+                // match on a sentence.
+                'verified_here' => count($tasks->runnerVerified()),
+                'ticked_by_hand' => count($tasks->userCompleted()),
+            ],
+            'run' => $run?->toArray(),
+            'tasks' => $rows,
+            // Read off the same arithmetic the exit status uses, so the field
+            // and the status cannot disagree about whether anything is waiting.
+            'needs_attention' => $this->status($run, $passes) === ExitCode::ATTENTION,
+        ]));
+
+        return $passes;
+    }
+
+    /**
+     * One task, as the document states it.
+     *
+     * `state` is null for a task with no recorded pass, because there is no
+     * lifecycle state for work that was never taken on, and `completion` is the
+     * field that is always there: it says `pending`, `user_completed` or
+     * `runner_verified`, which is the distinction a consumer must not lose
+     * (PROJECT.md section C, item 5).
+     *
+     * @return array<string, mixed>
+     */
+    private function taskDocument(
+        Task $task,
+        TaskList $tasks,
+        ?GenerationRecord $record,
+        ?Journal $journal,
+    ): array {
+        $attempt = null;
+        $report = null;
+
+        if ($journal !== null && $record !== null) {
+            $attempt = $journal->attempts()->latestFor($record);
+            $report = $attempt === null ? null : $journal->verifications()->reportFor($attempt);
+        }
+
+        return [
+            'task' => $task->id()->value(),
+            'description' => $task->description(),
+            'line' => $task->line(),
+            'checked' => $task->isChecked(),
+            'completion' => $tasks->completionOf($task->id())->value,
+            'state' => $record?->state()->value,
+            'phase' => $record?->phase()?->value,
+            'generation' => $record?->generation()->number(),
+            'attempts' => $record?->attempts() ?? 0,
+            'branch' => $record?->branch(),
+            'commit' => $record?->commitSha(),
+            'no_change' => $record?->isNoChange(),
+            'push' => $record?->push()->state()->value,
+            'blocker' => $record?->blocker()?->toStorage(),
+            // The attempt the verdicts below belong to, named rather than
+            // implied: "the last one" is only useful if a reader can tell
+            // which one that was.
+            'attempt' => $attempt?->number(),
+            'verification' => $report?->toArray(),
+        ];
     }
 
     /**
@@ -157,14 +327,23 @@ final class StatusCommand extends ProjectCommand
      * A checklist that cannot be read is reported and the command carries on
      * with no tasks: the run section below is still worth printing, and it is
      * often what explains the missing file.
+     *
+     * The problem comes back beside the list as well as going to standard
+     * error, because `--json` prints a document whose reader is not watching
+     * the terminal.
+     *
+     * @return array{tasks: TaskList, problem: ?string}
      */
-    private function tasks(Configuration $configuration, ?Journal $journal, Output $output): TaskList
+    private function tasks(Configuration $configuration, ?Journal $journal, Output $output): array
     {
         try {
-            return TaskList::fromChecklist(
-                $this->checklists->read($configuration),
-                $journal?->tasks()->verified(),
-            );
+            return [
+                'tasks' => TaskList::fromChecklist(
+                    $this->checklists->read($configuration),
+                    $journal?->tasks()->verified(),
+                ),
+                'problem' => null,
+            ];
         } catch (ChecklistException $failure) {
             $output->diagnosticLine('ralph: ' . $failure->getMessage());
 
@@ -172,7 +351,7 @@ final class StatusCommand extends ProjectCommand
                 $output->diagnosticLine('  ' . $hint);
             }
 
-            return TaskList::of([]);
+            return ['tasks' => TaskList::of([]), 'problem' => $failure->getMessage()];
         }
     }
 

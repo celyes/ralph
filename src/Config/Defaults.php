@@ -58,6 +58,17 @@ final class Defaults
     public const string WORKTREES_DIRECTORY = self::RUNTIME_DIRECTORY . '/worktrees';
 
     /**
+     * Append-only stream of what each run did, one JSON object per line.
+     *
+     * Deliberately not a configurable setting, and deliberately not under
+     * `logs/`: the logs directory holds a copy of what other processes printed
+     * and is organised by task, while this is one file, written by this package
+     * only, that a supervising process can follow for the whole project
+     * ({@see \Celyes\RalphPhp\Event\EventStream}).
+     */
+    public const string EVENTS_FILE = self::RUNTIME_DIRECTORY . '/events.jsonl';
+
+    /**
      * SQLite database holding task, attempt, Git and recovery records.
      *
      * Deliberately not a configurable setting. It is the file that says which

@@ -244,6 +244,22 @@ final class LoopProject
     }
 
     /**
+     * The run's event stream, one document per event, in order.
+     *
+     * Read off disk rather than through {@see \Celyes\RalphPhp\Event\EventStream}
+     * so that a test asserts what another program would actually find at the
+     * path it was told to follow.
+     *
+     * @return list<JsonDocument>
+     */
+    public function events(): array
+    {
+        $file = $this->path('.ralph/runtime/events.jsonl');
+
+        return is_file($file) ? JsonDocument::parseLines((string) file_get_contents($file)) : [];
+    }
+
+    /**
      * The subject lines a branch adds to the checkout's history, newest first.
      *
      * The branch's own commits and not its ancestry: a task branch starts from

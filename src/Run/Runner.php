@@ -13,6 +13,7 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\VerificationDrift;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Event\EventStream;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\InterruptionException;
 use Celyes\RalphPhp\Exception\RalphException;
@@ -120,6 +121,16 @@ use Throwable;
  * That one is the lesser of the task timeout and the run's remaining time, so
  * no single attempt can overrun the run's budget and leave it to be noticed at
  * the boundary afterwards.
+ *
+ * **Everything it prints for a person it also writes for a program**
+ * ({@see EventStream}, section I, item 3): that the run started, each task as
+ * it is taken on, how each one came out, and why the run ended. One JSON object
+ * per line, all of them correlated by the run identifier, and the closing line
+ * written whichever way the run ends — including the failure path, so that a
+ * consumer following it can tell a run that crashed from one still going in the
+ * same way the run's row can. A stream that cannot be
+ * written is a note on the terminal and nothing more: the run is the work, and
+ * the stream is a report about it.
  */
 final class Runner
 {
@@ -387,17 +398,48 @@ final class Runner
         // with rather than only that something is running.
         $lock->record($run->runId());
 
-        $this->announce($run, $agent, $base, $run->verification(), $listening, $intent, $previous);
+        // The same run, written for another program (section I, item 3).
+        // Opened here because this is the first point at which there is a run
+        // identifier, and every line of the stream is correlated by that.
+        $events = EventStream::forRun($this->configuration->projectRoot(), $run->runId(), $this->clock);
+
+        // Whether the stream's own trouble has been mentioned already, so that
+        // a stream that could not be opened is not reported twice.
+        $mentioned = $events->hasFailed();
+
+        $this->announce($run, $agent, $base, $run->verification(), $listening, $intent, $previous, $events);
 
         try {
-            return $this->loop($run, $agent, $adapter, $base, $journal, $workbench, $intent, $tasks);
+            $events->runStarted([
+                'intent' => $intent->purpose(),
+                'agent' => $agent->toArray(),
+                'base' => ['reference' => $base->reference(), 'sha' => $base->sha()],
+                'checks' => $run->checkNames(),
+                'resumed_from' => $run->resumedFromRunId(),
+            ]);
+
+            return $this->loop($run, $agent, $adapter, $base, $journal, $workbench, $intent, $events, $tasks);
         } catch (Throwable $failure) {
             // The run row is closed with the reason before the failure goes on
             // to the caller. A run left recorded as `running` by a process that
             // has gone is the state resume cannot tell from a live one.
-            $this->close($journal, $run, $failure);
+            $this->close($journal, $run, $events, $failure);
 
             throw $failure;
+        } finally {
+            // A stream that stopped being written part-way through is said so
+            // once, at the end: a consumer that followed this run would
+            // otherwise be left with a truncated account of it and no way to
+            // tell that from a run that ended there.
+            if ($events->hasFailed() && !$mentioned) {
+                $this->terminal?->line(sprintf(
+                    'note: the event stream %s stopped being written — %s',
+                    $events->path(),
+                    (string) $events->failure(),
+                ));
+            }
+
+            $events->close();
         }
     }
 
@@ -573,6 +615,7 @@ final class Runner
         Journal $journal,
         Workbench $workbench,
         RunIntent $intent,
+        EventStream $events,
         ?TaskList $tasks = null,
     ): RunReport {
         // Read here unless the opening already had to read it: a retry checks
@@ -653,6 +696,11 @@ final class Runner
             $run = $journal->runs()->countIteration($run);
             $started = $this->clock->now();
 
+            $events->taskStarted($task->id(), [
+                'description' => $task->description(),
+                'iteration' => $run->iterations(),
+            ]);
+
             $result = $pass->execute($task, $snapshot);
             $results[] = $result;
 
@@ -662,6 +710,12 @@ final class Runner
             );
 
             $this->report($result);
+
+            // Emitted once the pass has returned, which is once it has written
+            // its own rows: the outcome is the state the store now holds, so a
+            // consumer acting on this line is acting on something durable
+            // rather than on a claim that may yet be revised.
+            $events->taskFinished($result->taskId(), $result->state()->value, $result->toArray());
 
             // The frozen set is what just ran either way; what a worker's edit
             // must not be is unmentioned.
@@ -683,6 +737,18 @@ final class Runner
         $run = $this->endOfRun($journal, $run, $stopped);
 
         $report = RunReport::of($run, $agent, $base, $tasks, $results, $stopped, $drift);
+
+        // After the row was closed, so the run the stream says ended is a run
+        // the store also says ended. The per-task lines above carry the task
+        // detail, so this is the run's own figures and why it stopped.
+        $events->runFinished($stopped->kind()->value, [
+            'stop' => $stopped->toArray(),
+            'completed' => $report->completedCount(),
+            'remaining' => $report->remaining(),
+            'iterations' => $run->iterations(),
+            'active_seconds' => $run->activeSeconds(),
+            'verification_drift' => $drift->toArray(),
+        ]);
 
         $this->terminal?->lines([$report->describe(), '  next: ' . $stopped->nextAction()]);
 
@@ -1018,6 +1084,7 @@ final class Runner
         bool $listening,
         RunIntent $intent,
         ?RunRecord $previous,
+        EventStream $events,
     ): void {
         $lines = [
             sprintf('%s: %s, %s', $run->runId(), $agent->describe(), $intent->describe()),
@@ -1048,6 +1115,18 @@ final class Runner
                 . 'this process without stopping the agent or recording the interruption';
         }
 
+        // Said here, not left to be discovered by whatever was going to read
+        // the stream: a supervising process watching this run needs to know
+        // before the run is under way that there will be nothing to watch. The
+        // run itself is unaffected (section I, item 3; {@see EventStream}).
+        if ($events->hasFailed()) {
+            $lines[] = sprintf(
+                'note: the event stream %s cannot be written — %s',
+                $events->path(),
+                (string) $events->failure(),
+            );
+        }
+
         $this->terminal?->lines($lines);
     }
 
@@ -1072,7 +1151,7 @@ final class Runner
      * one. A failure to close is swallowed, because it would otherwise replace
      * the failure the caller is about to be told about with a less useful one.
      */
-    private function close(Journal $journal, RunRecord $run, Throwable $failure): void
+    private function close(Journal $journal, RunRecord $run, EventStream $events, Throwable $failure): void
     {
         try {
             $current = $journal->runs()->get($run->rowId());
@@ -1089,6 +1168,7 @@ final class Runner
                 $stop = RunStop::interrupted($failure->interruption());
 
                 $journal->runs()->interrupt($current, $stop->reason(), $stop->nextAction(), $stop->kind());
+                $events->runFinished($stop->kind()->value, ['stop' => $stop->toArray()]);
 
                 return;
             }
@@ -1105,6 +1185,12 @@ final class Runner
             );
 
             $journal->runs()->fail($current, $stop->reason(), $stop->nextAction(), $stop->kind());
+
+            // However a run ended, the stream says it ended. A consumer that
+            // saw `run.started` and nothing after it cannot tell a crashed run
+            // from one still going, which is the state this whole method exists
+            // to keep the database out of.
+            $events->runFinished($stop->kind()->value, ['stop' => $stop->toArray()]);
         } catch (Throwable) {
             // Nothing useful can be done here, and the failure that matters is
             // the one on its way out.
