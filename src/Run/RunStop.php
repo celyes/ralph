@@ -208,6 +208,33 @@ final class RunStop
     }
 
     /**
+     * A resume could not put an interrupted pass back in step, so it took
+     * nothing on.
+     *
+     * The same kind of ending as {@see self::decision()} and for the same
+     * reason — somebody has to decide something — but found before the first
+     * task rather than during one. Kept as its own factory because the
+     * reconciliation names the pass rather than the task, and because what a
+     * user is owed here is the reading that stopped it: a worktree they still
+     * have, a branch something else moved, a commit nothing claimed.
+     */
+    public static function unreconciled(Recovery $recovery): self
+    {
+        $blocker = $recovery->blocker();
+
+        return self::of(
+            StopKind::Decision,
+            sprintf(
+                '%s could not be reconciled: %s',
+                $recovery->record()->slug(),
+                $blocker?->label() ?? 'the reconciliation stopped and recorded no reason',
+            ),
+            $recovery->nextAction(),
+            $recovery->record()->task(),
+        );
+    }
+
+    /**
      * The run's own budget is spent.
      *
      * @param int $pending tasks the run never took on, which are untouched and

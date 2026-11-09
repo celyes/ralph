@@ -6,8 +6,12 @@ namespace Celyes\RalphPhp\Console;
 
 use Celyes\RalphPhp\Console\Command\HelpCommand;
 use Celyes\RalphPhp\Console\Command\InitCommand;
-use Celyes\RalphPhp\Console\Command\PlannedCommand;
+use Celyes\RalphPhp\Console\Command\LogsCommand;
 use Celyes\RalphPhp\Console\Command\PreflightCommand;
+use Celyes\RalphPhp\Console\Command\ResumeCommand;
+use Celyes\RalphPhp\Console\Command\RetryCommand;
+use Celyes\RalphPhp\Console\Command\RunCommand;
+use Celyes\RalphPhp\Console\Command\StatusCommand;
 use Celyes\RalphPhp\Console\Command\VersionCommand;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Exception\UsageException;
@@ -39,22 +43,22 @@ final class Application
 
     /**
      * Build the application with the commands this build exposes.
-     *
-     * Commands specified by the product definition but not implemented yet are
-     * registered as {@see PlannedCommand}s so the documented interface is
-     * discoverable and invoking one says so plainly.
      */
     public static function create(?Output $output = null): self
     {
         $registry = new CommandRegistry();
         $help = new HelpCommand($registry);
 
+        // Registered in the order `ralph help` lists them, which is the order
+        // a user meets them in: set the project up, check the environment, run
+        // the loop, then read and continue what it did.
         $registry->add(new InitCommand());
         $registry->add(new PreflightCommand());
-
-        foreach (self::plannedCommands() as $planned) {
-            $registry->add($planned);
-        }
+        $registry->add(new RunCommand());
+        $registry->add(new StatusCommand());
+        $registry->add(new LogsCommand());
+        $registry->add(new ResumeCommand());
+        $registry->add(new RetryCommand());
 
         $registry->add($help);
         $registry->add(new VersionCommand());
@@ -281,100 +285,5 @@ final class Application
         return static function (): void {
             restore_error_handler();
         };
-    }
-
-    /**
-     * Commands defined by the product specification whose implementations are
-     * still ahead on the delegation checklist.
-     *
-     * @return list<PlannedCommand>
-     */
-    private static function plannedCommands(): array
-    {
-        return [
-            new PlannedCommand(
-                'run',
-                'Process pending tasks within the configured limits.',
-                [
-                    'Usage: ralph run [--agent NAME]',
-                    '',
-                    'Selects the next pending task from the checklist, prepares its workspace and',
-                    'context, invokes the configured coding agent, runs the verification commands,',
-                    'commits verified changes, optionally pushes, and checks the task off.',
-                    '',
-                    'Options:',
-                    '  --agent NAME  Use this agent for the run instead of the configured default.',
-                ],
-                'PROJECT.md sections G and I',
-                ['agent'],
-            ),
-            new PlannedCommand(
-                'status',
-                'Display tasks, IDs, state, attempts, branches, and commit references.',
-                [
-                    'Usage: ralph status [--json]',
-                    '',
-                    'Shows the selected agent, each task\'s phase and state, completed and remaining',
-                    'counts, attempt counts, branch names, and check results.',
-                    '',
-                    'Options:',
-                    '  --json  Emit machine-readable output with a schema version.',
-                ],
-                'PROJECT.md section I',
-            ),
-            new PlannedCommand(
-                'logs',
-                'Display a task\'s execution and verification logs.',
-                [
-                    'Usage: ralph logs TASK-ID',
-                    '',
-                    'Prints the worker output and verification output recorded for the given task.',
-                ],
-                'PROJECT.md section I',
-            ),
-            new PlannedCommand(
-                'resume',
-                'Reconcile an interrupted run and continue from its recorded phase.',
-                [
-                    'Usage: ralph resume [--agent NAME]',
-                    '',
-                    'Reconciles worktree, branch and recorded commit state after an interruption and',
-                    'continues with the agent and settings recorded for the original run. An edit to',
-                    'the agent settings in .ralph/config.json since that run was opened is reported',
-                    'and not applied: the task is finished as it was started.',
-                    '',
-                    'A task is picked up at the phase it stopped in, and nothing earlier is repeated.',
-                    'A pass whose commit is made and whose push the remote refused retries the push',
-                    'alone; one whose box could not be written writes only the box. Neither invokes',
-                    'the agent again or creates a second commit.',
-                    '',
-                    'Options:',
-                    '  --agent NAME  Confirm the agent the interrupted run recorded. A resume cannot',
-                    '                change agents, so naming a different one is refused.',
-                    '',
-                    'To use a different agent, reconcile the interrupted work first — "ralph status"',
-                    'shows what is outstanding — and then begin a new run with it:',
-                    '',
-                    '  ralph run --agent NAME',
-                    '',
-                    'A new run starts with the configured limits whole. Tasks earlier runs completed',
-                    'stay completed and are not taken on again, and their commits and attempt history',
-                    'stay attributed to the agent that earned them.',
-                ],
-                'PROJECT.md section H',
-                ['agent'],
-            ),
-            new PlannedCommand(
-                'retry',
-                'Retry a failed or blocked task while preserving its history.',
-                [
-                    'Usage: ralph retry TASK-ID',
-                    '',
-                    'Starts a new attempt for a failed or blocked task, keeping its earlier attempts,',
-                    'logs and blocker details.',
-                ],
-                'PROJECT.md section H',
-            ),
-        ];
     }
 }

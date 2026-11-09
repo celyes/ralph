@@ -42,6 +42,29 @@ final class ExitCode
     public const int SOFTWARE = 70;
 
     /**
+     * The command did what it was asked and stopped with something waiting for
+     * a person: a task blocked on a decision, a task whose attempts were given
+     * up on, or a run that could not carry on.
+     *
+     * Not a failure — whatever was verified is committed and recorded, and the
+     * run wrote its reason and its next action to its own row. It is a status
+     * of its own because a caller that cannot tell "the checklist is done" from
+     * "the run stopped short" would have to read the summary line to find out.
+     *
+     * Which endings those are is {@see \Celyes\RalphPhp\State\StopKind::needsAttention()}
+     * and nothing else: a run that reached a configured limit and a run
+     * somebody stopped are both runs that did exactly what they were asked, so
+     * they end successfully with their next action printed. A command deciding
+     * that again for itself is how a status and a summary line come to disagree.
+     *
+     * One status for all three endings, which is the provisional part: a code
+     * for each of them, documented together, is PROJECT.md section I, item 5.
+     * The value is the conventional sysexits "temporary failure, the user is
+     * invited to retry", which is what each of the three is.
+     */
+    public const int ATTENTION = 75;
+
+    /**
      * The environment or project configuration prevents the command from
      * running: unsupported runtime, missing autoloader, invalid configuration.
      */

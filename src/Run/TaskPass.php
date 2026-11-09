@@ -127,6 +127,16 @@ final class TaskPass
      *        for yet
      * @param Interruptions $interruptions where a stop asked for from outside
      *        the process is noticed between phases
+     * @param int $forgivenAttempts attempts already recorded against the pass
+     *        that this run does not count against the per-task limit — what
+     *        `ralph retry TASK-ID` grants. Zero for a `run` and a `resume`,
+     *        where the limit means what it says: a task is not tried more than
+     *        `limits.attempts_per_task` times because the loop came round
+     *        again. A retry is a person asking for another go at one task, and
+     *        a retry that refused the commonest thing there is to retry — a
+     *        task whose attempts ran out — would be no retry at all. Fixed when
+     *        the pass is built, so a retry grants one allowance rather than an
+     *        endless one.
      */
     public function __construct(
         private readonly Configuration $configuration,
@@ -141,6 +151,7 @@ final class TaskPass
         private readonly ?Output $terminal = null,
         private readonly Clock $clock = new SystemClock(),
         private readonly Interruptions $interruptions = new Interruptions(),
+        private readonly int $forgivenAttempts = 0,
     ) {
     }
 
@@ -257,12 +268,16 @@ final class TaskPass
      * writes the pass's elapsed time only once the pass returns, so between two
      * attempts of the same pass this is the only thing keeping the run's bound
      * true.
+     *
+     * The attempts a retry forgives come off the count rather than being added
+     * to the limit, so that what every message quotes is still the configured
+     * `limits.attempts_per_task` and not a number this pass invented.
      */
     private function budgetFor(GenerationRecord $record, float $spent): ExecutionBudget
     {
         return ExecutionBudget::of(
             $this->configuration->limits(),
-            $record->attempts(),
+            max(0, $record->attempts() - $this->forgivenAttempts),
             $this->activeSeconds() + $spent,
         );
     }

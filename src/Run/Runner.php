@@ -13,20 +13,25 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\VerificationDrift;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\InterruptionException;
 use Celyes\RalphPhp\Exception\RalphException;
+use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\BaseResolver;
 use Celyes\RalphPhp\Git\ControllingCheckout;
 use Celyes\RalphPhp\Process\Interruption;
 use Celyes\RalphPhp\Process\Interruptions;
 use Celyes\RalphPhp\Process\ProcessRunner;
+use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\ChecklistSnapshot;
+use Celyes\RalphPhp\Tasks\Task;
+use Celyes\RalphPhp\Tasks\TaskId;
 use Celyes\RalphPhp\Tasks\TaskList;
 use Celyes\RalphPhp\Verification\Verifier;
 use Throwable;
@@ -40,6 +45,15 @@ use Throwable;
  * each task's half of it is {@see TaskPass}. This class owns what happens
  * *between* tasks: the order, the run row, and the decision to carry on or
  * stop.
+ *
+ * **It is also what `ralph resume` and `ralph retry TASK-ID` are**, because all
+ * three are this loop with a different opening: which agent, whether the run
+ * row is opened or continued, and which tasks are taken on. {@see RunIntent}
+ * holds those three differences and nothing else does, so a resume cannot drift
+ * away from a run in how it locks the repository, freezes its checks, carries
+ * out a task or reports why it stopped. What a resume adds is the
+ * reconciliation of section H, item 5, performed before any agent is invoked;
+ * what a retry adds is a fresh attempt allowance for the one task it names.
  *
  * **Everything that must hold still is settled before the first task.** The
  * user's checkout is inspected, the agent is resolved, the base reference is
@@ -113,9 +127,10 @@ final class Runner
      * What the repository lock records this command as.
      *
      * Written into the lock file so that a second runner's refusal can say
-     * what it is refusing beside.
+     * what it is refusing beside. A resume and a retry record their own
+     * purposes; see {@see RunIntent}.
      */
-    public const string PURPOSE = 'run';
+    public const string PURPOSE = RunIntent::RUN;
 
     public function __construct(
         private readonly Configuration $configuration,
@@ -172,6 +187,55 @@ final class Runner
      */
     public function run(?string $requested = null): RunReport
     {
+        return $this->start(RunIntent::fresh($requested));
+    }
+
+    /**
+     * Continue the run that was interrupted, from the phase it stopped in.
+     *
+     * What `ralph resume` is. The agent and its recorded settings come off the
+     * interrupted run's row rather than out of the configuration, every pass it
+     * left open is reconciled against the repository before it is worked on,
+     * and the iteration and time counters carry over (PROJECT.md section H,
+     * items 3, 5 and 6).
+     *
+     * @param string|null $requested the agent named on the command line, which
+     *        a resume may only use to confirm the one already recorded
+     *
+     * @throws RalphException when there is no run to continue, when the agent
+     *         cannot be the recorded one, when reconciliation needs a person,
+     *         or when a task's outcome could not be recorded
+     */
+    public function resume(?string $requested = null): RunReport
+    {
+        return $this->start(RunIntent::resumed($requested));
+    }
+
+    /**
+     * Try one task again, keeping everything the earlier attempts produced.
+     *
+     * What `ralph retry TASK-ID` is. The pass is continued rather than
+     * replaced, so its attempts, logs, branch and blocker details stay where
+     * they are, and the configured attempt allowance starts again — a task
+     * whose attempts ran out is the commonest thing there is to retry, and a
+     * retry that refused it before invoking anything would be no retry at all.
+     *
+     * @throws RalphException when the task is not one that can be retried, or
+     *         when its outcome could not be recorded
+     */
+    public function retry(TaskId $task, ?string $requested = null): RunReport
+    {
+        return $this->start(RunIntent::retrying($task, $requested));
+    }
+
+    /**
+     * The whole of a run, whichever command asked for it.
+     *
+     * @throws RalphException when the run cannot be set up, or when a task's
+     *         outcome could not be recorded
+     */
+    public function start(RunIntent $intent): RunReport
+    {
         // Before the lock, because a Ctrl+C between taking the lock and
         // installing the handlers would be the one window in which an
         // interruption left a run recorded as running with a lock nobody
@@ -186,10 +250,10 @@ final class Runner
         // noticed after the second agent has started is a conflict that has
         // already done its damage.
         $lock = ($this->lock ?? RepositoryLock::forProject($this->configuration, $this->clock))
-            ->acquire(self::PURPOSE);
+            ->acquire($intent->purpose());
 
         try {
-            return $this->locked($requested, $lock, $listening);
+            return $this->locked($intent, $lock, $listening);
         } finally {
             // The lock goes back only once the worker is accounted for, and the
             // handlers are put back after it: a second Ctrl+C arriving during
@@ -240,7 +304,7 @@ final class Runner
      * @throws RalphException when the run cannot be set up, or when a task's
      *         outcome could not be recorded
      */
-    private function locked(?string $requested, HeldLock $lock, bool $listening): RunReport
+    private function locked(RunIntent $intent, HeldLock $lock, bool $listening): RunReport
     {
         // A lock left behind by a runner that stopped without releasing it has
         // been taken over rather than waited for, and that is worth a line: a
@@ -269,15 +333,29 @@ final class Runner
 
         $this->stopUnlessRunning();
 
-        $agent = (new AgentSelector($this->adapters))->select($this->configuration, $requested);
+        $journal = Journal::of($this->state->open($this->configuration), $this->clock);
+
+        // Read before the agent is resolved, because for a resume it is what
+        // resolves the agent: the recorded one, with the settings it was
+        // invoked through (section H, item 6). Null for every other intent.
+        $previous = $intent->continuesARun() ? $this->resumable($journal) : null;
+
+        $agent = $previous === null
+            ? (new AgentSelector($this->adapters))->select($this->configuration, $intent->agent())
+            : $this->recordedAgent($previous, $intent);
+
         $adapter = $this->adapters->create($agent);
 
-        $base = BaseResolver::forProject($this->configuration, $this->executable, $this->processes)
-            ->resolve();
+        // A continuation keeps the base its predecessor recorded rather than
+        // resolving `git.base` again. The reference routinely moves — it
+        // defaults to `HEAD` — and a resumed pass whose worktree and branch
+        // were made from one commit must not be finished against another.
+        $base = $previous === null
+            ? BaseResolver::forProject($this->configuration, $this->executable, $this->processes)->resolve()
+            : $this->recordedBase($previous);
 
         $this->stopUnlessRunning();
 
-        $journal = Journal::of($this->state->open($this->configuration), $this->clock);
         $workbench = Workbench::forProject(
             $this->configuration,
             $journal,
@@ -286,17 +364,33 @@ final class Runner
             $this->processes,
         );
 
-        $run = $journal->runs()->open($agent, $this->configuration, $base->sha());
+        // A retry's task is named on a command line, and the name is checked
+        // before a run row exists. An identifier that is a typo, or a task
+        // nothing can be retried about, is a usage mistake rather than a run of
+        // this project — and a row recording one would become the project's
+        // latest run, which is what a later `ralph resume` continues: the typo
+        // would hand back the iteration and time counters the interrupted run
+        // had spent (section H, item 3).
+        $tasks = null;
+
+        if ($intent->isRetry()) {
+            $tasks = $this->read($journal, $workbench);
+            $this->selection($tasks, $journal, $intent);
+        }
+
+        $run = $previous === null
+            ? $journal->runs()->open($agent, $this->configuration, $base->sha())
+            : $journal->runs()->resume($previous, $agent, $this->configuration, $base->sha());
 
         // The lock was taken before there was a run to name in it; now there
         // is, so a conflicting runner can be told which run it is conflicting
         // with rather than only that something is running.
         $lock->record($run->runId());
 
-        $this->announce($run, $agent, $base, $run->verification(), $listening);
+        $this->announce($run, $agent, $base, $run->verification(), $listening, $intent, $previous);
 
         try {
-            return $this->loop($run, $agent, $adapter, $base, $journal, $workbench);
+            return $this->loop($run, $agent, $adapter, $base, $journal, $workbench, $intent, $tasks);
         } catch (Throwable $failure) {
             // The run row is closed with the reason before the failure goes on
             // to the caller. A run left recorded as `running` by a process that
@@ -305,6 +399,147 @@ final class Runner
 
             throw $failure;
         }
+    }
+
+    /**
+     * The run a resume continues.
+     *
+     * A row still claiming to be running first, because that is the commonest
+     * thing there is to resume: a runner that crashed or was killed never got
+     * to close its row. The lock is already held by this process, so such a row
+     * cannot belong to a live runner — {@see RepositoryLock} refuses to start
+     * beside one, and refuses to take over from one whose worker it cannot
+     * confirm stopped (section H, items 1 and 4).
+     *
+     * Otherwise the latest run, whatever it says. A run that ended as
+     * `completed` is refused by {@see RunStore::resume()} rather than here, so
+     * that the refusal names the run and quotes why it stopped.
+     *
+     * @throws StateException when the project has never recorded a run
+     */
+    private function resumable(Journal $journal): RunRecord
+    {
+        $run = $journal->runs()->running() ?? $journal->runs()->latest();
+
+        if ($run !== null) {
+            return $run;
+        }
+
+        throw new StateException(
+            'This project has no recorded run, so there is nothing to resume.',
+            [
+                'Run `ralph run` to start one.',
+                '`ralph status` lists what the state store holds.',
+            ],
+        );
+    }
+
+    /**
+     * The agent an interrupted run is continued with: its own.
+     *
+     * {@see AgentContinuity} owns the decision and every refusal around it;
+     * this is where what it found reaches the terminal. The confirmation and
+     * the configuration drift are both printed, because a resume using settings
+     * other than the ones in the file the user is reading should say so.
+     *
+     * @throws RalphException when `--agent` names a different agent, or the
+     *         recorded invocation cannot be carried out by this build
+     */
+    private function recordedAgent(RunRecord $previous, RunIntent $intent): AgentSelection
+    {
+        $continuation = (new AgentContinuity($this->adapters))
+            ->continuation($previous, $this->configuration, $intent->agent());
+
+        foreach ($continuation->lines() as $line) {
+            $this->terminal?->line('  ' . $line);
+        }
+
+        return $continuation->selection();
+    }
+
+    /**
+     * The base a continued run keeps: the commit its predecessor recorded.
+     *
+     * A run whose row holds no base SHA never got as far as resolving one, so
+     * there is nothing of its to keep and the configured reference is resolved
+     * afresh.
+     *
+     * @throws RalphException when the reference cannot be resolved
+     */
+    private function recordedBase(RunRecord $previous): BaseCommit
+    {
+        $sha = $previous->baseSha();
+
+        if ($sha === null) {
+            return BaseResolver::forProject($this->configuration, $this->executable, $this->processes)
+                ->resolve();
+        }
+
+        return BaseCommit::of($previous->baseReference(), $sha);
+    }
+
+    /**
+     * Put every pass the interrupted run left open back in step with the
+     * repository, before any of it is worked on.
+     *
+     * PROJECT.md section H, item 5. Done up front rather than task by task for
+     * one reason: a reconciliation that needs a person has to stop the resume
+     * *before* an agent is invoked on some other task, and a run that invoked
+     * one first would have to be stopped again afterwards.
+     *
+     * Only the two states an interrupted run leaves behind are reconciled. A
+     * `blocked` or `failed` pass stopped for a reason of its own that its row
+     * already records, and {@see LifecycleState::isResumable()} is where that
+     * distinction is kept; a `pending` one never produced anything to be out of
+     * step with.
+     *
+     * @return list<Recovery> in the order the passes were reconciled
+     *
+     * @throws RalphException when the repository cannot be read, or a row
+     *         cannot be written
+     */
+    private function reconcile(Journal $journal, Workbench $workbench, TaskList $tasks): array
+    {
+        $recoveries = [];
+
+        foreach ($tasks->all() as $task) {
+            $record = $journal->generations()->openFor($task->id());
+
+            if ($record === null || !$this->isResumable($record)) {
+                continue;
+            }
+
+            $recovery = $workbench->recovery()->reconcile($record);
+            $recoveries[] = $recovery;
+
+            $this->terminal?->line($recovery->describe());
+            $this->terminal?->line('  next: ' . $recovery->nextAction());
+
+            // A reading that needs a person is recorded on the pass as the
+            // blocker it is, so that `status` and a later retry read the same
+            // reason this terminal was given. The run stops on it — that is the
+            // caller's doing, since a resume that carried on to the next task
+            // would be answering the question by ignoring it.
+            $blocker = $recovery->blocker();
+
+            if (!$recovery->allowsResume() && $blocker !== null) {
+                $journal->generations()->block($recovery->record(), $blocker);
+            }
+        }
+
+        return $recoveries;
+    }
+
+    /**
+     * Whether a pass is one a resume reconciles.
+     *
+     * A pass recorded as `running` by a process that has gone is the crash
+     * case; one recorded as `interrupted` is the Ctrl+C case. Nothing else is
+     * out of step with the repository through no decision of its own.
+     */
+    private function isResumable(GenerationRecord $record): bool
+    {
+        return $record->state() === LifecycleState::Running || $record->state()->isResumable();
     }
 
     /**
@@ -326,7 +561,7 @@ final class Runner
     }
 
     /**
-     * The loop over the checklist's pending tasks.
+     * The loop over the tasks this run is to take on.
      *
      * @throws RalphException when a task's outcome could not be recorded
      */
@@ -337,8 +572,13 @@ final class Runner
         BaseCommit $base,
         Journal $journal,
         Workbench $workbench,
+        RunIntent $intent,
+        ?TaskList $tasks = null,
     ): RunReport {
-        $tasks = $this->read($journal, $workbench);
+        // Read here unless the opening already had to read it: a retry checks
+        // the task it names before a run row is opened, and reading the file
+        // twice would record the same reading twice.
+        $tasks ??= $this->read($journal, $workbench);
         $snapshot = ChecklistSnapshot::of($tasks, $this->configuration->tasksFile());
 
         // Read back off the run's row, not out of the configuration this
@@ -347,6 +587,19 @@ final class Runner
         // `.ralph/config.json` changes what the *next* run requires and nothing
         // about this one (section G, item 3).
         $checks = $run->verification();
+
+        // A resume's first act, before a budget is measured or an agent is
+        // invoked: what the interrupted run left in the repository is put back
+        // in step with what its rows say (section H, item 5).
+        $recoveries = $intent->continuesARun()
+            ? $this->reconcile($journal, $workbench, $tasks)
+            : [];
+
+        $unreconciled = $this->unreconciled($recoveries);
+
+        $selected = $unreconciled === null
+            ? $this->selection($tasks, $journal, $intent)
+            : [];
 
         $pass = new TaskPass(
             $this->configuration,
@@ -361,14 +614,17 @@ final class Runner
             $this->terminal,
             $this->clock,
             $this->interruptions,
+            // A retry grants the configured attempt allowance again; every
+            // other intent spends the one the task has left.
+            $intent->isRetry() ? $this->attemptsAlreadyMade($journal, $selected) : 0,
         );
 
         $limits = $this->configuration->limits();
         $results = [];
-        $stopped = null;
+        $stopped = $unreconciled === null ? null : RunStop::unreconciled($unreconciled);
         $drift = VerificationDrift::none();
 
-        foreach ($tasks->pending() as $task) {
+        foreach ($selected as $task) {
             // Before the budget and before the task: a run that has been asked
             // to stop takes nothing else on. The pass that was already under
             // way when the signal arrived has given way at its own phase
@@ -431,6 +687,142 @@ final class Runner
         $this->terminal?->lines([$report->describe(), '  next: ' . $stopped->nextAction()]);
 
         return $report;
+    }
+
+    /**
+     * The tasks this run takes on, in the order it takes them.
+     *
+     * `run` and `resume` work through the checklist's pending items in file
+     * order (PROJECT.md section C, item 5). `retry` takes on the one task named
+     * and nothing else, so that a task left behind by a stopped run can be
+     * tried again without the rest of the checklist being worked through first.
+     *
+     * @return list<Task>
+     *
+     * @throws RalphException when a retry names a task that cannot be retried
+     */
+    private function selection(TaskList $tasks, Journal $journal, RunIntent $intent): array
+    {
+        $named = $intent->task();
+
+        if ($named === null) {
+            return $tasks->pending();
+        }
+
+        return [$this->retriable($tasks, $journal, $named)];
+    }
+
+    /**
+     * The task a retry names, once it is established that retrying it is a
+     * thing that can happen.
+     *
+     * Four refusals, each with what to do instead:
+     *
+     *  - the checklist does not state the task, so there is nothing to retry
+     *    and the identifier is probably a typo or from another project;
+     *  - the checklist states it as checked, so retrying would be work nobody
+     *    asked for — unticking the box is how a finished task is taken on
+     *    again, as a new pass with its own branch (section C, item 8);
+     *  - the task has never been run, so there are no attempts to preserve and
+     *    `ralph run` is the command that starts one;
+     *  - the pass was interrupted rather than failed, and resuming it finishes
+     *    what it was doing instead of starting an attempt over the top.
+     *
+     * @throws ChecklistException when the checklist does not state the task
+     * @throws StateException     when the task is not in a state a retry
+     *                            continues
+     */
+    private function retriable(TaskList $tasks, Journal $journal, TaskId $named): Task
+    {
+        $task = $tasks->find($named);
+
+        if ($task === null) {
+            throw new ChecklistException(
+                sprintf('%s states no task %s.', $this->configuration->tasksPath(), $named->value()),
+                [
+                    'Task identifiers are generated from the task\'s own words, so an edited task has a '
+                        . 'different one.',
+                    'Run `ralph status` to list the tasks this project has, with their identifiers.',
+                ],
+            );
+        }
+
+        if ($task->isChecked()) {
+            throw new StateException(
+                sprintf('%s is checked off in %s.', $named->value(), $this->configuration->tasksPath()),
+                [
+                    'A retry continues an unfinished pass; a checked task has nothing outstanding.',
+                    sprintf(
+                        'To have the work done again, untick the item in %s and run `ralph run`: it is '
+                        . 'taken on as a new pass with its own branch, and the finished one keeps its '
+                        . 'commit and its evidence.',
+                        $this->configuration->tasksPath(),
+                    ),
+                ],
+            );
+        }
+
+        $record = $journal->generations()->latestFor($named);
+
+        if ($record === null) {
+            throw new StateException(
+                sprintf('%s has never been run, so there is no attempt at it to retry.', $named->value()),
+                ['Run `ralph run` to take it on; it is the next pending task in file order.'],
+            );
+        }
+
+        if ($record->state()->isResumable()) {
+            throw new StateException(
+                sprintf(
+                    '%s was interrupted part-way through %s, not attempted unsuccessfully.',
+                    $named->value(),
+                    $record->phase()?->describe() ?? 'its pass',
+                ),
+                [
+                    'Run `ralph resume` to continue it from where it stopped, with the agent that '
+                        . 'started it: nothing earlier in the pass is repeated and no second commit is made.',
+                    sprintf('`ralph logs %s` shows what the interrupted attempt had got to.', $named->value()),
+                ],
+            );
+        }
+
+        return $task;
+    }
+
+    /**
+     * Attempts a retried pass has already recorded.
+     *
+     * What the retry forgives, so that the task gets the configured allowance
+     * again: see {@see TaskPass}'s `$forgivenAttempts`. Zero when the task has
+     * no open pass, which leaves the budget exactly as a fresh run would
+     * measure it.
+     *
+     * @param list<Task> $selected the tasks the run is taking on, which for a
+     *        retry is the one named
+     */
+    private function attemptsAlreadyMade(Journal $journal, array $selected): int
+    {
+        if (count($selected) !== 1) {
+            return 0;
+        }
+
+        return $journal->generations()->openFor($selected[0]->id())?->attempts() ?? 0;
+    }
+
+    /**
+     * The first reconciliation that will not let the resume go on, if any.
+     *
+     * @param list<Recovery> $recoveries
+     */
+    private function unreconciled(array $recoveries): ?Recovery
+    {
+        foreach ($recoveries as $recovery) {
+            if (!$recovery->allowsResume()) {
+                return $recovery;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -624,12 +1016,27 @@ final class Runner
         BaseCommit $base,
         VerificationSnapshot $checks,
         bool $listening,
+        RunIntent $intent,
+        ?RunRecord $previous,
     ): void {
         $lines = [
-            sprintf('%s: %s', $run->runId(), $agent->describe()),
+            sprintf('%s: %s, %s', $run->runId(), $agent->describe(), $intent->describe()),
             sprintf('base %s', $base->describe()),
             sprintf('checks: %s', $checks->describe()),
         ];
+
+        // What a continuation inherits, said at the start rather than left to
+        // be deduced from a limit that stops the run sooner than the
+        // configuration would suggest (section H, item 3).
+        if ($previous !== null) {
+            $lines[] = sprintf(
+                'continuing %s: %d iteration%s and %ds of its budget already spent',
+                $previous->runId(),
+                $run->carriedIterations(),
+                $run->carriedIterations() === 1 ? '' : 's',
+                $run->carriedSeconds(),
+            );
+        }
 
         // Said once, at the start, and only when it is not true: a user who may
         // have to stop this run should know beforehand that Ctrl+C will end the

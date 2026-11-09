@@ -101,12 +101,7 @@ final class HelpCommand implements CommandInterface
         }
 
         foreach ($this->registry->all() as $command) {
-            $summary = $command->summary();
-            if ($command instanceof PlannedCommand) {
-                $summary .= ' (not implemented yet)';
-            }
-
-            $lines[] = sprintf('  %-' . max($width, 1) . 's  %s', $command->name(), $summary);
+            $lines[] = sprintf('  %-' . max($width, 1) . 's  %s', $command->name(), $command->summary());
         }
 
         return [
