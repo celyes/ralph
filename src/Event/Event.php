@@ -25,6 +25,14 @@ use InvalidArgumentException;
  * has to be told about, and bumping for it would make every addition a breaking
  * release.
  *
+ * **The identifier names the occurrence, and the sequence names the line.**
+ * `(run, seq)` tells two lines apart, which is not the same question as whether
+ * two lines are the same event: the ending of a run reported twice would arrive
+ * under two sequences. `id` is derived from what happened rather than from
+ * where it landed ({@see EventId}), so a consumer that has acted on an event
+ * can skip it however it meets it again — a file re-read from the start, a
+ * replay, a line reported a second time. Section I, item 4.
+ *
  * **The sequence is the order, and the timestamp is not.** Timestamps are
  * written to the second ({@see Timestamp}), and several events of one run
  * routinely share one — a task that failed its preparation starts and finishes
@@ -81,6 +89,7 @@ final class Event
      * @param array<string, mixed> $data
      */
     private function __construct(
+        private readonly EventId $id,
         private readonly int $sequence,
         private readonly Timestamp $at,
         private readonly string $runId,
@@ -100,6 +109,8 @@ final class Event
      * line a consumer cannot use, and writing one is worse than noticing it.
      *
      * @param array<string, mixed> $data
+     * @param string $occurrence which occurrence of this kind, within this run,
+     *        the event reports; see {@see EventId}
      *
      * @throws InvalidArgumentException when the envelope would not be usable
      */
@@ -111,6 +122,7 @@ final class Event
         string $outcome = self::STARTED,
         ?TaskId $task = null,
         array $data = [],
+        string $occurrence = '',
     ): self {
         if ($sequence < 1) {
             throw new InvalidArgumentException('An event sequence starts at 1.');
@@ -138,7 +150,24 @@ final class Event
             ));
         }
 
-        return new self($sequence, $at, $runId, $kind, $task, $outcome, $data);
+        return new self(
+            EventId::of($runId, $kind, $task, $occurrence),
+            $sequence,
+            $at,
+            $runId,
+            $kind,
+            $task,
+            $outcome,
+            $data,
+        );
+    }
+
+    /**
+     * What happened, named so that reporting it twice is detectable.
+     */
+    public function id(): EventId
+    {
+        return $this->id;
     }
 
     public function sequence(): int
@@ -182,6 +211,10 @@ final class Event
     /**
      * The event as a consumer reads it.
      *
+     * `id` leads the fields a consumer keys on, and `schema` leads everything,
+     * because a reader that does not know the version should stop before it
+     * reads anything else.
+     *
      * `task` is present and null for a run-level event rather than left out:
      * one shape for every line is what lets a consumer read the field without
      * asking what kind of event it has.
@@ -192,6 +225,7 @@ final class Event
     {
         return [
             'schema' => self::SCHEMA,
+            'id' => $this->id->value(),
             'seq' => $this->sequence,
             'at' => $this->at->value(),
             'run' => $this->runId,

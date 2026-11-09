@@ -131,6 +131,15 @@ use Throwable;
  * same way the run's row can. A stream that cannot be
  * written is a note on the terminal and nothing more: the run is the work, and
  * the stream is a report about it.
+ *
+ * **And a finishing line is the store's word, not the loop's** ({@see
+ * DurableOutcome}, section I, item 4). The outcome on `task.finished` and
+ * `run.finished` is read back out of the rows the pass or the ending has just
+ * written, so a program that merges a branch or reports a task done on the
+ * strength of one of those lines is acting on what the next process to open the
+ * database will also find. Each line names the occurrence it reports
+ * ({@see \Celyes\RalphPhp\Event\EventId}), so a consumer re-reading the stream
+ * can tell the same event met twice from two events.
  */
 final class Runner
 {
@@ -696,10 +705,17 @@ final class Runner
             $run = $journal->runs()->countIteration($run);
             $started = $this->clock->now();
 
-            $events->taskStarted($task->id(), [
-                'description' => $task->description(),
-                'iteration' => $run->iterations(),
-            ]);
+            $events->taskStarted(
+                $task->id(),
+                [
+                    'description' => $task->description(),
+                    'iteration' => $run->iterations(),
+                ],
+                // Which taking-on of this task the line reports, so that the
+                // identity a consumer deduplicates on names the occurrence
+                // rather than the line (section I, item 4).
+                'iteration:' . $run->iterations(),
+            );
 
             $result = $pass->execute($task, $snapshot);
             $results[] = $result;
@@ -712,10 +728,21 @@ final class Runner
             $this->report($result);
 
             // Emitted once the pass has returned, which is once it has written
-            // its own rows: the outcome is the state the store now holds, so a
-            // consumer acting on this line is acting on something durable
-            // rather than on a claim that may yet be revised.
-            $events->taskFinished($result->taskId(), $result->state()->value, $result->toArray());
+            // its own rows — and the outcome is read back out of those rows
+            // rather than off the result, so that the word a consumer acts on
+            // is the one the store holds and not a claim that may yet be
+            // revised ({@see DurableOutcome}, section I, item 4).
+            $durable = DurableOutcome::ofTask($journal, $result);
+
+            $events->taskFinished(
+                $result->taskId(),
+                $durable->outcome(),
+                ['durable' => $durable->toArray()] + $result->toArray(),
+                // The pass, which is the generation it ended: a task reopened
+                // later, or finalised by a later run, is a different occurrence
+                // and gets its own identity.
+                'generation:' . $result->record()->number(),
+            );
 
             // The frozen set is what just ran either way; what a worker's edit
             // must not be is unmentioned.
@@ -738,10 +765,14 @@ final class Runner
 
         $report = RunReport::of($run, $agent, $base, $tasks, $results, $stopped, $drift);
 
-        // After the row was closed, so the run the stream says ended is a run
-        // the store also says ended. The per-task lines above carry the task
+        // After the row was closed, and read back off it: the run the stream
+        // says ended is a run the store also says ended, with the kind a later
+        // `ralph status` will report. The per-task lines above carry the task
         // detail, so this is the run's own figures and why it stopped.
-        $events->runFinished($stopped->kind()->value, [
+        $ending = DurableOutcome::ofRun($journal, $run, $stopped);
+
+        $events->runFinished($ending->outcome(), [
+            'durable' => $ending->toArray(),
             'stop' => $stopped->toArray(),
             'completed' => $report->completedCount(),
             'remaining' => $report->remaining(),
@@ -1145,6 +1176,24 @@ final class Runner
     }
 
     /**
+     * Say that the run ended, with the kind its row now carries.
+     *
+     * The same gate the ordinary ending goes through ({@see DurableOutcome}),
+     * applied to the two endings a failure produces, so that one path cannot
+     * announce a stop the row does not hold while the other does. Called after
+     * the row has been written, never before.
+     */
+    private function announceEnd(Journal $journal, RunRecord $run, RunStop $stop, EventStream $events): void
+    {
+        $ending = DurableOutcome::ofRun($journal, $run, $stop);
+
+        $events->runFinished($ending->outcome(), [
+            'durable' => $ending->toArray(),
+            'stop' => $stop->toArray(),
+        ]);
+    }
+
+    /**
      * Close the run's row after a failure, without hiding the failure.
      *
      * A run that is already closed is left alone: the first reason is the true
@@ -1168,7 +1217,7 @@ final class Runner
                 $stop = RunStop::interrupted($failure->interruption());
 
                 $journal->runs()->interrupt($current, $stop->reason(), $stop->nextAction(), $stop->kind());
-                $events->runFinished($stop->kind()->value, ['stop' => $stop->toArray()]);
+                $this->announceEnd($journal, $run, $stop, $events);
 
                 return;
             }
@@ -1190,7 +1239,7 @@ final class Runner
             // saw `run.started` and nothing after it cannot tell a crashed run
             // from one still going, which is the state this whole method exists
             // to keep the database out of.
-            $events->runFinished($stop->kind()->value, ['stop' => $stop->toArray()]);
+            $this->announceEnd($journal, $run, $stop, $events);
         } catch (Throwable) {
             // Nothing useful can be done here, and the failure that matters is
             // the one on its way out.

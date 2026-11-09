@@ -165,6 +165,73 @@ final class RunCommandTest extends TestCase
     }
 
     /**
+     * The finishing lines carry the store's word, and each line names the
+     * occurrence it reports (PROJECT.md section I, item 4).
+     *
+     * Through the binary, because the claim being made is about what another
+     * program finds in the file after a real run: that acting on
+     * `task.finished` is acting on something the next process to open the
+     * database will also find, and that meeting the same line twice is
+     * detectable. The gate itself is
+     * {@see \Celyes\RalphPhp\Tests\Run\DurableOutcomeTest}.
+     */
+    #[Test]
+    public function the_finishing_events_carry_what_the_store_holds(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK])
+            ->withConfiguration();
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+
+        $events = $this->project->events();
+        [, , $finished, $ended] = $events;
+
+        $journal = $this->project->journal();
+        $run = $journal->runs()->latest();
+        self::assertNotNull($run);
+
+        // The task's word, read back off the row rather than off the result the
+        // loop was holding, and confirmed as such.
+        self::assertTrue($finished->boolean('data.durable.confirmed'), $result->describe());
+        self::assertSame('completed', $finished->string('outcome'));
+        self::assertSame('completed', $finished->string('data.durable.state'));
+        self::assertSame(
+            $journal->tasks()->verified()->count(),
+            1,
+            'the store agrees the pass was the runner\'s own completion',
+        );
+
+        // Including the tick: a completed pass owes no checklist write, which
+        // is the difference between a task a consumer can act on and one this
+        // package has not finished with.
+        self::assertFalse($finished->boolean('data.durable.checklist_write_owed'));
+        self::assertSame(
+            $this->project->headOf($this->project->taskBranches()[0]),
+            $finished->string('data.durable.commit'),
+        );
+
+        // The run's ending, likewise read back off a row that is closed by the
+        // time the line is written.
+        self::assertTrue($ended->boolean('data.durable.confirmed'), $result->describe());
+        self::assertSame('finished', $ended->string('outcome'));
+        self::assertSame(LifecycleState::Completed->value, $ended->string('data.durable.state'));
+
+        // Four occurrences, four identities: the key a consumer deduplicates on
+        // names what happened, so no two of one run's lines can share one.
+        $ids = array_map(static fn (JsonDocument $event): string => $event->string('id'), $events);
+
+        self::assertCount(4, array_unique($ids), $result->describe());
+        self::assertSame(
+            array_fill(0, 4, true),
+            array_map(static fn (string $id): bool => (bool) preg_match('/^ev_[0-9a-f]{32}$/', $id), $ids),
+        );
+    }
+
+    /**
      * A run that gave up on a task exits with the status that says so.
      *
      * Not a failure of the command — the run did what it was asked and recorded

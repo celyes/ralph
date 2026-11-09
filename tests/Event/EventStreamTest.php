@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Event;
 
 use Celyes\RalphPhp\Event\Event;
+use Celyes\RalphPhp\Event\EventId;
 use Celyes\RalphPhp\Event\EventKind;
 use Celyes\RalphPhp\Event\EventStream;
 use Celyes\RalphPhp\State\Timestamp;
@@ -68,6 +69,10 @@ final class EventStreamTest extends TestCase
 
         self::assertSame([
             'schema' => 1,
+            // Derived from the occurrence rather than from the line it landed
+            // on, which is what lets a consumer recognise an event it has
+            // already acted on ({@see EventId}, section I, item 4).
+            'id' => EventId::of('run-1', EventKind::RunStarted)->value(),
             'seq' => 1,
             'at' => '2026-11-09T10:30:00+00:00',
             'run' => 'run-1',
@@ -80,6 +85,10 @@ final class EventStreamTest extends TestCase
         ], $opened->all());
 
         self::assertSame(2, $finished->integer('seq'));
+        self::assertSame(
+            EventId::of('run-1', EventKind::TaskFinished, TaskId::fromString('TASK-1A2B3C4D'))->value(),
+            $finished->string('id'),
+        );
         self::assertSame('TASK-1A2B3C4D', $finished->string('task'));
         self::assertSame('task.finished', $finished->string('event'));
         self::assertSame('completed', $finished->string('outcome'));
@@ -287,6 +296,94 @@ final class EventStreamTest extends TestCase
 
         self::assertSame('failed', $line->string('outcome'));
         self::assertStringContainsString('the check said', $line->string('data.output'));
+    }
+
+    /**
+     * One occurrence, one line. A repeat is this package reporting the same
+     * thing twice, which would make the stream contradict itself.
+     *
+     * Raised rather than quietly dropped, for the same reason the other
+     * envelope mistakes are: a stream that silently swallowed a second
+     * `run.finished` would hide the bug that produced it, and the bug is in
+     * this package.
+     */
+    #[Test]
+    public function an_occurrence_reported_twice_is_refused(): void
+    {
+        $stream = $this->stream();
+        $stream->runFinished('finished');
+
+        try {
+            $stream->runFinished('finished');
+            self::fail('A second ending for one run must not be written.');
+        } catch (InvalidArgumentException $refusal) {
+            // The sequence the first one went out on, so whoever reads the
+            // failure can go and look at the line already in the file.
+            self::assertStringContainsString('already written', $refusal->getMessage());
+            self::assertStringContainsString('at sequence 1', $refusal->getMessage());
+        }
+
+        $stream->close();
+
+        self::assertCount(1, $this->lines(), 'the refusal must not have left a second line');
+    }
+
+    /**
+     * Two goes at one task are two occurrences, and the discriminator is what
+     * says so.
+     *
+     * Without it the second attempt would carry the identity of the first and
+     * be refused as a repeat — so this is the case that keeps the identity
+     * naming the occurrence rather than the kind.
+     */
+    #[Test]
+    public function two_goes_at_one_task_are_two_occurrences(): void
+    {
+        $stream = $this->stream();
+        $task = TaskId::fromString('TASK-1A2B3C4D');
+
+        $first = $stream->taskStarted($task, [], 'iteration:1');
+        $again = $stream->taskStarted($task, [], 'iteration:2');
+        $stream->close();
+
+        self::assertNotNull($first);
+        self::assertNotNull($again);
+        self::assertNotSame($first->id()->value(), $again->id()->value());
+        self::assertCount(2, $this->lines());
+    }
+
+    /**
+     * The identity is the occurrence's, so it is the same from a second
+     * process — which is the whole point of it.
+     *
+     * This is the case the deduplication is actually for. A run reported again
+     * by another process cannot be refused here, because nothing in this
+     * object knows what another one wrote; what makes the repeat harmless is
+     * that both lines carry one identity, so a consumer that acted on the
+     * first drops the second on sight.
+     */
+    #[Test]
+    public function the_same_occurrence_is_named_the_same_from_another_process(): void
+    {
+        $first = EventStream::appendingTo($this->path(), 'run-1', $this->clock);
+        $first->runStarted(['agent' => 'codex']);
+        $first->close();
+
+        // A second process, the same run: a different object, and a different
+        // payload, since what the identity names is the occurrence and not the
+        // line.
+        $second = EventStream::appendingTo($this->path(), 'run-1', $this->clock);
+        $second->runStarted(['agent' => 'claude']);
+        $second->close();
+
+        $lines = $this->lines();
+
+        self::assertCount(2, $lines);
+        self::assertSame($lines[0]->string('id'), $lines[1]->string('id'));
+
+        // And the sequence does not identify it: both lines are their own run's
+        // first, which is exactly why `(run, seq)` is not the key.
+        self::assertSame([1, 1], self::integers($lines, 'seq'));
     }
 
     private function stream(): EventStream

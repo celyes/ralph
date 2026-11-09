@@ -10,6 +10,7 @@ use Celyes\RalphPhp\State\Timestamp;
 use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\TaskId;
+use InvalidArgumentException;
 
 /**
  * What a run did, as JSON lines another program can follow.
@@ -41,6 +42,14 @@ use Celyes\RalphPhp\Tasks\TaskId;
  * stream to mention, and nothing is written afterwards — a stream with a hole in
  * the middle would be worse than one that stops, because a consumer cannot see
  * the hole.
+ *
+ * **A line is written once under one identity.** Every event carries the name
+ * of the occurrence it reports ({@see EventId}, section I, item 4), and this
+ * object remembers the names it has used for the run so that two lines of one
+ * stream can never claim to be the same event. A repeat is not a user's
+ * mistake and not a filesystem's: it is this package reporting one occurrence
+ * twice, which would make the stream contradict itself, so it is raised like
+ * the other envelope mistakes {@see Event::of()} refuses rather than written.
  *
  * **The run's events are numbered here.** The sequence is this object's, which
  * is what makes it gapless: it counts the events of one run in the order they
@@ -75,6 +84,15 @@ final class EventStream
      * What went wrong the first time something did, if anything has.
      */
     private ?string $failure = null;
+
+    /**
+     * The identity of every event written for this run, and the line it went
+     * out on, so that a repeat can be refused and can say where the first one
+     * is.
+     *
+     * @var array<string, int>
+     */
+    private array $identities = [];
 
     private function __construct(
         private readonly string $path,
@@ -165,10 +183,12 @@ final class EventStream
      * A task has been taken on.
      *
      * @param array<string, mixed> $data
+     * @param string $occurrence which taking-on of this task within the run,
+     *        which is the iteration it was spent on
      */
-    public function taskStarted(TaskId $task, array $data = []): ?Event
+    public function taskStarted(TaskId $task, array $data = [], string $occurrence = ''): ?Event
     {
-        return $this->append(EventKind::TaskStarted, Event::STARTED, $task, $data);
+        return $this->append(EventKind::TaskStarted, Event::STARTED, $task, $data, $occurrence);
     }
 
     /**
@@ -176,14 +196,25 @@ final class EventStream
      *
      * @param string $outcome the pass's lifecycle state
      * @param array<string, mixed> $data
+     * @param string $occurrence which pass over this task the line reports,
+     *        which is the execution generation it ended
      */
-    public function taskFinished(TaskId $task, string $outcome, array $data = []): ?Event
-    {
-        return $this->append(EventKind::TaskFinished, $outcome, $task, $data);
+    public function taskFinished(
+        TaskId $task,
+        string $outcome,
+        array $data = [],
+        string $occurrence = '',
+    ): ?Event {
+        return $this->append(EventKind::TaskFinished, $outcome, $task, $data, $occurrence);
     }
 
     /**
      * The run ended, and this is why.
+     *
+     * No discriminator: a run is opened once and ends once, so its two
+     * run-level events are each the only one of their kind the run has, and
+     * anything that reported either of them twice would be reporting the same
+     * occurrence twice.
      *
      * @param string $outcome the run's stop kind
      * @param array<string, mixed> $data
@@ -201,9 +232,19 @@ final class EventStream
      * run to get on with.
      *
      * @param array<string, mixed> $data
+     * @param string $occurrence which occurrence of this kind, within this run,
+     *        is being reported; see {@see EventId}
+     *
+     * @throws InvalidArgumentException when the envelope would not be usable, or
+     *         when this run has already reported the same occurrence
      */
-    public function append(EventKind $kind, string $outcome, ?TaskId $task = null, array $data = []): ?Event
-    {
+    public function append(
+        EventKind $kind,
+        string $outcome,
+        ?TaskId $task = null,
+        array $data = [],
+        string $occurrence = '',
+    ): ?Event {
         if ($this->failure !== null || !is_resource($this->handle)) {
             return null;
         }
@@ -216,13 +257,29 @@ final class EventStream
             $outcome,
             $task,
             $data,
+            $occurrence,
         );
+
+        $identity = $event->id()->value();
+        $already = $this->identities[$identity] ?? null;
+
+        if ($already !== null) {
+            throw new InvalidArgumentException(sprintf(
+                'A "%s" event with the identity %s was already written for run %s at sequence %d; '
+                    . 'writing it again would make the stream report one occurrence as two.',
+                $kind->value,
+                $identity,
+                $this->runId,
+                $already,
+            ));
+        }
 
         if (!$this->put($event->encode() . "\n")) {
             return null;
         }
 
         $this->sequence = $event->sequence();
+        $this->identities[$identity] = $event->sequence();
 
         return $event;
     }
