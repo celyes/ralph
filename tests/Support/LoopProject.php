@@ -111,6 +111,37 @@ final class LoopProject
     }
 
     /**
+     * Write the checklist verbatim, and commit it as the user's own file.
+     *
+     * For the documents {@see withTasks()} cannot produce: prose around the
+     * tasks, details indented under them, a worked example in a code fence,
+     * Windows line endings, a missing final newline. What a run does to such a
+     * file is only assertable if the test wrote the file byte for byte.
+     */
+    public function withChecklist(string $markdown): self
+    {
+        $this->project->write('.ralph/tasks.md', $markdown);
+        $this->project->write('.ralph/CONTEXT.md', "# Conventions\n\nKeep it small.\n");
+
+        return $this->committing();
+    }
+
+    /**
+     * Rewrite the checklist between two runs, as the user would.
+     *
+     * Left uncommitted on purpose. The checklist is a managed path, so an
+     * uncommitted edit to it is not the unrelated work a run refuses to start
+     * over — and a run has already left its own tick in the file by this point,
+     * which is the state the next run really meets.
+     */
+    public function editChecklist(string $markdown): self
+    {
+        $this->project->write('.ralph/tasks.md', $markdown);
+
+        return $this;
+    }
+
+    /**
      * Write `.ralph/config.json`, and commit it as the user's own file.
      *
      * @param array<string, mixed> $overrides merged into the settings every
