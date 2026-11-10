@@ -80,6 +80,26 @@ final class AdapterRegistry implements AdapterCatalog
     }
 
     /**
+     * The adapters one project can execute: the shipped ones, and whatever its
+     * `.ralph/adapters.php` registers.
+     *
+     * The composition the class description gives, in the one place that
+     * performs it, so that every command which can start an agent sees the
+     * same set of adapters. A project with no registration file gets a default
+     * registry and no error, which is almost every project.
+     *
+     * @throws ConfigurationException when the registration file cannot be used
+     */
+    public static function forProject(string $projectRoot): self
+    {
+        $registry = self::default();
+
+        AdapterRegistrationFile::in($projectRoot)->registerInto($registry);
+
+        return $registry;
+    }
+
+    /**
      * Add a project's adapter.
      *
      * @throws ConfigurationException when the provider's name is unusable, is

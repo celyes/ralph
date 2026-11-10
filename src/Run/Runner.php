@@ -169,12 +169,22 @@ final class Runner
     }
 
     /**
-     * A runner for a project, with the adapters the package ships.
+     * A runner for a project, with the adapters that project can execute.
+     *
+     * The shipped adapters and whatever the project's `.ralph/adapters.php`
+     * registers ({@see AdapterRegistry::forProject()}), because an agent
+     * configured for an adapter the project itself provides is a run this
+     * package is supposed to be able to carry out (PROJECT.md section E,
+     * item 3) and the loop is where that happens. A caller that has already
+     * built a registry passes it instead.
      *
      * @param Verifier $verifier what runs the configured checks; supplied
      *        rather than constructed, because the loop's correctness does not
      *        depend on how a check is executed and its tests must not depend on
      *        a real test suite being installed
+     *
+     * @throws \Celyes\RalphPhp\Exception\ConfigurationException when the
+     *         project's registration file cannot be used
      */
     public static function forProject(
         Configuration $configuration,
@@ -187,7 +197,7 @@ final class Runner
         return new self(
             $configuration,
             $verifier,
-            $adapters ?? AdapterRegistry::default(),
+            $adapters ?? AdapterRegistry::forProject($configuration->projectRoot()),
             new StateBootstrap(),
             $terminal,
             $clock ?? new SystemClock(),

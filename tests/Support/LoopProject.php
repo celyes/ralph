@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Support;
 
+use Celyes\RalphPhp\Agent\BuiltInAdapters;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
+use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Run\Journal;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\Tests\Fixture\FixtureStep;
@@ -44,6 +46,26 @@ final class LoopProject
      */
     private const int STOP_TIMEOUT_SECONDS = 30;
 
+    /**
+     * The agents installed beside the default one, by the name they are
+     * configured under.
+     *
+     * Each has its own directory under {@see self::$tools}, because a worker's
+     * journal is named after the program and two workers sharing a directory
+     * would share the record of which of them was run — which is the one thing
+     * a case about agent selection is asking about.
+     *
+     * @var array<string, FixtureWorker>
+     */
+    private array $agents = [];
+
+    /**
+     * The adapter each installed agent's entry names, by agent name.
+     *
+     * @var array<string, string>
+     */
+    private array $adapters = [];
+
     private function __construct(
         private readonly TemporaryProject $project,
         /**
@@ -82,6 +104,92 @@ final class LoopProject
     public function withWorker(FixtureStep ...$steps): self
     {
         FixtureWorker::install($this->tools, array_values($steps));
+
+        return $this;
+    }
+
+    /**
+     * Install a second, third or fourth agent, configured under its own name.
+     *
+     * For the cases where *which* agent ran is the question: each installed
+     * agent is a separate program with a journal of its own, so "the selected
+     * one did the work and the other was not started" is a thing a test can
+     * read rather than infer from an agent that would have failed. The entry
+     * appears in `agents` automatically ({@see self::settings()}), so a case
+     * only has to say which of them is the default.
+     *
+     * @param string $name the key in `agents`, and the value of `--agent`
+     * @param list<FixtureStep> $steps what it does on each successive
+     *        invocation, the last one repeating
+     * @param string $adapter the adapter the entry names, for an agent whose
+     *        adapter the project registers itself
+     *
+     * @throws RuntimeException when the directory cannot be created
+     */
+    public function withAgent(string $name, array $steps = [], string $adapter = BuiltInAdapters::CODEX): self
+    {
+        $directory = $this->tools . DIRECTORY_SEPARATOR . $name;
+
+        if (!is_dir($directory) && !mkdir($directory, 0o700, true) && !is_dir($directory)) {
+            throw new RuntimeException('Unable to create ' . $directory . '.');
+        }
+
+        $this->agents[$name] = FixtureWorker::install($directory, $steps);
+        $this->adapters[$name] = $adapter;
+
+        return $this;
+    }
+
+    /**
+     * The installed agent of that name, to ask what it was asked to do.
+     *
+     * @throws RuntimeException when no agent of that name was installed
+     */
+    public function agent(string $name): FixtureWorker
+    {
+        return $this->agents[$name]
+            ?? throw new RuntimeException('No agent named "' . $name . '" was installed in this project.');
+    }
+
+    /**
+     * Write the project's own `.ralph/adapters.php`, and commit it as the
+     * user's file.
+     *
+     * The body is the `return` statement; the autoloader line the documented
+     * example opens with is written here, because a project whose provider
+     * classes are not loadable is a different case from one whose registration
+     * file is wrong.
+     *
+     * @param string $body the PHP returning a list of
+     *        {@see \Celyes\RalphPhp\Agent\AdapterProvider} instances
+     */
+    public function withAdapterRegistration(string $body): self
+    {
+        $this->project->write(Defaults::ADAPTERS_FILE, implode("\n", [
+            '<?php',
+            '',
+            'declare(strict_types=1);',
+            '',
+            'require ' . var_export(Paths::inPackage('vendor/autoload.php'), true) . ';',
+            '',
+            $body,
+            '',
+        ]));
+
+        return $this->committing();
+    }
+
+    /**
+     * Delete the registration file between two runs, as the user would.
+     *
+     * Left uncommitted for the reason {@see editConfiguration()} is: `.ralph/`
+     * is a managed path. It is how a case states "the code behind this adapter
+     * is no longer registered", which is the only way to show that the
+     * registration file was what made the agent usable.
+     */
+    public function withoutAdapterRegistration(): self
+    {
+        @unlink($this->path(Defaults::ADAPTERS_FILE));
 
         return $this;
     }
@@ -392,14 +500,23 @@ final class LoopProject
      */
     private function settings(array $overrides): array
     {
+        $agents = [
+            'fixture' => [
+                'adapter' => BuiltInAdapters::CODEX,
+                'executable' => $this->tools . DIRECTORY_SEPARATOR . FixtureWorker::NAME,
+            ],
+        ];
+
+        foreach ($this->agents as $name => $worker) {
+            $agents[$name] = [
+                'adapter' => $this->adapters[$name] ?? BuiltInAdapters::CODEX,
+                'executable' => $worker->path(),
+            ];
+        }
+
         return array_replace_recursive([
             'agent' => 'fixture',
-            'agents' => [
-                'fixture' => [
-                    'adapter' => 'codex',
-                    'executable' => $this->tools . DIRECTORY_SEPARATOR . FixtureWorker::NAME,
-                ],
-            ],
+            'agents' => $agents,
             'checks' => [['name' => 'tests', 'command' => ['php', '-v'], 'timeout' => 30]],
             // One attempt per task unless a case asks for more: a failing case
             // left at the default of three would quietly become three cases,

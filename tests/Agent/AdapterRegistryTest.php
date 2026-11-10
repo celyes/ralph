@@ -249,6 +249,35 @@ final class AdapterRegistryTest extends TestCase
         );
     }
 
+    /**
+     * A project's registry is the shipped adapters plus its own file's.
+     *
+     * The composition every command that can start an agent goes through, in
+     * one place so that the loop and the preflight checks cannot disagree
+     * about which adapters exist: a project with no `.ralph/adapters.php` gets
+     * the built-ins and no error, and a project with one gets its adapter
+     * alongside them, after them, where it cannot shadow one.
+     */
+    #[Test]
+    public function a_projects_registry_holds_the_shipped_adapters_and_its_own(): void
+    {
+        self::assertSame(
+            AdapterRegistry::default()->names(),
+            AdapterRegistry::forProject($this->project->root())->names(),
+            'A project with no registration file is not a project with no adapters.',
+        );
+
+        $this->project->write(Defaults::ADAPTERS_FILE, sprintf(
+            "<?php\n\nreturn [new \\%s('acme')];\n",
+            NamedAdapterProvider::class,
+        ));
+
+        self::assertSame(
+            [...AdapterRegistry::default()->names(), 'acme'],
+            AdapterRegistry::forProject($this->project->root())->names(),
+        );
+    }
+
     #[Test]
     public function every_shipped_provider_answers_to_a_declared_built_in_name(): void
     {

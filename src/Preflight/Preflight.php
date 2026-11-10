@@ -127,10 +127,7 @@ final class Preflight
             return $this->adapters;
         }
 
-        $registry = AdapterRegistry::default();
-        AdapterRegistrationFile::in($configuration->projectRoot())->registerInto($registry);
-
-        return $registry;
+        return AdapterRegistry::forProject($configuration->projectRoot());
     }
 
     /**
