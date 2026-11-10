@@ -9,6 +9,7 @@ use Celyes\RalphPhp\Process\ExecutableFinder;
 use Celyes\RalphPhp\Process\ProcessResult;
 use Celyes\RalphPhp\Process\ProcessRunner;
 use Celyes\RalphPhp\State\FailureEvidence;
+use Celyes\RalphPhp\Support\Secrets;
 
 /**
  * An adapter that runs a coding agent as a separate process.
@@ -67,7 +68,10 @@ use Celyes\RalphPhp\State\FailureEvidence;
  * command line is something only that agent's CLI knows. Together that is
  * PROJECT.md section E, item 8 — and the credential half of it is structural:
  * values live in {@see AgentEnvironment} and reach `proc_open`, while
- * everything this class writes to a log or hands upward is variable names.
+ * everything this class writes to a log or hands upward is variable names. The
+ * agent's own output is the one thing it cannot make that promise about by
+ * construction — an agent may print whatever it likes, including its key — so
+ * what is captured is redacted before it is interpreted (section I, item 6).
  *
  * **Telling the three outcomes apart is offered, not left to each adapter.**
  * Item 5 — a candidate implementation, a request for human input, an execution
@@ -117,7 +121,7 @@ abstract class ProcessAdapter implements ExecutionAdapter
         $environment = $this->authenticate($request);
         $output->note('running ' . $invocation->describe());
 
-        $result = $this->processes->run(
+        $captured = $this->processes->run(
             $invocation->command(),
             // The one working directory this process may have. Not a default,
             // not the runner's own: see the class description.
@@ -134,6 +138,15 @@ abstract class ProcessAdapter implements ExecutionAdapter
             // this returns, and whoever opened it closes it.
             $output,
         );
+
+        // The one process in this package that is handed a credential is the
+        // one whose output is read back into evidence, claims and blockers, so
+        // the values go out here, once, before anything is interpreted
+        // (PROJECT.md section I, item 6). What was streamed to the terminal and
+        // to the attempt's log as it arrived is a verbatim copy and stays one;
+        // {@see \Celyes\RalphPhp\Log\LogFile} says why, and
+        // `ralph logs --help` documents it.
+        $result = $captured->redactedWith($environment->secrets());
 
         // A run the user stopped. Before the timeout below and before anything
         // is interpreted, because an attempt that was cancelled has no verdict
@@ -488,6 +501,23 @@ abstract class ProcessAdapter implements ExecutionAdapter
         // every attempt's log.
         if ($environment->isDeclared()) {
             $request->output()->note(sprintf('%s %s', $agent->name(), $environment->describe()));
+        }
+
+        // A declared variable holding something too short to redact is said out
+        // loud, because the user who declared it is entitled to assume it is
+        // being treated as a credential and it is not: replacing every
+        // occurrence of a handful of characters would corrupt the diagnostics
+        // it was meant to protect ({@see Secrets::MINIMUM_LENGTH}).
+        $unredactable = $environment->secrets()->unredactable();
+
+        if ($unredactable !== []) {
+            $request->output()->note(sprintf(
+                '%s %s set to fewer than %d characters, so %s value is not redacted from what Ralph PHP writes',
+                implode(', ', $unredactable),
+                count($unredactable) === 1 ? 'is' : 'are',
+                Secrets::MINIMUM_LENGTH,
+                count($unredactable) === 1 ? 'its' : 'their',
+            ));
         }
 
         return $environment;

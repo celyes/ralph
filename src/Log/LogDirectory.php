@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Log;
 use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Config\Path;
 use Celyes\RalphPhp\Exception\FilesystemException;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Tasks\TaskGeneration;
 use InvalidArgumentException;
 
@@ -100,8 +101,15 @@ final class LogDirectory
      */
     private const int ATTEMPT_DIGITS = 2;
 
-    public function __construct(private readonly string $directory)
-    {
+    /**
+     * @param Secrets|null $secrets what the logs this opens keep out of their
+     *        own notes — the worker's output is kept as it arrived
+     *        ({@see LogFile})
+     */
+    public function __construct(
+        private readonly string $directory,
+        private readonly ?Secrets $secrets = null,
+    ) {
     }
 
     /**
@@ -115,9 +123,9 @@ final class LogDirectory
     /**
      * The logs of the project rooted at the given path.
      */
-    public static function in(string $projectRoot): self
+    public static function in(string $projectRoot, ?Secrets $secrets = null): self
     {
-        return new self(self::directoryIn($projectRoot));
+        return new self(self::directoryIn($projectRoot), $secrets);
     }
 
     /**
@@ -267,6 +275,6 @@ final class LogDirectory
      */
     public function openAgentLog(TaskGeneration $generation, int $attempt): LogFile
     {
-        return LogFile::appendTo($this->agentLog($generation, $attempt));
+        return LogFile::appendTo($this->agentLog($generation, $attempt), $this->secrets);
     }
 }

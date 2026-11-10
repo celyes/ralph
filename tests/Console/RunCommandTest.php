@@ -41,6 +41,14 @@ final class RunCommandTest extends TestCase
 {
     private const string TASK = 'Add a --dry-run option to the import command';
 
+    /**
+     * A declared authentication variable, and a value long enough to be treated
+     * as a credential ({@see \Celyes\RalphPhp\Support\Secrets::MINIMUM_LENGTH}).
+     */
+    private const string SECRET_VARIABLE = 'RALPH_TEST_RUN_KEY';
+
+    private const string SECRET = 'sk-ralph-0123456789-never-printed';
+
     private LoopProject $project;
 
     protected function setUp(): void
@@ -95,6 +103,67 @@ final class RunCommandTest extends TestCase
         self::assertNotNull($run);
         self::assertSame('fixture', $run->agent()->name());
         self::assertSame(LifecycleState::Completed, $run->state());
+    }
+
+    /**
+     * PROJECT.md section I, item 6, through the binary: after a real run whose
+     * agent printed its own credential, the only place in the runtime directory
+     * that still holds the value is the worker's own log.
+     *
+     * The assertion is deliberately the *whole* set of runtime files rather
+     * than the few a case thought to name. Everything the run wrote is read —
+     * the state database, the event stream, the memory notes, the completion
+     * record, the staged diff, the lock — so a future diagnostic that quoted an
+     * agent's output without going through redaction fails this test by
+     * appearing in the list.
+     *
+     * And the log itself is asserted to still hold the key, because that is the
+     * documented side of the item rather than a gap in it: the file is a
+     * verbatim copy, `ralph logs --help` says so, and a test that let it be
+     * redacted would be pinning the opposite of the decision.
+     */
+    #[Test]
+    public function the_only_runtime_file_holding_a_declared_secret_is_the_workers_log(): void
+    {
+        $this->project
+            ->withWorker(
+                FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])
+                    ->saying('Authenticated with ' . self::SECRET . ' and added the option'),
+            )
+            ->withTasks([self::TASK])
+            ->withConfiguration([
+                'agents' => ['fixture' => ['environment' => [self::SECRET_VARIABLE]]],
+            ]);
+
+        $result = $this->project->ralph(['run'], [self::SECRET_VARIABLE => self::SECRET]);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+
+        $holding = $this->project->runtimeFilesContaining(self::SECRET);
+
+        self::assertSame(
+            ['.ralph/runtime/logs/' . $this->project->journal()->generations()->forTask(
+                $this->project->journal()->tasks()->all()[0]->id(),
+            )[0]->slug() . '/attempt-01-agent.log'],
+            $holding,
+            'A declared secret reached a package-generated diagnostic: ' . implode(', ', $holding),
+        );
+
+        // The agent's claim, as the package kept it: the same sentence with the
+        // variable's name where its value was.
+        $logs = $this->project->ralph(['logs', $this->project->journal()->tasks()->all()[0]->id()->value()]);
+
+        self::assertSame(ExitCode::SUCCESS, $logs->exitCode, $logs->describe());
+        self::assertStringContainsString(
+            'the agent said (unverified): Authenticated with [redacted ' . self::SECRET_VARIABLE
+                . '] and added the option',
+            $logs->standardOutput,
+            $logs->describe(),
+        );
+
+        // And the raw log is printed as it was captured, which is why the
+        // command's help documents what these files hold.
+        self::assertStringContainsString(self::SECRET, $logs->standardOutput, $logs->describe());
     }
 
     /**

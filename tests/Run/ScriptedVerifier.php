@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Tests\Run;
 use Celyes\RalphPhp\Config\VerificationCommand;
 use Celyes\RalphPhp\Exception\PreparationException;
 use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Verification\CheckOutcome;
 use Celyes\RalphPhp\Verification\CheckRun;
 use Celyes\RalphPhp\Verification\VerificationReport;
@@ -28,9 +29,10 @@ use Celyes\RalphPhp\Verification\Verifier;
 final class ScriptedVerifier implements Verifier
 {
     /**
-     * Every call, in order: the directory and the checks it was handed.
+     * Every call, in order: the directory, the checks and the names of the
+     * secrets it was handed.
      *
-     * @var list<array{directory: string, checks: list<string>}>
+     * @var list<array{directory: string, checks: list<string>, secrets: list<string>}>
      */
     public array $calls = [];
 
@@ -115,12 +117,19 @@ final class ScriptedVerifier implements Verifier
         return new self([true], [], true);
     }
 
-    public function verify(array $checks, string $directory, ?OutputSink $sink = null): VerificationReport
-    {
+    public function verify(
+        array $checks,
+        string $directory,
+        ?OutputSink $sink = null,
+        ?Secrets $secrets = null,
+    ): VerificationReport {
         $call = count($this->calls);
         $this->calls[] = [
             'directory' => $directory,
             'checks' => array_map(static fn (VerificationCommand $check): string => $check->name(), $checks),
+            // Names only, which is all a {@see Secrets} will answer with — and
+            // enough to assert that the run's own secrets reached the checks.
+            'secrets' => ($secrets ?? Secrets::none())->names(),
         ];
 
         foreach ($this->watching as $relative) {

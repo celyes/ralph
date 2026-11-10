@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Verification;
 
+use Celyes\RalphPhp\Agent\AgentEnvironment;
+use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Config\VerificationCommand;
 use Celyes\RalphPhp\Exception\VerificationException;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Support\FrozenClock;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Tests\Log\RecordingSink;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use Celyes\RalphPhp\Verification\CheckOutcome;
@@ -32,6 +35,8 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(CommandVerifier::class)]
 final class CommandVerifierTest extends TestCase
 {
+    private const string SECRET = 'sk-ralph-0123456789-never-printed';
+
     private CommandVerifier $verifier;
 
     private string $workspace;
@@ -360,6 +365,57 @@ final class CommandVerifierTest extends TestCase
     /**
      * A check that runs a short PHP program.
      */
+    /**
+     * A check's excerpt is stored, shown by `ralph logs` and handed to the next
+     * attempt, so a declared secret that a suite printed comes out of it
+     * (PROJECT.md section I, item 6).
+     *
+     * The streamed copy is the other half of the item and is asserted beside
+     * it: what went to the sink while the check was running is the command's
+     * own bytes, kept as they arrived.
+     */
+    #[Test]
+    public function a_declared_secret_is_kept_out_of_the_excerpt_but_not_out_of_the_stream(): void
+    {
+        $sink = new RecordingSink();
+
+        $run = $this->verifier->verify(
+            [$this->check('tests', 'fwrite(STDOUT, "configured with ' . self::SECRET . '"); exit(1);')],
+            $this->workspace,
+            $sink,
+            $this->secrets(),
+        )->runs()[0];
+
+        self::assertSame('configured with [redacted TEST_KEY]', $run->output());
+        self::assertStringContainsString(self::SECRET, $sink->textOf(OutputStream::Standard));
+    }
+
+    /**
+     * Without secrets the excerpt is what the command printed, which is every
+     * check until a run resolves the project's declared variables.
+     */
+    #[Test]
+    public function a_check_run_without_secrets_keeps_what_it_printed(): void
+    {
+        $run = $this->verifier->verify(
+            [$this->check('tests', 'fwrite(STDOUT, "configured with ' . self::SECRET . '");')],
+            $this->workspace,
+        )->runs()[0];
+
+        self::assertSame('configured with ' . self::SECRET, $run->output());
+    }
+
+    /**
+     * The run's secrets, built the way production builds them.
+     */
+    private function secrets(): Secrets
+    {
+        return AgentEnvironment::of(
+            new AgentDefinition('fixture', 'codex', 'codex', environment: ['TEST_KEY']),
+            static fn (string $name): string|false => $name === 'TEST_KEY' ? self::SECRET : false,
+        )->secrets();
+    }
+
     private function check(string $name, string $program, int $timeout = 600): VerificationCommand
     {
         return new VerificationCommand($name, [PHP_BINARY, '-r', $program], $timeout);

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Log;
 
 use Celyes\RalphPhp\Exception\FilesystemException;
+use Celyes\RalphPhp\Support\Secrets;
 
 /**
  * A worker's output on disk, written while the worker runs.
@@ -31,13 +32,27 @@ use Celyes\RalphPhp\Exception\FilesystemException;
  * including invalid UTF-8 and terminal escapes, and this is a copy of it rather
  * than a rendering.
  *
- * **Notes are marked as ours.** Lines Ralph PHP writes — which invocation this
- * is, what it exited with — are prefixed with {@see self::NOTE_PREFIX}. A log
+ * **Notes are marked as ours, and are redacted.** Lines Ralph PHP writes —
+ * which invocation this is, what it exited with — are prefixed with
+ * {@see self::NOTE_PREFIX}, and the secrets the project declared are kept out
+ * of them ({@see Secrets}). A log
  * where the package's observations and the agent's output look the same is a
  * log in which a model can write "--- exited with status 0" and have a reader
  * believe it. The prefix does not make forgery impossible, and it is not
  * treated as evidence anywhere: the exit code the runner acts on comes from the
  * process, and the state store is what later commands read.
+ *
+ * **The worker's own bytes are not redacted, and that is the file's purpose.**
+ * This is where PROJECT.md section I, item 6 draws its line: a note is a
+ * diagnostic the package generated and goes through redaction, while the output
+ * between the notes is a verbatim copy of what another process printed. A copy
+ * that rewrote parts of itself would lose the thing it exists for — a chunk off
+ * a pipe can end in the middle of a value, so a replacement would catch some
+ * occurrences and not others, and the byte count the attempt recorded would
+ * stop describing the file. So an agent that prints its own key prints it here,
+ * which is why the file is created 0600 inside the Git-ignored runtime
+ * directory, and why `ralph logs --help` documents what these files hold and
+ * for how long.
  *
  * **A write that fails does not end the run.** The file is opened before the
  * worker starts, so an unwritable log is a readable error up front; a failure
@@ -95,8 +110,11 @@ final class LogFile implements OutputSink
     /**
      * @param resource $handle an open, writable stream
      */
-    private function __construct(private readonly string $path, mixed $handle)
-    {
+    private function __construct(
+        private readonly string $path,
+        mixed $handle,
+        private readonly Secrets $secrets,
+    ) {
         $this->handle = $handle;
     }
 
@@ -109,9 +127,12 @@ final class LogFile implements OutputSink
      * running after its agent did — and in both cases what is already in the
      * file is part of the record.
      *
+     * @param Secrets|null $secrets what must not appear in the notes this log
+     *        writes; the worker's own output is kept as it arrived either way
+     *
      * @throws FilesystemException when the log cannot be opened for writing
      */
-    public static function appendTo(string $path): self
+    public static function appendTo(string $path, ?Secrets $secrets = null): self
     {
         $directory = dirname($path);
 
@@ -140,7 +161,7 @@ final class LogFile implements OutputSink
             @chmod($path, self::FILE_MODE);
         }
 
-        return new self($path, $handle);
+        return new self($path, $handle, $secrets ?? Secrets::none());
     }
 
     /**
@@ -198,7 +219,7 @@ final class LogFile implements OutputSink
     public function note(string $line): void
     {
         $this->startLine();
-        $this->put(self::NOTE_PREFIX . $line . "\n");
+        $this->put(self::NOTE_PREFIX . $this->secrets->redact($line) . "\n");
 
         // A note interrupts the worker's output, so the next chunk needs its
         // marker again even if it comes off the same stream as the last one.

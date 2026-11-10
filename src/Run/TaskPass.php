@@ -40,6 +40,7 @@ use Celyes\RalphPhp\State\Phase;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\State\WorktreeOwnership;
 use Celyes\RalphPhp\Support\Clock;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\CheckboxEdit;
 use Celyes\RalphPhp\Tasks\ChecklistFile;
@@ -148,6 +149,7 @@ final class TaskPass
         private readonly Verifier $verifier,
         private readonly BaseCommit $base,
         private readonly VerificationSnapshot $checks,
+        private readonly Secrets $secrets,
         private readonly ?Output $terminal = null,
         private readonly Clock $clock = new SystemClock(),
         private readonly Interruptions $interruptions = new Interruptions(),
@@ -403,7 +405,15 @@ final class TaskPass
             $record = $this->journal->generations()->enterPhase($record, Phase::Verifying);
             $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Verifying);
 
-            $checked = $this->verifier->verify($this->checks->commands(), $worktree->path(), $log);
+            $checked = $this->verifier->verify(
+                $this->checks->commands(),
+                $worktree->path(),
+                $log,
+                // The run's known secrets, so the excerpt a failing check is
+                // recorded with does not carry one into the state store, the
+                // next attempt's briefing or `ralph logs` (section I, item 6).
+                $this->secrets,
+            );
 
             // Asked again before the verdict is kept, and that is the point of
             // its placement: a stop cancels every command the package starts,

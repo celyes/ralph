@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Event;
 
+use Celyes\RalphPhp\Agent\AgentEnvironment;
+use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Event\Event;
 use Celyes\RalphPhp\Event\EventId;
 use Celyes\RalphPhp\Event\EventKind;
 use Celyes\RalphPhp\Event\EventStream;
 use Celyes\RalphPhp\State\Timestamp;
 use Celyes\RalphPhp\Support\FrozenClock;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Tasks\TaskId;
 use Celyes\RalphPhp\Tests\Support\JsonDocument;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
@@ -37,6 +40,8 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(EventKind::class)]
 final class EventStreamTest extends TestCase
 {
+    private const string SECRET = 'sk-ralph-0123456789-never-printed';
+
     private string $directory;
 
     private FrozenClock $clock;
@@ -386,9 +391,70 @@ final class EventStreamTest extends TestCase
         self::assertSame([1, 1], self::integers($lines, 'seq'));
     }
 
+    /**
+     * The payloads are this package's own account of a run, so a declared
+     * secret that reached one is taken out before the line is encoded
+     * (PROJECT.md section I, item 6).
+     *
+     * Asserted on the encoded line as well as on the decoded field, because
+     * the point of redacting the data rather than the text is that the document
+     * stays a document: a replacement made in the JSON would have to know how
+     * the value had been escaped.
+     */
+    #[Test]
+    public function a_declared_secret_is_kept_out_of_a_payload(): void
+    {
+        $stream = EventStream::appendingTo($this->path(), 'run-1', $this->clock, $this->secrets());
+
+        $stream->taskFinished(
+            TaskId::fromString('TASK-1A2B3C4D'),
+            'failed',
+            [
+                'reason' => 'the agent printed ' . self::SECRET,
+                'checks' => [['name' => 'tests', 'output' => 'saw ' . self::SECRET]],
+            ],
+        );
+        $stream->close();
+
+        $raw = (string) file_get_contents($this->path());
+        self::assertStringNotContainsString(self::SECRET, $raw);
+
+        [$finished] = $this->lines();
+        self::assertSame('the agent printed [redacted TEST_KEY]', $finished->string('data.reason'));
+        self::assertSame('saw [redacted TEST_KEY]', $finished->string('data.checks.0.output'));
+    }
+
+    /**
+     * A stream told nothing writes its payloads as they were given, which is
+     * every stream until a run resolves the project's secrets.
+     */
+    #[Test]
+    public function a_stream_with_no_secrets_writes_its_payload_as_it_was_given(): void
+    {
+        $stream = $this->stream();
+
+        $stream->runStarted(['reason' => 'ran with ' . self::SECRET]);
+        $stream->close();
+
+        [$started] = $this->lines();
+        self::assertSame('ran with ' . self::SECRET, $started->string('data.reason'));
+    }
+
     private function stream(): EventStream
     {
         return EventStream::appendingTo($this->path(), 'run-1', $this->clock);
+    }
+
+    /**
+     * The secrets a run would hand the stream, built the way production builds
+     * them.
+     */
+    private function secrets(): Secrets
+    {
+        return AgentEnvironment::of(
+            new AgentDefinition('fixture', 'codex', 'codex', environment: ['TEST_KEY']),
+            static fn (string $name): string|false => $name === 'TEST_KEY' ? self::SECRET : false,
+        )->secrets();
     }
 
     private function path(): string

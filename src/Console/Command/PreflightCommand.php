@@ -14,6 +14,7 @@ use Celyes\RalphPhp\Preflight\CheckOutcome;
 use Celyes\RalphPhp\Preflight\CheckResult;
 use Celyes\RalphPhp\Preflight\Preflight;
 use Celyes\RalphPhp\Preflight\PreflightReport;
+use Celyes\RalphPhp\Support\Secrets;
 
 /**
  * `ralph preflight`: report whether the environment can run the loop.
@@ -112,6 +113,12 @@ final class PreflightCommand implements CommandInterface
         // "ralph init" yet is exactly who benefits from being told that their
         // agent is not installed.
         $configuration = $this->loader->loadOrDefaults($directory);
+
+        // A check reports what a command printed when it refused to run, so the
+        // project's declared secrets come out of this command's lines too
+        // (section I, item 6).
+        $output->redact(Secrets::forProject($configuration));
+
         $requested = $input->hasOption('agent') ? (string) $input->option('agent') : null;
 
         $report = $this->preflight->run($configuration, $requested);

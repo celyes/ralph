@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Verification;
 use Celyes\RalphPhp\Config\VerificationCommand;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Support\Secrets;
 
 /**
  * Whatever runs a task's configured checks against its workspace.
@@ -23,6 +24,13 @@ use Celyes\RalphPhp\Log\OutputSink;
  * at its start precisely so that nothing an agent edits mid-run can replace
  * them (PROJECT.md section G, item 3), and an implementation that went back to
  * `.ralph/config.json` for them would quietly undo that.
+ *
+ * **The excerpt it keeps is a diagnostic, so it is redacted.** A check's
+ * captured output is stored, shown by `ralph logs` and fed into the next
+ * attempt's briefing, which makes it one of the package-generated diagnostics
+ * PROJECT.md section I, item 6 covers. The run's known secrets are passed in
+ * rather than resolved here, for the same reason the checks are: what a run is
+ * held to was settled when it started.
  *
  * **It must not decide the task's fate.** A failing check is a returned report,
  * not an exception: the runner leaves the task unchecked, writes the evidence
@@ -46,9 +54,18 @@ interface Verifier
      * @param OutputSink|null           $sink      where each check's output goes
      *        while it runs. Never closed here: the caller that opened the
      *        attempt's log owns it.
+     * @param Secrets|null              $secrets   the run's known secrets, kept
+     *        out of the excerpt each check is recorded with. What was streamed
+     *        to the sink while the check ran is a verbatim copy and is not
+     *        touched ({@see \Celyes\RalphPhp\Log\LogFile}).
      *
      * @throws RalphException when the checks could not be run, which is a
      *         setup failure rather than a verdict on the work
      */
-    public function verify(array $checks, string $directory, ?OutputSink $sink = null): VerificationReport;
+    public function verify(
+        array $checks,
+        string $directory,
+        ?OutputSink $sink = null,
+        ?Secrets $secrets = null,
+    ): VerificationReport;
 }

@@ -30,6 +30,7 @@ use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\Support\Clock;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\ChecklistSnapshot;
 use Celyes\RalphPhp\Tasks\Task;
@@ -354,6 +355,16 @@ final class Runner
 
         $this->stopUnlessRunning();
 
+        // What must not appear in anything this run writes down: the values
+        // behind the variables the project's agents declare (section I, item
+        // 6). Resolved once, here, and handed to everything that composes a
+        // diagnostic — the terminal, the attempt logs, the event stream and the
+        // checks' excerpts — so no later caller has to remember to. The
+        // terminal is told rather than replaced, because the Output this runner
+        // was handed is the one a failure will also be reported through.
+        $secrets = Secrets::forProject($this->configuration);
+        $this->terminal?->redact($secrets);
+
         $journal = Journal::of($this->state->open($this->configuration), $this->clock);
 
         // Read before the agent is resolved, because for a resume it is what
@@ -383,6 +394,7 @@ final class Runner
             $this->clock,
             $this->executable,
             $this->processes,
+            $secrets,
         );
 
         // A retry's task is named on a command line, and the name is checked
@@ -411,7 +423,12 @@ final class Runner
         // The same run, written for another program (section I, item 3).
         // Opened here because this is the first point at which there is a run
         // identifier, and every line of the stream is correlated by that.
-        $events = EventStream::forRun($this->configuration->projectRoot(), $run->runId(), $this->clock);
+        $events = EventStream::forRun(
+            $this->configuration->projectRoot(),
+            $run->runId(),
+            $this->clock,
+            $secrets,
+        );
 
         // Whether the stream's own trouble has been mentioned already, so that
         // a stream that could not be opened is not reported twice.
@@ -428,7 +445,18 @@ final class Runner
                 'resumed_from' => $run->resumedFromRunId(),
             ]);
 
-            return $this->loop($run, $agent, $adapter, $base, $journal, $workbench, $intent, $events, $tasks);
+            return $this->loop(
+                $run,
+                $agent,
+                $adapter,
+                $base,
+                $journal,
+                $workbench,
+                $intent,
+                $events,
+                $secrets,
+                $tasks,
+            );
         } catch (Throwable $failure) {
             // The run row is closed with the reason before the failure goes on
             // to the caller. A run left recorded as `running` by a process that
@@ -626,6 +654,7 @@ final class Runner
         Workbench $workbench,
         RunIntent $intent,
         EventStream $events,
+        Secrets $secrets,
         ?TaskList $tasks = null,
     ): RunReport {
         // Read here unless the opening already had to read it: a retry checks
@@ -664,6 +693,7 @@ final class Runner
             $this->verifier,
             $base,
             $checks,
+            $secrets,
             $this->terminal,
             $this->clock,
             $this->interruptions,

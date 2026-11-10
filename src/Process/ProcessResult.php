@@ -4,12 +4,21 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Process;
 
+use Celyes\RalphPhp\Support\Secrets;
+
 /**
  * What running one command produced.
  *
  * Carries the argument array that was executed alongside the output, so that a
  * log line or an error message can state exactly what ran rather than a
  * reconstruction of it.
+ *
+ * **It can be asked to forget a secret it captured.** A command this package
+ * started may print a credential the package itself gave it, and what is
+ * captured here is the source of the evidence, claims and excerpts that are
+ * then stored and printed. {@see self::redactedWith()} is where that is taken
+ * out, once, at the point of capture — so everything downstream is redacted
+ * without having to remember to be (PROJECT.md section I, item 6).
  *
  * **Three ways a command can end, not two.** It finished, it overran its
  * timeout, or the run it belonged to was interrupted — and the third is not a
@@ -40,6 +49,39 @@ final class ProcessResult
         private readonly ?Interruption $cancelledBy = null,
         private readonly ?Termination $termination = null,
     ) {
+    }
+
+    /**
+     * The same result with every known secret replaced by its variable name.
+     *
+     * Applied to the captured streams and to the argument array, which are the
+     * three parts of a result that reach a diagnostic: an error message quotes
+     * the command, and the evidence, the agent's claim and a check's excerpt
+     * all come out of the output. Everything else — the status, the duration,
+     * what stopped it — is a number or an observation of this package's own.
+     *
+     * The caller is whoever ran a process that had been handed credentials:
+     * {@see \Celyes\RalphPhp\Agent\ProcessAdapter::execute()} does it for the
+     * agent, which is the one process this package authenticates. What was
+     * already streamed to the attempt's log is not affected and is not meant to
+     * be: see {@see \Celyes\RalphPhp\Log\LogFile}.
+     */
+    public function redactedWith(Secrets $secrets): self
+    {
+        if ($secrets->isEmpty()) {
+            return $this;
+        }
+
+        return new self(
+            $secrets->redactLines($this->command),
+            $this->exitCode,
+            $secrets->redact($this->standardOutput),
+            $secrets->redact($this->errorOutput),
+            $this->timedOut,
+            $this->seconds,
+            $this->cancelledBy,
+            $this->termination,
+        );
     }
 
     /**

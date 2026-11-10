@@ -13,6 +13,7 @@ use Celyes\RalphPhp\Process\ProcessResult;
 use Celyes\RalphPhp\Process\ProcessRunner;
 use Celyes\RalphPhp\State\Timestamp;
 use Celyes\RalphPhp\Support\Clock;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Support\SystemClock;
 
 /**
@@ -47,6 +48,14 @@ use Celyes\RalphPhp\Support\SystemClock;
  * raises {@see VerificationException}, which the runner records as a refusal
  * rather than as evidence against work nobody examined.
  *
+ * **The excerpt is redacted; the streamed copy is not.** A check runs with the
+ * environment the user started `ralph` in, so a suite that prints what it was
+ * configured with can print a credential — and the excerpt this class keeps is
+ * stored, shown and handed to the next attempt. The run's known secrets are
+ * taken out of it (PROJECT.md section I, item 6). What went to the sink while
+ * the check was running is a verbatim copy of the command's output and stays
+ * one, for the reasons {@see \Celyes\RalphPhp\Log\LogFile} gives.
+ *
  * **What is not here.** The commands run one after another, never in parallel:
  * the first failure is supposed to stop the sequence, and two suites writing to
  * one workspace's cache directories at once is a flake nobody can reproduce.
@@ -71,8 +80,14 @@ final class CommandVerifier implements Verifier
      * @throws VerificationException when there is nothing to verify with, the
      *         workspace cannot be entered, or a command could not be started
      */
-    public function verify(array $checks, string $directory, ?OutputSink $sink = null): VerificationReport
-    {
+    public function verify(
+        array $checks,
+        string $directory,
+        ?OutputSink $sink = null,
+        ?Secrets $secrets = null,
+    ): VerificationReport {
+        $secrets ??= Secrets::none();
+
         if ($checks === []) {
             // Configuration validation rejects an empty `checks` list long
             // before a run starts, so this is a caller that built its own list.
@@ -97,7 +112,7 @@ final class CommandVerifier implements Verifier
                 continue;
             }
 
-            $run = $this->runCheck($check, $workspace, $sink);
+            $run = $this->runCheck($check, $workspace, $sink, $secrets);
             $runs[] = $run;
             $stopped = $run->outcome()->stopsTheSequence();
         }
@@ -110,8 +125,12 @@ final class CommandVerifier implements Verifier
      *
      * @throws VerificationException when the command could not be started
      */
-    private function runCheck(VerificationCommand $check, string $directory, ?OutputSink $sink): CheckRun
-    {
+    private function runCheck(
+        VerificationCommand $check,
+        string $directory,
+        ?OutputSink $sink,
+        Secrets $secrets,
+    ): CheckRun {
         $sink?->note(sprintf(
             'check %s: %s (in %s, timeout %ds)',
             $check->name(),
@@ -150,7 +169,7 @@ final class CommandVerifier implements Verifier
             $directory,
             $result->exitCode(),
             $result->seconds(),
-            self::outputOf($result),
+            self::outputOf($result->redactedWith($secrets)),
             null,
             $startedAt,
             Timestamp::now($this->clock),

@@ -19,6 +19,7 @@ use Celyes\RalphPhp\Memory\AttemptContextLoader;
 use Celyes\RalphPhp\Memory\MemoryWriter;
 use Celyes\RalphPhp\Process\ProcessRunner;
 use Celyes\RalphPhp\Support\Clock;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\ChecklistReader;
 use Celyes\RalphPhp\Tasks\ChecklistReconciler;
@@ -81,6 +82,7 @@ final class Workbench
         ?Clock $clock = null,
         string $executable = 'git',
         ProcessRunner $processes = new ProcessRunner(),
+        ?Secrets $secrets = null,
     ): self {
         $generations = $journal->generations();
 
@@ -97,7 +99,10 @@ final class Workbench
             TaskCommitter::forProject($configuration, $generations, $executable, $processes),
             TaskPublisher::forProject($configuration, $generations, $executable, $processes),
             WorktreeCleaner::forProject($configuration, $generations, $executable, $processes),
-            LogDirectory::in($configuration->projectRoot()),
+            // The logs are told the run's known secrets so that the notes they
+            // write are redacted; the worker's own output is kept as it arrived
+            // (section I, item 6, and {@see \Celyes\RalphPhp\Log\LogFile}).
+            LogDirectory::in($configuration->projectRoot(), $secrets),
             MemoryWriter::in($configuration->projectRoot(), $clock ?? new SystemClock()),
             new AttemptContextLoader(),
             new ChecklistReader(),

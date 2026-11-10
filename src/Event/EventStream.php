@@ -8,6 +8,7 @@ use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Config\Path;
 use Celyes\RalphPhp\State\Timestamp;
 use Celyes\RalphPhp\Support\Clock;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Support\SystemClock;
 use Celyes\RalphPhp\Tasks\TaskId;
 use InvalidArgumentException;
@@ -50,6 +51,14 @@ use InvalidArgumentException;
  * mistake and not a filesystem's: it is this package reporting one occurrence
  * twice, which would make the stream contradict itself, so it is raised like
  * the other envelope mistakes {@see Event::of()} refuses rather than written.
+ *
+ * **Known secrets are kept out of the payloads.** An event's data is this
+ * package's own account of a run — a stop's reason, a blocker's question, an
+ * excerpt of what a check printed — so it goes through redaction before it is
+ * encoded (PROJECT.md section I, item 6). A consumer parsing the stream finds
+ * the variable's name where its value would have been, which keeps the document
+ * valid and tells a reader what was removed. Nothing here is a copy of a
+ * worker's output: that is the attempt's log, which the stream only ever names.
  *
  * **The run's events are numbered here.** The sequence is this object's, which
  * is what makes it gapless: it counts the events of one run in the order they
@@ -98,6 +107,7 @@ final class EventStream
         private readonly string $path,
         private readonly string $runId,
         private readonly Clock $clock,
+        private readonly Secrets $secrets,
     ) {
     }
 
@@ -116,17 +126,25 @@ final class EventStream
      * is known about while the run is still being announced rather than
      * discovered in the middle of a task.
      */
-    public static function forRun(string $projectRoot, string $runId, ?Clock $clock = null): self
-    {
-        return self::appendingTo(self::fileIn($projectRoot), $runId, $clock);
+    public static function forRun(
+        string $projectRoot,
+        string $runId,
+        ?Clock $clock = null,
+        ?Secrets $secrets = null,
+    ): self {
+        return self::appendingTo(self::fileIn($projectRoot), $runId, $clock, $secrets);
     }
 
     /**
      * The stream at a given path, opened for appending.
      */
-    public static function appendingTo(string $path, string $runId, ?Clock $clock = null): self
-    {
-        $stream = new self($path, $runId, $clock ?? new SystemClock());
+    public static function appendingTo(
+        string $path,
+        string $runId,
+        ?Clock $clock = null,
+        ?Secrets $secrets = null,
+    ): self {
+        $stream = new self($path, $runId, $clock ?? new SystemClock(), $secrets ?? Secrets::none());
         $stream->open();
 
         return $stream;
@@ -256,7 +274,11 @@ final class EventStream
             $kind,
             $outcome,
             $task,
-            $data,
+            // Before the envelope is built rather than on the encoded line: a
+            // value that needed escaping would not be found in the JSON text,
+            // and a replacement made there could produce a document no
+            // consumer could parse.
+            $this->secrets->redactData($data),
             $occurrence,
         );
 

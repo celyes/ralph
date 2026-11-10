@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Log;
 
+use Celyes\RalphPhp\Agent\AgentEnvironment;
+use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Log\LogFile;
 use Celyes\RalphPhp\Log\OutputStream;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
@@ -24,6 +27,8 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(LogFile::class)]
 final class LogFileTest extends TestCase
 {
+    private const string SECRET = 'sk-ralph-0123456789-never-printed';
+
     private string $directory;
 
     protected function setUp(): void
@@ -391,6 +396,64 @@ final class LogFileTest extends TestCase
         $property = new \ReflectionProperty(LogFile::class, 'handle');
         fclose((new \ReflectionProperty(LogFile::class, 'handle'))->getValue($log));
         $property->setValue($log, $readOnly);
+    }
+
+    /**
+     * The split PROJECT.md section I, item 6 draws, in the file where it
+     * matters most: a note is a diagnostic this package wrote and is redacted,
+     * and the bytes between the notes are a copy of what the agent printed and
+     * are not.
+     *
+     * The second half is the surprising one, so it is asserted rather than
+     * assumed. A copy that rewrote itself would no longer be the record a
+     * reader is sent to, the byte count the attempt recorded would stop
+     * describing the file, and a value split across two chunks would be
+     * replaced in one of them and not the other. What answers for it is the
+     * file's mode and `ralph logs --help`, not a replacement nobody can see.
+     */
+    #[Test]
+    public function a_note_is_redacted_and_the_workers_own_bytes_are_not(): void
+    {
+        $log = LogFile::appendTo($this->path(), $this->secrets());
+
+        $log->note('fixture authenticating with ' . self::SECRET);
+        $log->write(OutputStream::Standard, 'the agent prints ' . self::SECRET . "\n");
+        $log->close();
+
+        $contents = (string) file_get_contents($this->path());
+
+        self::assertStringContainsString('--- fixture authenticating with [redacted TEST_KEY]', $contents);
+        self::assertStringContainsString('the agent prints ' . self::SECRET, $contents);
+    }
+
+    /**
+     * A log told nothing writes its notes as they were composed, which is the
+     * state every log is in until a run resolves the project's secrets.
+     */
+    #[Test]
+    public function a_log_with_no_secrets_writes_its_notes_as_they_were_given(): void
+    {
+        $log = LogFile::appendTo($this->path());
+
+        $log->note('ran with ' . self::SECRET);
+        $log->close();
+
+        self::assertStringContainsString(
+            '--- ran with ' . self::SECRET,
+            (string) file_get_contents($this->path()),
+        );
+    }
+
+    /**
+     * The secrets a {@see LogFile} is opened with, built the way production
+     * builds them.
+     */
+    private function secrets(): Secrets
+    {
+        return AgentEnvironment::of(
+            new AgentDefinition('fixture', 'codex', 'codex', environment: ['TEST_KEY']),
+            static fn (string $name): string|false => $name === 'TEST_KEY' ? self::SECRET : false,
+        )->secrets();
     }
 
     /**

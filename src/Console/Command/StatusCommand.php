@@ -15,6 +15,7 @@ use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\Support\Json;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Tasks\ChecklistReader;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskList;
@@ -151,6 +152,14 @@ final class StatusCommand extends ProjectCommand
         $this->rejectUnsupportedInput($input);
 
         $configuration = $this->configurationOrDefaults();
+
+        // Before a line is printed: a status report quotes what a check said, a
+        // blocker asked and an agent claimed, and the project's declared
+        // secrets have no business in any of it (section I, item 6). Told to
+        // the output rather than applied here, so the JSON document, the table
+        // and a failure reported afterwards all go through the same redaction.
+        $output->redact(Secrets::forProject($configuration));
+
         $journal = $this->journal($configuration);
         $reading = $this->tasks($configuration, $journal, $output);
         $tasks = $reading['tasks'];

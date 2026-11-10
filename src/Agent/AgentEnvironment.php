@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Agent;
 
 use Celyes\RalphPhp\Config\AgentDefinition;
+use Celyes\RalphPhp\Support\Secrets;
 use SensitiveParameter;
 
 /**
@@ -17,9 +18,12 @@ use SensitiveParameter;
  * or an exception message. This type is where they are allowed to be, so that
  * nowhere else has to be careful.
  *
- * **One accessor returns values, and it is named after its only caller.**
+ * **The accessors that return values are named after what they are for.**
  * {@see self::forProcess()} produces the override array
- * {@see \Celyes\RalphPhp\Process\ProcessRunner::run()} hands to `proc_open`.
+ * {@see \Celyes\RalphPhp\Process\ProcessRunner::run()} hands to `proc_open`,
+ * and {@see self::secrets()} produces the redaction that keeps those same
+ * values out of what the package writes about the process it started — the
+ * only two things in this package that need a credential at all.
  * Everything else — {@see self::names()}, {@see self::missing()},
  * {@see self::describe()}, {@see self::toArray()} — answers in variable names,
  * which are the part that is safe to print and is also the part a user needs:
@@ -160,8 +164,8 @@ final class AgentEnvironment
     /**
      * The variables to start the agent with.
      *
-     * The one method that returns credential values, for the one caller that
-     * needs them. Only the variables that are actually set appear: passing a
+     * The one method that returns credential values as values, for the one
+     * caller that needs them that way. Only the variables that are actually set appear: passing a
      * missing one as the empty string would hand the agent a variable it would
      * read as a malformed key rather than as an absent one. Each value is
      * trimmed, which is the one way this array differs from what the child
@@ -172,6 +176,23 @@ final class AgentEnvironment
     public function forProcess(): array
     {
         return $this->values;
+    }
+
+    /**
+     * These credentials, as something that can keep them out of diagnostics.
+     *
+     * The second accessor that touches the values, and like {@see
+     * self::forProcess()} it is named after what it is for. What comes back
+     * holds the values in order to *remove* them from text and offers no way to
+     * read one back ({@see Secrets}), so the rule the class description states
+     * still holds: nothing in this package can ask for a credential except the
+     * two callers that have to have it — the process that is being
+     * authenticated, and the redaction that keeps it out of what the package
+     * writes about that process (PROJECT.md section I, item 6).
+     */
+    public function secrets(): Secrets
+    {
+        return Secrets::of($this->values);
     }
 
     /**

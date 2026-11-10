@@ -15,6 +15,7 @@ use Celyes\RalphPhp\Run\Journal;
 use Celyes\RalphPhp\State\AttemptRecord;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\StateBootstrap;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Verification\CheckRun;
 
 /**
@@ -43,10 +44,25 @@ use Celyes\RalphPhp\Verification\CheckRun;
  * the record behind a ticked box all live beside the logs, and a reader sent to
  * the logs without being told they are there would not find them.
  *
- * What this cannot promise is that a worker's log holds no secret: it is the
- * agent's own output, captured as it arrived. Redaction of known configured
- * secrets from the package's own diagnostics, and the documented limits of raw
- * worker logs, are PROJECT.md section I, item 6.
+ * **Everything this command composes is redacted; the worker's log is not.**
+ * PROJECT.md section I, item 6 asks for two different things and this command
+ * is where they meet. The lines it writes — a pass's description, a blocker's
+ * question, the agent's claim, a check's excerpt — have the values of the
+ * project's declared authentication variables replaced by the variables' names
+ * before they reach the terminal ({@see \Celyes\RalphPhp\Console\Output}).
+ * The log file's own bytes are printed through {@see
+ * \Celyes\RalphPhp\Console\Output::text()} exactly as they were captured,
+ * because a copy that rewrote itself would stop being the record it is read as
+ * — and because a chunk off a pipe can end in the middle of a value, so the
+ * rewriting would be partial anyway.
+ *
+ * So the honest statement, which {@see self::help()} makes to the user: a raw
+ * worker log holds whatever the agent printed. The files are created 0600 under
+ * `.ralph/runtime/logs/`, which `ralph init` adds to the project's ignore
+ * rules, and they stay there until the task's worktree is cleaned up or the
+ * directory is deleted by hand. A secret the package was never told about — a
+ * token in a remote URL, a key an agent read from a file — cannot be redacted
+ * anywhere, by this command or by anything else in the package.
  */
 final class LogsCommand extends ProjectCommand
 {
@@ -86,8 +102,32 @@ final class LogsCommand extends ProjectCommand
             '',
             'Run "ralph status" to list the tasks with their identifiers.',
             '',
-            'Nothing is written and no agent is started. The logs are the agent\'s own',
-            'output, captured as it arrived, so treat them as you would its terminal.',
+            'Nothing is written and no agent is started.',
+            '',
+            'Where the logs live, and what is in them:',
+            '',
+            '  Worker output is written to .ralph/runtime/logs/TASK-ID[-N]/, one file per',
+            '  attempt, created readable only by you. "ralph init" adds the runtime',
+            '  directory to this project\'s ignore rules, so nothing here is committed or',
+            '  pushed. The files stay until you delete them or the task\'s workspace is',
+            '  cleaned up; the package never trims or rotates them.',
+            '',
+            '  A log is a verbatim copy of what the agent printed, so it holds whatever the',
+            '  agent chose to print — source code, file contents, and anything it echoed',
+            '  from its own environment. Lines beginning "--- " are Ralph PHP\'s own notes',
+            '  about the invocation; everything else is the agent\'s.',
+            '',
+            '  Values of the variables named in "agents.*.environment" are replaced with the',
+            '  variable\'s name in what Ralph PHP writes about a run: its terminal output,',
+            '  the notes in these logs, the event stream, the state store and the excerpts',
+            '  shown above. They are NOT removed from the raw worker output in the log',
+            '  files, because that is a copy of another process\'s bytes rather than text',
+            '  this package composed.',
+            '',
+            '  A secret Ralph PHP was never told about cannot be redacted at all: a token',
+            '  inside a Git remote URL, a credential an agent read out of a file, or a key',
+            '  printed by your own test suite. Treat these logs as you would the agent\'s',
+            '  terminal, and read one before pasting it into an issue.',
         ];
     }
 
@@ -102,6 +142,13 @@ final class LogsCommand extends ProjectCommand
 
         $task = $this->taskArgument($input);
         $configuration = $this->configurationOrDefaults();
+
+        // Before anything is printed, and before the logs are opened: the lines
+        // this command composes are redacted, and the log files' own bytes are
+        // not. See the class description.
+        $secrets = Secrets::forProject($configuration);
+        $output->redact($secrets);
+
         $journal = $this->journal($configuration);
 
         $passes = $journal->generations()->forTask($task);
@@ -116,7 +163,7 @@ final class LogsCommand extends ProjectCommand
             );
         }
 
-        $logs = new LogDirectory(LogDirectory::directoryIn($configuration->projectRoot()));
+        $logs = new LogDirectory(LogDirectory::directoryIn($configuration->projectRoot()), $secrets);
 
         // Newest pass first: a task that was worked on again is being read
         // about because of what happened the last time.

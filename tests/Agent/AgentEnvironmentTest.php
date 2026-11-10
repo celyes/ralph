@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Tests\Agent;
 
 use Celyes\RalphPhp\Agent\AgentEnvironment;
 use Celyes\RalphPhp\Config\AgentDefinition;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Process\ProcessRunner;
 use Celyes\RalphPhp\Tests\Support\Environment;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -226,11 +227,17 @@ final class AgentEnvironmentTest extends TestCase
      * The guarantee the whole type exists for, asserted as a property of its
      * surface rather than of the three call sites that happen to exist today.
      *
-     * Every public method is called, and the only one allowed to return the
-     * secret is {@see AgentEnvironment::forProcess()}, whose caller hands it
+     * Every public method is called, and the only one allowed to answer with
+     * the secret is {@see AgentEnvironment::forProcess()}, whose caller hands it
      * straight to `proc_open`. A future `value()`, `all()` or `__toString()`
      * fails this test, which is the point: a credential that can be asked for
      * is a credential that eventually gets interpolated into a message.
+     *
+     * {@see AgentEnvironment::secrets()} is the one method that returns
+     * something *holding* a value, because removing a value from text requires
+     * knowing it ({@see Secrets}). So its surface is put through the same test
+     * recursively: the vault may hold the key, and nothing it answers with may
+     * contain it.
      */
     #[Test]
     public function no_accessor_but_the_one_for_the_process_exposes_a_value(): void
@@ -259,6 +266,12 @@ final class AgentEnvironmentTest extends TestCase
                 continue;
             }
 
+            if ($returned instanceof Secrets) {
+                $this->assertNothingTheVaultSaysHoldsTheSecret($returned);
+
+                continue;
+            }
+
             self::assertStringNotContainsString(
                 self::SECRET,
                 $printed,
@@ -269,6 +282,44 @@ final class AgentEnvironmentTest extends TestCase
         // Guards the loop itself: a renamed surface that asked nothing would
         // otherwise pass by not looking.
         self::assertGreaterThanOrEqual(6, $asked);
+    }
+
+    /**
+     * The same property, asked of the redaction the environment produces.
+     *
+     * It is allowed to hold the value — that is what lets it take the value out
+     * of text — and it is allowed to say which variable held one. What it must
+     * not do is answer with the value, which is why there is no accessor for
+     * one and why {@see Secrets::redact()} is the only method that touches it.
+     */
+    private function assertNothingTheVaultSaysHoldsTheSecret(Secrets $secrets): void
+    {
+        $asked = 0;
+
+        foreach (get_class_methods($secrets) as $method) {
+            $reflected = new ReflectionMethod($secrets, $method);
+
+            if ($reflected->isStatic() || $reflected->getNumberOfParameters() > 0) {
+                continue;
+            }
+
+            $asked++;
+
+            self::assertStringNotContainsString(
+                self::SECRET,
+                var_export($reflected->invoke($secrets), true),
+                sprintf('Secrets::%s() exposed a credential value.', $method),
+            );
+        }
+
+        self::assertGreaterThanOrEqual(4, $asked);
+
+        // And the one method that does take the value answers with the
+        // variable's name, which is the half that is safe to print.
+        self::assertSame(
+            Secrets::placeholderFor('ANTHROPIC_API_KEY'),
+            $secrets->redact(self::SECRET),
+        );
     }
 
     /**

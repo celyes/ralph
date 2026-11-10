@@ -24,6 +24,7 @@ use Celyes\RalphPhp\Memory\AttemptContextLoader;
 use Celyes\RalphPhp\State\AttemptOutcome;
 use Celyes\RalphPhp\State\Blocker;
 use Celyes\RalphPhp\State\LifecycleState;
+use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Tasks\ChecklistParser;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskGeneration;
@@ -463,6 +464,13 @@ final class ProcessAdapterTest extends TestCase
      * child process: the variables an agent's configuration declares are the
      * ones it receives, and the package does not have to be trusted about it —
      * the agent here prints what it was given.
+     *
+     * The claim comes back as the placeholder rather than as the key, which is
+     * two facts in one assertion (section I, item 6). Redaction replaces an
+     * exact occurrence of the value and nothing else, so a claim that is
+     * precisely the placeholder means the child printed precisely the key — and
+     * the value the child was handed did not survive into anything the package
+     * stores or prints about the attempt.
      */
     #[Test]
     public function a_declared_authentication_variable_reaches_the_agent(): void
@@ -475,7 +483,7 @@ final class ProcessAdapterTest extends TestCase
             definition: $this->authenticating(['RALPH_TEST_AGENT_KEY']),
         ));
 
-        self::assertSame(self::SECRET, $result->claim()->text());
+        self::assertSame(Secrets::placeholderFor('RALPH_TEST_AGENT_KEY'), $result->claim()->text());
     }
 
     /**
@@ -485,6 +493,11 @@ final class ProcessAdapterTest extends TestCase
      * the adapter passed them. The padding is, because only the resolved copy
      * is trimmed — and a key with the newline `$(cat key.txt)` left on it is a
      * correct key the agent rejects as invalid.
+     *
+     * The JSON string around the placeholder is what makes this readable: the
+     * child printed the value quoted and with nothing either side of it, so the
+     * copy it was handed had been trimmed. An untrimmed value would not match
+     * the secret and would come back with its tab and newline intact.
      */
     #[Test]
     public function the_agent_is_handed_the_declared_variable_rather_than_the_inherited_one(): void
@@ -499,7 +512,10 @@ final class ProcessAdapterTest extends TestCase
             definition: $this->authenticating(['RALPH_TEST_AGENT_KEY']),
         ));
 
-        self::assertSame('"' . self::SECRET . '"', $result->claim()->text());
+        self::assertSame(
+            '"' . Secrets::placeholderFor('RALPH_TEST_AGENT_KEY') . '"',
+            $result->claim()->text(),
+        );
     }
 
     /**

@@ -144,10 +144,57 @@ final class LoopProject
      * Run the binary in this project.
      *
      * @param list<string> $arguments
+     * @param array<string, string|false> $environment variables to add to, or
+     *        with `false` remove from, the environment the run inherits — which
+     *        is how a case gives a declared authentication variable a value
      */
-    public function ralph(array $arguments): CliResult
+    public function ralph(array $arguments, array $environment = []): CliResult
     {
-        return Cli::run($arguments, $this->root());
+        return Cli::run($arguments, $this->root(), $environment);
+    }
+
+    /**
+     * Runtime files holding the given text, as paths relative to the project.
+     *
+     * For the one question PROJECT.md section I, item 6 asks about a finished
+     * run: where a secret ended up. Every file the run wrote under
+     * `.ralph/runtime/` is read, so the answer is the whole set rather than the
+     * places a test thought to look.
+     *
+     * @return list<string> in a stable order
+     */
+    public function runtimeFilesContaining(string $text): array
+    {
+        $root = $this->path('.ralph/runtime');
+
+        if (!is_dir($root)) {
+            return [];
+        }
+
+        $found = [];
+
+        /** @var \SplFileInfo $file */
+        foreach (new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS),
+        ) as $file) {
+            if (!$file->isFile()) {
+                continue;
+            }
+
+            $contents = @file_get_contents($file->getPathname());
+
+            if (is_string($contents) && str_contains($contents, $text)) {
+                $found[] = str_replace(
+                    [$this->root() . DIRECTORY_SEPARATOR, DIRECTORY_SEPARATOR],
+                    ['', '/'],
+                    $file->getPathname(),
+                );
+            }
+        }
+
+        sort($found);
+
+        return $found;
     }
 
     /**
