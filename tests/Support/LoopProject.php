@@ -149,26 +149,28 @@ final class LoopProject
      */
     public function withConfiguration(array $overrides = []): self
     {
-        $this->project->writeConfigArray(array_replace_recursive([
-            'agent' => 'fixture',
-            'agents' => [
-                'fixture' => [
-                    'adapter' => 'codex',
-                    'executable' => $this->tools . DIRECTORY_SEPARATOR . FixtureWorker::NAME,
-                ],
-            ],
-            'checks' => [['name' => 'tests', 'command' => ['php', '-v'], 'timeout' => 30]],
-            // One attempt per task unless a case asks for more: a failing case
-            // left at the default of three would quietly become three cases,
-            // and how many attempts a case makes is something its assertions
-            // depend on and should state.
-            'limits' => ['attempts_per_task' => 1],
-            // Nothing to install and nothing to copy: the worker needs no
-            // dependencies of its own.
-            'workspace' => ['prepare' => [], 'copy' => []],
-        ], $overrides));
+        $this->project->writeConfigArray($this->settings($overrides));
 
         return $this->committing();
+    }
+
+    /**
+     * Rewrite the configuration between two runs, as the user would.
+     *
+     * Left uncommitted, for the same reason {@see editChecklist()} is:
+     * `.ralph/` is a managed path, so an uncommitted change to the settings is
+     * not the unrelated work a run refuses to start over. It is how a case
+     * states "the user changed a setting and ran again" — including changing
+     * it to something the validator will not accept.
+     *
+     * @param array<string, mixed> $overrides merged into the settings every
+     *        case here runs under
+     */
+    public function editConfiguration(array $overrides = []): self
+    {
+        $this->project->writeConfigArray($this->settings($overrides));
+
+        return $this;
     }
 
     /**
@@ -379,6 +381,35 @@ final class LoopProject
         Git::tryRun($this->root(), 'worktree', 'prune');
         TemporaryDirectory::remove($this->tools);
         $this->project->remove();
+    }
+
+    /**
+     * The settings every case here runs under, with a case's own merged in.
+     *
+     * @param array<string, mixed> $overrides
+     *
+     * @return array<string, mixed>
+     */
+    private function settings(array $overrides): array
+    {
+        return array_replace_recursive([
+            'agent' => 'fixture',
+            'agents' => [
+                'fixture' => [
+                    'adapter' => 'codex',
+                    'executable' => $this->tools . DIRECTORY_SEPARATOR . FixtureWorker::NAME,
+                ],
+            ],
+            'checks' => [['name' => 'tests', 'command' => ['php', '-v'], 'timeout' => 30]],
+            // One attempt per task unless a case asks for more: a failing case
+            // left at the default of three would quietly become three cases,
+            // and how many attempts a case makes is something its assertions
+            // depend on and should state.
+            'limits' => ['attempts_per_task' => 1],
+            // Nothing to install and nothing to copy: the worker needs no
+            // dependencies of its own.
+            'workspace' => ['prepare' => [], 'copy' => []],
+        ], $overrides);
     }
 
     /**
