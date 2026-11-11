@@ -1,0 +1,34 @@
+{
+    "name": "ralph-php-example/text-tools",
+    "description": "A tiny example PHP package for Ralph PHP: turns article titles and bodies into web-ready strings.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3",
+        "ext-mbstring": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "RalphPhpExample\\TextTools\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "RalphPhpExample\\TextTools\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "scripts": {
+        "test": "phpunit"
+    },
+    "scripts-descriptions": {
+        "test": "Run the package's test suite. This is the command Ralph PHP verifies a task with."
+    }
+}

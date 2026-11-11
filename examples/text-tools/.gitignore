@@ -1,0 +1,9 @@
+/vendor/
+/composer.lock
+/.phpunit.cache/
+/phpunit.xml
+
+# This example tracks its task checklist, so that the checkbox Ralph PHP ticks
+# shows up as a change you can read. "ralph init" sees the negation and leaves
+# it alone.
+!/.ralph/tasks.md

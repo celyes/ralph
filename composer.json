@@ -62,10 +62,12 @@
     },
     "scripts": {
         "test": "phpunit",
-        "test:installation": "phpunit --group installation"
+        "test:installation": "phpunit --group installation",
+        "test:example": "phpunit tests/Example"
     },
     "scripts-descriptions": {
         "test": "Run the automated test suite.",
-        "test:installation": "Install the package as a project dependency and as a global tool, and check the installed binary."
+        "test:installation": "Install the package as a project dependency and as a global tool, and check the installed binary.",
+        "test:example": "Check the shipped example project: its own suite, its configuration and checklist, and a task run through the loop in a copy of it."
     }
 }

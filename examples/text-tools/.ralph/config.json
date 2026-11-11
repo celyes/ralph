@@ -1,0 +1,59 @@
+{
+    "tasks": ".ralph/tasks.md",
+    "context": ".ralph/CONTEXT.md",
+    "agent": "codex",
+    "agents": {
+        "codex": {
+            "adapter": "codex",
+            "executable": "codex",
+            "model": null,
+            "arguments": [],
+            "environment": []
+        },
+        "claude": {
+            "adapter": "claude",
+            "executable": "claude",
+            "model": null,
+            "arguments": [],
+            "environment": []
+        }
+    },
+    "checks": [
+        {
+            "name": "tests",
+            "command": [
+                "composer",
+                "test"
+            ],
+            "timeout": 300
+        }
+    ],
+    "workspace": {
+        "prepare": [
+            {
+                "name": "dependencies",
+                "command": [
+                    "composer",
+                    "install",
+                    "--no-interaction"
+                ],
+                "timeout": 900
+            }
+        ],
+        "copy": []
+    },
+    "git": {
+        "base": "HEAD",
+        "branch_prefix": "ralph/",
+        "push": {
+            "enabled": false,
+            "remote": "origin"
+        }
+    },
+    "limits": {
+        "iterations": 3,
+        "attempts_per_task": 2,
+        "task_timeout": 1200,
+        "run_timeout": 3600
+    }
+}

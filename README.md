@@ -39,6 +39,7 @@ run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — e
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Getting started](#getting-started)
+- [Example project](#example-project)
 - [Commands](#commands)
 - [Task checklist syntax](#task-checklist-syntax)
 - [Configuration](#configuration)
@@ -135,6 +136,31 @@ appended, and a rule you have negated with `!` is left negated, so tracking the
 checklist yourself is a decision `ralph init` will not undo.
 
 Nothing in `ralph init` runs `git`.
+
+## Example project
+
+`examples/text-tools/` is a working PHP package — two classes, a PHPUnit suite,
+`composer test` — shipped with three unfinished tasks in its `.ralph/tasks.md`.
+Copy it out of this repository, give it a Git repository of its own and run the
+loop on it:
+
+```bash
+cp -r examples/text-tools /tmp/text-tools && cd /tmp/text-tools
+git init && git add --all && git commit -m "Import the example package"
+composer install
+ralph init          # keeps the three .ralph/ files the example ships
+ralph preflight
+ralph run           # three tasks, three branches, three commits
+```
+
+[`examples/README.md`](examples/README.md) walks through it: what the three
+tasks change, what to look at afterwards, how to run it with Claude Code
+instead of Codex, and how to start over. A run calls a paid coding agent once
+per task.
+
+The example has to be its own repository because each task is implemented in a
+linked worktree on a branch off the base commit — run it inside this checkout
+and those branches would be made here.
 
 ## Commands
 
@@ -722,6 +748,7 @@ Worth knowing before you rely on it.
 composer install
 composer test              # the whole suite
 composer test:installation # install as a dev dependency and as a global tool
+composer test:example      # the shipped example project, and a run inside a copy of it
 vendor/bin/phpstan analyse src bin tests --level=9
 ```
 
@@ -735,6 +762,11 @@ replaced by a deterministic fixture worker with modes for success, failure,
 blocking, slow execution and interruption, and Git behaviour is tested against
 temporary repositories and a local bare remote. CI runs it on every supported
 PHP version.
+
+It does use Composer and a network in two places, both of which skip themselves
+when Composer is absent: the installation group, and the example-project test
+that runs a task through the loop in a copy of `examples/text-tools/` — that run
+installs PHPUnit into the task's worktree, exactly as a reader's run would.
 
 ## License
 

@@ -32,16 +32,20 @@ final class Cli
      * @param list<string> $arguments arguments after the binary name
      * @param array<string, string|false> $environment variables to add to, or
      *        with `false`, remove from the inherited environment
+     * @param int|null $timeout seconds to wait before the invocation is
+     *        considered hung, or null for {@see self::TIMEOUT_SECONDS}
      */
     public static function run(
         array $arguments = [],
         ?string $workingDirectory = null,
         array $environment = [],
+        ?int $timeout = null,
     ): CliResult {
         return self::runCommand(
             [PHP_BINARY, Paths::inPackage('bin/ralph'), ...$arguments],
             $workingDirectory,
             $environment,
+            $timeout,
         );
     }
 
@@ -55,11 +59,17 @@ final class Cli
      * @param list<string> $command the program and its arguments
      * @param array<string, string|false> $environment variables to add to, or
      *        with `false`, remove from the inherited environment
+     * @param int|null $timeout seconds to wait before the invocation is
+     *        considered hung, or null for {@see self::TIMEOUT_SECONDS}. Raised
+     *        only by the callers that run an install: a Composer install into a
+     *        fresh directory is minutes of work on a cold cache, and killing it
+     *        at a minute would report a network as a defect.
      */
     public static function runCommand(
         array $command,
         ?string $workingDirectory = null,
         array $environment = [],
+        ?int $timeout = null,
     ): CliResult {
         $descriptors = [
             0 => ['file', self::nullDevice(), 'rb'],
@@ -81,7 +91,7 @@ final class Cli
 
         // Both pipes are drained together: reading one to completion first can
         // deadlock on a child that fills the other pipe's buffer meanwhile.
-        [$standardOutput, $errorOutput] = self::drain($pipes);
+        [$standardOutput, $errorOutput] = self::drain($pipes, $timeout ?? self::TIMEOUT_SECONDS);
 
         $exitCode = proc_close($process);
 
@@ -92,9 +102,10 @@ final class Cli
      * Read both output pipes until the child closes them.
      *
      * @param array<int, resource> $pipes
+     * @param int $timeout seconds to wait for the child to close them
      * @return array{string, string}
      */
-    private static function drain(array $pipes): array
+    private static function drain(array $pipes, int $timeout): array
     {
         $captured = [1 => '', 2 => ''];
 
@@ -103,13 +114,13 @@ final class Cli
         }
 
         $open = $pipes;
-        $deadline = microtime(true) + self::TIMEOUT_SECONDS;
+        $deadline = microtime(true) + $timeout;
 
         while ($open !== []) {
             if (microtime(true) >= $deadline) {
                 throw new RuntimeException(sprintf(
                     'The command did not finish within %d seconds.',
-                    self::TIMEOUT_SECONDS,
+                    $timeout,
                 ));
             }
 
