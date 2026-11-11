@@ -1,0 +1,83 @@
+# The automated suite, on every PHP version the package supports.
+#
+# What this workflow has to prove is the eighth release acceptance criterion in
+# PROJECT.md: "the automated tests run without live model credentials". So no
+# step here holds a secret, and none reaches a paid service. The agent adapters
+# are exercised against the deterministic fixture worker, which is a PHP script
+# in the repository, and the Git behaviour is exercised against temporary local
+# repositories and a local bare remote. The only network access is Composer
+# downloading packages from Packagist.
+#
+# The PHP matrix is the package's own `php` constraint spelled out: its lowest
+# entry is Ralph::MINIMUM_PHP_VERSION, and every entry is a version that
+# constraint admits. ContinuousIntegrationTest reads this file and asserts both,
+# so a bumped requirement cannot leave an untested version behind here.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch makes the previous run's answer uninteresting.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests on PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    # Linux and WSL are the supported platforms (PROJECT.md section 2), and the
+    # runner is the Linux half: it has the Git the package requires, a /proc to
+    # find processes through, and POSIX file permissions, all of which parts of
+    # the suite need rather than skip around.
+    timeout-minutes: 30
+
+    strategy:
+      # One version failing is a fact about that version; the others still have
+      # to report.
+      fail-fast: false
+      matrix:
+        php:
+          - '8.3'
+          - '8.4'
+          - '8.5'
+
+    steps:
+      - name: Check out the package
+        uses: actions/checkout@v4
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          # The required extensions, and the two optional ones: without pcntl
+          # and posix the interruption tests skip themselves, and a skipped
+          # test is not evidence that Ctrl+C is handled.
+          extensions: json, mbstring, pdo, pdo_sqlite, pcntl, posix
+          # Nothing here measures coverage, and Xdebug would slow a suite that
+          # starts hundreds of real processes.
+          coverage: none
+          ini-values: error_reporting=-1, display_errors=On, zend.assertions=1
+          tools: composer:v2
+
+      - name: Check the manifest
+        run: composer validate --strict
+
+      # No lock file is committed, so this resolves the declared constraints
+      # afresh; that is deliberate for a library, and it means CI sees the
+      # dependency versions a new installation gets.
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      # The whole suite, including the `installation` group, which installs the
+      # package into temporary directories with a temporary Composer home and
+      # never reads or writes the runner's own Composer setup.
+      - name: Run the automated suite
+        run: vendor/bin/phpunit --colors=always
