@@ -67,7 +67,7 @@ use Celyes\RalphPhp\Support\Secrets;
  * argument array are left to the subclass, since where a `--model` goes in a
  * command line is something only that agent's CLI knows. Together that is
  * PROJECT.md section E, item 8 — and the credential half of it is structural:
- * values live in {@see AgentEnvironment} and reach `proc_open`, while
+ * values live in {@see AgentEnvironment} and reach the child process, while
  * everything this class writes to a log or hands upward is variable names. The
  * agent's own output is the one thing it cannot make that promise about by
  * construction — an agent may print whatever it likes, including its key — so
@@ -527,8 +527,8 @@ abstract class ProcessAdapter implements ExecutionAdapter
      * The program the configured executable names.
      *
      * Resolved before starting, so that a missing CLI is a readable error
-     * naming the agent rather than a failed `proc_open`, and so that the
-     * command recorded in the log is the binary that actually ran. A bare name
+     * naming the agent rather than a command that could not be started, and so
+     * that the command recorded in the log is the binary that actually ran. A bare name
      * is searched for in PATH exactly as a shell would, without a shell being
      * involved.
      *

@@ -20,7 +20,8 @@ use SensitiveParameter;
  *
  * **The accessors that return values are named after what they are for.**
  * {@see self::forProcess()} produces the override array
- * {@see \Celyes\RalphPhp\Process\ProcessRunner::run()} hands to `proc_open`,
+ * {@see \Celyes\RalphPhp\Process\ProcessRunner::run()} hands to the child
+ * process,
  * and {@see self::secrets()} produces the redaction that keeps those same
  * values out of what the package writes about the process it started — the
  * only two things in this package that need a credential at all.

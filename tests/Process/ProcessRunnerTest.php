@@ -196,8 +196,11 @@ final class ProcessRunnerTest extends TestCase
 
     /**
      * An agent's briefing is as long as the task, its criteria and the project
-     * context make it, which is well past a pipe buffer. Spooling it to a file
-     * is what makes that impossible to deadlock on.
+     * context make it, which is well past a pipe buffer. The command's input is
+     * written in the same turn as its output is read, which is what makes a
+     * briefing that large impossible to deadlock on: a parent that filled the
+     * input pipe before reading would wait on a child that is itself waiting to
+     * be read.
      */
     #[Test]
     public function large_input_is_delivered_while_the_command_is_also_writing_output(): void
@@ -236,25 +239,31 @@ final class ProcessRunnerTest extends TestCase
     }
 
     /**
-     * The briefing is the user's text and the project's context; a copy of it
-     * is not left lying in the temporary directory after the run.
+     * The briefing is the user's text and the project's context, and it reaches
+     * the command through the command's own standard input: there is no file
+     * anywhere holding a copy of it, before the run or after it.
+     *
+     * Read off the process filesystem, which is the only way to ask a program
+     * what its own descriptor zero is. A system without one skips the question;
+     * the two assertions below it are the ones that would notice a file.
      */
     #[Test]
-    public function the_spooled_input_is_removed_afterwards(): void
+    public function the_input_reaches_the_command_through_its_own_standard_input(): void
     {
-        $before = $this->spooledInputFiles();
+        if (!ProcessTree::isReadable()) {
+            self::markTestSkipped('Asking a program what its standard input is needs a process filesystem.');
+        }
 
-        $this->runner->run([PHP_BINARY, '-r', 'echo 1;'], $this->directory, 5, [], 'briefing');
-        $timedOut = $this->runner->run(
-            [PHP_BINARY, '-r', 'sleep(30);'],
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', 'echo readlink("/proc/self/fd/0"), "|", file_get_contents("php://stdin");'],
             $this->directory,
-            1,
+            5,
             [],
             'briefing',
         );
 
-        self::assertTrue($timedOut->timedOut(), $timedOut->describe());
-        self::assertSame($before, $this->spooledInputFiles());
+        self::assertStringStartsWith('pipe:', $result->trimmedOutput(), $result->describe());
+        self::assertStringEndsWith('|briefing', $result->trimmedOutput(), $result->describe());
     }
 
     /**
@@ -262,21 +271,11 @@ final class ProcessRunnerTest extends TestCase
      * would be an untracked change in a diff the runner is about to stage.
      */
     #[Test]
-    public function input_is_not_spooled_into_the_commands_working_directory(): void
+    public function input_is_not_written_into_the_commands_working_directory(): void
     {
         $this->runner->run([PHP_BINARY, '-r', 'echo 1;'], $this->directory, 5, [], 'briefing');
 
         self::assertSame(['.', '..'], scandir($this->directory));
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function spooledInputFiles(): array
-    {
-        $found = glob(sys_get_temp_dir() . '/ralph-input-*');
-
-        return $found === false ? [] : $found;
     }
 
     /**

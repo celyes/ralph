@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Process;
 
 use Celyes\RalphPhp\Process\ProcessTree;
+use Celyes\RalphPhp\Process\StartedCommand;
 use Celyes\RalphPhp\Process\Terminator;
 use Celyes\RalphPhp\Process\Termination;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\Process\Process;
 
 /**
  * Stopping a worker and everything it started.
@@ -23,6 +25,7 @@ use PHPUnit\Framework\TestCase;
  */
 #[CoversClass(Terminator::class)]
 #[CoversClass(Termination::class)]
+#[CoversClass(StartedCommand::class)]
 final class TerminatorTest extends TestCase
 {
     /**
@@ -62,7 +65,7 @@ final class TerminatorTest extends TestCase
         CODE;
 
     /**
-     * @var list<resource>
+     * @var list<Process>
      */
     private array $started = [];
 
@@ -80,9 +83,8 @@ final class TerminatorTest extends TestCase
         }
 
         foreach ($this->started as $process) {
-            if (is_resource($process)) {
-                @proc_terminate($process, 9);
-                @proc_close($process);
+            if ($process->isRunning()) {
+                $process->stop(0, 9);
             }
         }
 
@@ -93,9 +95,9 @@ final class TerminatorTest extends TestCase
     #[Test]
     public function it_stops_a_waiting_process_and_confirms_it(): void
     {
-        [$process, $pid] = $this->start(self::WAITS);
+        [$managed, $pid] = $this->start(self::WAITS);
 
-        $termination = (new Terminator())->stop($process);
+        $termination = (new Terminator())->stop($managed);
 
         self::assertTrue($termination->isConfirmed(), $termination->describe());
         self::assertSame([$pid], $termination->signalled());
@@ -114,11 +116,11 @@ final class TerminatorTest extends TestCase
             self::markTestSkipped('Reaching a grandchild needs a process filesystem and ext-posix.');
         }
 
-        [$process, $pid, $grandchild] = $this->startAndSpawn();
+        [$managed, $pid, $grandchild] = $this->startAndSpawn();
 
         self::assertTrue(ProcessTree::isProcessAlive($grandchild), 'The child was never started.');
 
-        $termination = (new Terminator())->stop($process);
+        $termination = (new Terminator())->stop($managed);
 
         self::assertTrue($termination->isConfirmed(), $termination->describe());
         self::assertSame([$grandchild, $pid], $termination->signalled(), 'Deepest first.');
@@ -135,11 +137,11 @@ final class TerminatorTest extends TestCase
             self::markTestSkipped('The stubborn worker needs ext-pcntl to ignore a signal.');
         }
 
-        [$process, $pid] = $this->start(self::REFUSES_TO_STOP, awaitLine: true);
+        [$managed, $pid] = $this->start(self::REFUSES_TO_STOP, awaitLine: true);
 
         // Short, because the test waits it out: the escalation is what is under
         // test, not how long the package is willing to be patient for.
-        $termination = (new Terminator())->stop($process, grace: 0.2);
+        $termination = (new Terminator())->stop($managed, grace: 0.2);
 
         self::assertTrue($termination->isConfirmed(), $termination->describe());
         self::assertTrue($termination->wasKilled(), 'A process that refused to stop was not killed.');
@@ -150,15 +152,15 @@ final class TerminatorTest extends TestCase
     #[Test]
     public function a_process_that_has_already_exited_leaves_nothing_to_stop(): void
     {
-        [$process] = $this->start('exit(0);');
+        [$managed, , $process] = $this->start('exit(0);');
 
         // Read its status until it has gone, as any caller would before
         // deciding to stop it.
-        for ($attempt = 0; $attempt < 500 && proc_get_status($process)['running']; $attempt++) {
+        for ($attempt = 0; $attempt < 500 && $process->isRunning(); $attempt++) {
             usleep(2000);
         }
 
-        $termination = (new Terminator())->stop($process);
+        $termination = (new Terminator())->stop($managed);
 
         self::assertTrue($termination->isConfirmed());
         self::assertSame([], $termination->signalled());
@@ -178,14 +180,14 @@ final class TerminatorTest extends TestCase
     #[Test]
     public function without_a_process_filesystem_only_the_worker_itself_is_reached(): void
     {
-        [$process, $pid] = $this->start(self::WAITS);
+        [$managed, $pid] = $this->start(self::WAITS);
 
         self::assertTrue(
             ProcessTree::rootedAt($pid, '/nonexistent-procfs')->isOnlyRoot(),
             'Relationships cannot be read, so nothing below the worker is known.',
         );
 
-        $termination = (new Terminator('/nonexistent-procfs'))->stop($process);
+        $termination = (new Terminator('/nonexistent-procfs'))->stop($managed);
 
         self::assertSame([$pid], $termination->signalled());
         self::assertTrue(
@@ -214,55 +216,70 @@ final class TerminatorTest extends TestCase
     }
 
     /**
-     * Start a program and return its handle and process id.
+     * Start a program and return it as the terminator takes it, with its
+     * process id and the library's own handle on it.
      *
      * @param bool $awaitLine whether to wait for the program's first line,
      *        which is how a test knows it has got as far as installing a signal
      *        handler
      *
-     * @return array{resource, int}
+     * @return array{StartedCommand, int, Process}
      */
     private function start(string $code, bool $awaitLine = false): array
     {
-        $process = proc_open(
-            [PHP_BINARY, '-r', $code],
-            [0 => ['file', '/dev/null', 'rb'], 1 => ['pipe', 'wb'], 2 => ['file', '/dev/null', 'wb']],
-            $pipes,
-        );
+        $process = new Process([PHP_BINARY, '-r', $code], null, null, null, null);
+        $process->start();
 
-        self::assertIsResource($process, 'The process could not be started.');
+        $pid = $process->getPid();
+        self::assertIsInt($pid, 'The process could not be started.');
         $this->started[] = $process;
 
         if ($awaitLine) {
-            self::assertIsString(fgets($pipes[1]), 'The process never reported itself ready.');
+            self::assertNotSame('', $this->awaitLine($process), 'The process never reported itself ready.');
         }
 
-        fclose($pipes[1]);
-
-        return [$process, (int) proc_get_status($process)['pid']];
+        return [new StartedCommand($process), $pid, $process];
     }
 
     /**
-     * @return array{resource, int, int}
+     * @return array{StartedCommand, int, int}
      */
     private function startAndSpawn(): array
     {
-        $process = proc_open(
-            [PHP_BINARY, '-r', self::SPAWNS_AND_WAITS],
-            [0 => ['file', '/dev/null', 'rb'], 1 => ['pipe', 'wb'], 2 => ['file', '/dev/null', 'wb']],
-            $pipes,
-        );
+        [$managed, $pid, $process] = $this->start(self::SPAWNS_AND_WAITS);
 
-        self::assertIsResource($process, 'The process could not be started.');
-        $this->started[] = $process;
-
-        $line = fgets($pipes[1]);
-        self::assertIsString($line, 'The worker never reported the process it started.');
-        fclose($pipes[1]);
+        $line = $this->awaitLine($process);
+        self::assertNotSame('', $line, 'The worker never reported the process it started.');
 
         $grandchild = (int) trim($line);
         $this->spawned[] = $grandchild;
 
-        return [$process, (int) proc_get_status($process)['pid'], $grandchild];
+        return [$managed, $pid, $grandchild];
+    }
+
+    /**
+     * The program's first line of output, waited for.
+     *
+     * A started process is read by asking the library for what has arrived
+     * since the last time it was asked, which is also how {@see ProcessRunner}
+     * reads one. Bounded: a program that never prints its line is a failure of
+     * the test, not something to hang on.
+     */
+    private function awaitLine(Process $process): string
+    {
+        $deadline = microtime(true) + 10.0;
+        $line = '';
+
+        while (microtime(true) < $deadline) {
+            $line .= $process->getIncrementalOutput();
+
+            if (str_contains($line, "\n")) {
+                return $line;
+            }
+
+            usleep(5000);
+        }
+
+        return '';
     }
 }

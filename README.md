@@ -74,6 +74,45 @@ Without `pcntl` and `posix`, Ctrl+C cannot be handled cleanly: the run cannot
 stop the agent, record the interruption and release its lock in order. Install
 them if you intend to interrupt runs.
 
+## Dependencies
+
+One package is installed with Ralph PHP:
+
+| Package | What it does here |
+| --- | --- |
+| [symfony/process](https://github.com/symfony/process) | Starts and supervises every command the loop runs — `git`, the coding agent, each verification command. The argument-array launch with no shell, both output pipes drained while a briefing is written to standard input, and the exit status read back. |
+
+The rest the package does itself, and each of those is a decision rather than
+something nobody got round to:
+
+- **Git** is the `git` binary, run through the component above. The wrappers
+  available for PHP (`czproject/git-php`, `gitonomy/gitlib`) model commits,
+  branches and logs; what this loop needs is linked worktrees, `status
+  --porcelain=v2`, a push whose rejection has to be told apart from a network
+  failure, and branch ownership — none of which they expose, so using one would
+  mean dropping to its escape hatch for most calls.
+- **Stopping a worker** is this package's own (see [Recovery](#recovery)). A
+  process library stops the process it started;
+  an agent's test runner and language server are its children, and leaving
+  those running in a task worktree is the failure the repository lock exists to
+  make impossible. So the process tree is read from `/proc` and signalled
+  deepest first here.
+- **The task checklist** is parsed and edited by the package. A Markdown
+  library (`league/commonmark`) would read it, but what is written back is one
+  checkbox character in a file the user also edits by hand: every other byte,
+  including the ones no parser preserves — trailing spaces, tab indentation,
+  the exact blank lines — has to survive, and a concurrent edit has to be
+  detected by comparing the source that was read. That is a byte-level job, not
+  an abstract-syntax-tree one.
+- **The command line** is the package's own small parser and help text. A
+  console framework would replace them with its own conventions and its own
+  error messages; `ralph` prefers to say `Unknown option "--jason" for "ralph
+  status".` and name the command to run next, which is a difference you see on
+  every mistake.
+- **State** is SQLite through PDO, which is the maintained database layer PHP
+  ships. There is no schema a query builder or an ORM would help with: eight
+  tables, written by one process holding a lock.
+
 ## Installation
 
 As a development dependency of the project you want worked on:
@@ -764,9 +803,11 @@ temporary repositories and a local bare remote. CI runs it on every supported
 PHP version.
 
 It does use Composer and a network in two places, both of which skip themselves
-when Composer is absent: the installation group, and the example-project test
-that runs a task through the loop in a copy of `examples/text-tools/` — that run
-installs PHPUnit into the task's worktree, exactly as a reader's run would.
+when Composer is absent: the installation group, which resolves the package's
+runtime dependency the way a real `composer require` does, and the
+example-project test that runs a task through the loop in a copy of
+`examples/text-tools/` — that run installs PHPUnit into the task's worktree,
+exactly as a reader's run would.
 
 ## License
 

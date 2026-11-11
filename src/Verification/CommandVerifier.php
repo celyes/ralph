@@ -223,9 +223,9 @@ final class CommandVerifier implements Verifier
     /**
      * The directory the checks will run in, or a refusal naming it.
      *
-     * Asked before the first command rather than left to `proc_open`, so that a
-     * workspace that was never created reads as the setup failure it is instead
-     * of as every configured check failing at once.
+     * Asked before the first command rather than left to the process library,
+     * so that a workspace that was never created reads as the setup failure it
+     * is instead of as every configured check failing at once.
      *
      * @throws VerificationException when it is not a directory the commands
      *         could run in

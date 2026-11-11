@@ -8,6 +8,8 @@ use Celyes\RalphPhp\Exception\ProcessException;
 use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Log\OutputStream;
 use InvalidArgumentException;
+use Symfony\Component\Process\Exception\ExceptionInterface as ProcessLibraryException;
+use Symfony\Component\Process\Process;
 use Throwable;
 
 /**
@@ -26,16 +28,24 @@ use Throwable;
  * implementation of the pipe draining, the timeout and the termination, and the
  * one that ran agents would be the one tested least.
  *
- * **It stops when the run is asked to stop.** Between reads of the worker's
- * output it asks {@see Interruptions} whether a stop has been requested, and on
- * the first one it terminates the command's whole process tree through
- * {@see Terminator}, keeps whatever the command had printed, and reports a
- * cancelled result (PROJECT.md section H, item 4). Polling rather than acting
- * in the signal handler is the point: killing a process tree and writing to
- * SQLite are not things to start halfway through an arbitrary opcode. The
- * terminator's verdict is recorded process-wide, because whether the worker is
- * confirmed gone is what decides if the run may release its lock, and that
- * decision is made in a `finally` several layers above this one.
+ * **The starting, the pipes and the input are symfony/process's.** Draining two
+ * pipes while filling a third without deadlocking, writing a briefing larger
+ * than a pipe buffer, reaping the child and reading its status are solved
+ * problems, and the package that solves them is maintained by people who do
+ * that and little else. What stays here is what is specific to this loop: when
+ * a command may be started, when it has run too long, what counts as its
+ * verdict — and the cancellation below, which no process library does.
+ *
+ * **It stops when the run is asked to stop.** While the command runs it asks
+ * {@see Interruptions} whether a stop has been requested, and on the first one
+ * it terminates the command's whole process tree through {@see Terminator},
+ * keeps whatever the command had printed, and reports a cancelled result
+ * (PROJECT.md section H, item 4). Polling rather than acting in the signal
+ * handler is the point: killing a process tree and writing to SQLite are not
+ * things to start halfway through an arbitrary opcode. The terminator's verdict
+ * is recorded process-wide, because whether the worker is confirmed gone is
+ * what decides if the run may release its lock, and that decision is made in a
+ * `finally` several layers above this one.
  *
  * **Streaming does not replace collecting.** A chunk goes to the sink and into
  * the result both. The sink is for the user and for the log; the result is what
@@ -56,15 +66,35 @@ final class ProcessRunner
     public const int DEFAULT_TIMEOUT_SECONDS = 30;
 
     /**
-     * The descriptors the command's output is read from.
-     */
-    private const int STANDARD_OUTPUT = 1;
-    private const int ERROR_OUTPUT = 2;
-
-    /**
      * Seconds a terminated command is given to exit before it is killed.
      */
     private const float TERMINATION_GRACE_SECONDS = 2.0;
+
+    /**
+     * How long a running command is left alone between turns, and when.
+     *
+     * Each turn reads the command's pipes, hands whatever arrived to the sink,
+     * and asks whether the run has been stopped — so the interval is both how
+     * quickly an agent's output reaches the terminal and how quickly a Ctrl+C
+     * is acted on. One interval cannot serve both kinds of command this runner
+     * is given: a `git rev-parse` answers in two milliseconds and there are
+     * dozens of them per task, while a coding agent is watched for twenty
+     * minutes. So the wait starts near-immediate and relaxes as the command
+     * turns out to be a long one, by the elapsed seconds below.
+     *
+     * The slowest setting is still fifty turns a second, which is under what a
+     * person notices in either direction, and a turn costs a status read and a
+     * `stream_select` that returns at once: a twenty-minute agent spends about
+     * a second of processor time being watched.
+     *
+     * @var list<array{float, int}> elapsed seconds, and microseconds to wait
+     *      from then on
+     */
+    private const array POLL_SCHEDULE = [
+        [0.05, 200],
+        [1.0, 5_000],
+        [INF, 20_000],
+    ];
 
     /**
      * @param Interruptions $interruptions where a stop requested from outside
@@ -73,10 +103,13 @@ final class ProcessRunner
      *        runner ({@see \Celyes\RalphPhp\Agent\ProcessAdapter}) and would
      *        otherwise run an agent nothing could stop.
      * @param Terminator $terminator what stops a command and its children
+     * @param ExecutableFinder $executables how a command that cannot be run at
+     *        all is recognised before anything is started
      */
     public function __construct(
         private readonly Interruptions $interruptions = new Interruptions(),
         private readonly Terminator $terminator = new Terminator(),
+        private readonly ExecutableFinder $executables = new ExecutableFinder(),
     ) {
     }
 
@@ -131,40 +164,54 @@ final class ProcessRunner
             );
         }
 
-        $inputFile = $input === null ? null : $this->spool($input);
+        $this->requireExecutable($command, $workingDirectory);
 
-        $descriptors = [
-            // Nothing this package runs is interactive. Reading from a file —
-            // the null device when there is no input, a spooled copy of it when
-            // there is — rather than inheriting the terminal means a command
-            // that decides to prompt sees end-of-input and gives up, instead of
-            // sitting on a question nobody is there to answer.
-            0 => ['file', $inputFile ?? self::nullDevice(), 'rb'],
-            self::STANDARD_OUTPUT => ['pipe', 'wb'],
-            self::ERROR_OUTPUT => ['pipe', 'wb'],
-        ];
+        $standardOutput = '';
+        $errorOutput = '';
+
+        $process = new Process(
+            $command,
+            $workingDirectory,
+            self::environment($environment),
+            $input,
+            // The timeout is enforced below instead, because the library's own
+            // stops the command by signalling it alone: a coding agent's test
+            // runner would be left behind, which is the whole subject of
+            // {@see Terminator}.
+            timeout: null,
+        );
 
         $started = microtime(true);
 
         try {
-            error_clear_last();
-            $process = @proc_open($command, $descriptors, $pipes, $workingDirectory, self::environment($environment));
+            $process->start(function (string $stream, string $chunk) use (&$standardOutput, &$errorOutput, &$sink): void {
+                // Handed on before it is appended to anything: the whole value
+                // of streaming is that a user sees an agent working, and
+                // holding a chunk back until the command's next turn would
+                // delay the last line of a worker that then goes quiet.
+                $sink = $this->forward($sink, $stream === Process::ERR ? OutputStream::Error : OutputStream::Standard, $chunk);
 
-            if (!is_resource($process)) {
-                throw $this->cannotStart($command, $workingDirectory);
-            }
+                if ($stream === Process::ERR) {
+                    $errorOutput .= $chunk;
 
-            [$standardOutput, $errorOutput, $exitCode, $timedOut, $cancelledBy, $termination]
-                = $this->wait($process, $pipes, $timeout, $sink);
-        } finally {
-            if ($inputFile !== null) {
-                @unlink($inputFile);
-            }
+                    return;
+                }
+
+                $standardOutput .= $chunk;
+            });
+        } catch (ProcessLibraryException $exception) {
+            throw $this->cannotStart($command, $workingDirectory, [trim($exception->getMessage())]);
         }
+
+        [$timedOut, $cancelledBy, $termination] = $this->wait($process, new StartedCommand($process), $timeout);
 
         return new ProcessResult(
             $command,
-            $exitCode,
+            // A stopped command reported no status of its own: the exit code of
+            // a process that was killed would say which signal ended it, which
+            // is not the command's verdict on its work and must not be read as
+            // one.
+            $timedOut || $cancelledBy !== null ? null : self::statusOf($process),
             $standardOutput,
             $errorOutput,
             $timedOut,
@@ -175,186 +222,82 @@ final class ProcessRunner
     }
 
     /**
-     * Write the command's input to a file it can be given as descriptor zero.
+     * Watch a running command until it ends, overruns, or is cancelled.
      *
-     * A write pipe would be the obvious way and is the wrong one: the parent
-     * has to drain two output pipes while it fills the input pipe, and a
-     * briefing larger than the pipe buffer — which an agent's prompt, with the
-     * project context and the previous attempt's evidence in it, comfortably is
-     * — blocks the write until the child reads, while the child may be blocked
-     * writing output nobody is reading. A file cannot deadlock, and the child
-     * sees an ordinary readable stream ending in end-of-input.
+     * `Process::isRunning()` is what does the work each turn: it re-reads the
+     * command's status, drains both pipes into the callback that was given to
+     * `start()`, and reaps the command once it has exited. So a command that
+     * finishes has had everything it printed collected by the time this
+     * returns, including the part written between the last two turns.
      *
-     * The file goes in the system temporary directory and never in the task
-     * workspace: a file written there would be an untracked change inside a
-     * worktree whose diff the runner is about to stage (PROJECT.md section F,
-     * item 6). It is removed when the command finishes, however that goes.
+     * @param StartedCommand $managed the same command as {@see Terminator}
+     *        needs it, built while it is certainly running: the library stops
+     *        reporting a process id once the process has gone, and the children
+     *        a worker left behind are found by walking down from that id.
      *
-     * @throws ProcessException when the input cannot be spooled
+     * @return array{bool, Interruption|null, Termination|null} whether it
+     *         overran, the stop that cancelled it, and what stopping its
+     *         process tree achieved
      */
-    private function spool(string $input): string
+    private function wait(Process $process, StartedCommand $managed, int $timeout): array
     {
-        $path = @tempnam(sys_get_temp_dir(), 'ralph-input-');
+        $started = microtime(true);
+        $deadline = $started + $timeout;
 
-        if ($path === false || @file_put_contents($path, $input) === false) {
-            if (is_string($path)) {
-                @unlink($path);
-            }
-
-            throw new ProcessException(
-                'Unable to write the command\'s standard input to a temporary file.',
-                [sprintf('Temporary directory: %s.', sys_get_temp_dir())],
-            );
-        }
-
-        return $path;
-    }
-
-    /**
-     * Drain both pipes until the command exits or runs out of time.
-     *
-     * The pipes are read together rather than one after the other: draining
-     * standard output to completion first deadlocks a command that meanwhile
-     * fills the error pipe's buffer, which is exactly what a failing verification
-     * command does.
-     *
-     * Each chunk is handed to the sink the moment it is read, before it is
-     * appended to anything: the whole value of streaming is that a user sees an
-     * agent working, and buffering a chunk until the next loop iteration would
-     * hold back the last line of a worker that then goes quiet for a minute.
-     *
-     * A stop requested from outside the process is noticed here, once per turn
-     * of the loop. The wait is capped at a second whatever the command's
-     * timeout, so a Ctrl+C during a quiet twenty-minute agent is acted on
-     * within a second rather than when the agent next prints something.
-     *
-     * @param resource $process
-     * @param array<int, resource> $pipes
-     * @return array{string, string, int|null, bool, Interruption|null, Termination|null}
-     */
-    private function wait(mixed $process, array $pipes, int $timeout, ?OutputSink $sink = null): array
-    {
-        $standardOutput = '';
-        $errorOutput = '';
-
-        $open = [self::STANDARD_OUTPUT => $pipes[self::STANDARD_OUTPUT], self::ERROR_OUTPUT => $pipes[self::ERROR_OUTPUT]];
-
-        foreach ($open as $pipe) {
-            stream_set_blocking($pipe, false);
-        }
-
-        $deadline = microtime(true) + $timeout;
-        $timedOut = false;
-        $cancelledBy = null;
-
-        while ($open !== []) {
+        while ($process->isRunning()) {
             $cancelledBy = $this->interruptions->requested();
 
             if ($cancelledBy !== null) {
-                break;
+                return [false, $cancelledBy, $this->terminate($managed, ownership: true)];
             }
 
-            $remaining = $deadline - microtime(true);
+            $now = microtime(true);
 
-            if ($remaining <= 0) {
-                $timedOut = true;
-                break;
+            if ($now >= $deadline) {
+                return [true, null, $this->terminate($managed, ownership: false)];
             }
 
-            $read = $open;
-            $write = $except = [];
+            usleep(self::pause($now - $started));
+        }
 
-            // Whole-second granularity is enough for a wait measured in
-            // seconds, but the remaining budget is never rounded up past the
-            // deadline.
-            $wait = min(1.0, $remaining);
+        return [false, null, null];
+    }
 
-            if (@stream_select($read, $write, $except, (int) $wait, (int) (fmod($wait, 1.0) * 1_000_000)) === false) {
-                // Interrupted by a signal rather than a broken pipe. The
-                // handler has already run by the time this returns, so the top
-                // of the loop is where the stop is noticed; there is nothing to
-                // do here but go back to it.
-                continue;
-            }
-
-            foreach ($read as $descriptor => $stream) {
-                $chunk = fread($stream, 8192);
-
-                if ($chunk === false || ($chunk === '' && feof($stream))) {
-                    unset($open[$descriptor]);
-
-                    continue;
-                }
-
-                $sink = $this->forward($sink, $descriptor, $chunk);
-
-                if ($descriptor === self::STANDARD_OUTPUT) {
-                    $standardOutput .= $chunk;
-
-                    continue;
-                }
-
-                $errorOutput .= $chunk;
+    /**
+     * How long to leave a command that has been running this long alone for.
+     */
+    private static function pause(float $elapsed): int
+    {
+        foreach (self::POLL_SCHEDULE as [$until, $microseconds]) {
+            if ($elapsed < $until) {
+                return $microseconds;
             }
         }
 
-        $termination = null;
-
-        if ($timedOut || $cancelledBy !== null) {
-            $termination = $this->terminate($process, $cancelledBy !== null);
-
-            // Whatever the command wrote before it was stopped is still worth
-            // keeping: it is usually the explanation.
-            foreach ($open as $descriptor => $stream) {
-                $pending = (string) stream_get_contents($stream);
-                $sink = $this->forward($sink, $descriptor, $pending);
-
-                if ($descriptor === self::STANDARD_OUTPUT) {
-                    $standardOutput .= $pending;
-
-                    continue;
-                }
-
-                $errorOutput .= $pending;
-            }
-        }
-
-        foreach ($pipes as $pipe) {
-            if (is_resource($pipe)) {
-                fclose($pipe);
-            }
-        }
-
-        // A stopped command reported no status of its own: the exit code of a
-        // process that was killed would say which signal ended it, which is
-        // not the command's verdict on its work and must not be read as one.
-        $exitCode = $timedOut || $cancelledBy !== null ? null : $this->exitCodeOf($process);
-
-        proc_close($process);
-
-        return [$standardOutput, $errorOutput, $exitCode, $timedOut, $cancelledBy, $termination];
+        return 20_000;
     }
 
     /**
      * Pass a chunk on, and stop using a sink that throws.
      *
      * A sink is contractually not allowed to throw ({@see OutputSink}), and
-     * this exists for when one does anyway. The child process is alive and its
-     * pipes are half-drained at this point, so letting the exception out would
-     * skip the close and the `proc_close` below and leave a coding agent
-     * running with nothing waiting for it. Dropping the sink loses the rest of
-     * the streamed copy; the result still carries the whole output.
+     * this exists for when one does anyway. The command is alive and its pipes
+     * are half-drained at this point, so letting the exception out would leave
+     * a coding agent running with nothing waiting for it — the exception would
+     * come out of `isRunning()`, past the timeout and the cancellation check
+     * both. Dropping the sink loses the rest of the streamed copy; the result
+     * still carries the whole output.
      *
      * Returns the sink to keep using, or null once it has misbehaved.
      */
-    private function forward(?OutputSink $sink, int $descriptor, string $chunk): ?OutputSink
+    private function forward(?OutputSink $sink, OutputStream $stream, string $chunk): ?OutputSink
     {
         if ($sink === null || $chunk === '') {
             return $sink;
         }
 
         try {
-            $sink->write(OutputStream::forDescriptor($descriptor), $chunk);
+            $sink->write($stream, $chunk);
         } catch (Throwable) {
             return null;
         }
@@ -363,29 +306,17 @@ final class ProcessRunner
     }
 
     /**
-     * The command's exit status, waiting for it to be reported.
+     * The command's own verdict on its work, where it reported one.
      *
-     * proc_close() would return it too, but only for a process nobody has asked
-     * about yet; reading the status first and closing afterwards keeps both
-     * calls honest.
-     *
-     * @param resource $process
+     * Null for a command that was ended by a signal: the library reports those
+     * by the shell's convention, as 128 plus the signal number, and that is a
+     * statement about how the process died rather than about the work.
      */
-    private function exitCodeOf(mixed $process): ?int
+    private static function statusOf(Process $process): ?int
     {
-        for ($attempt = 0; $attempt < 1000; $attempt++) {
-            $status = proc_get_status($process);
+        $status = $process->getExitCode();
 
-            if ($status['running'] === false) {
-                return $status['exitcode'] === -1 ? null : $status['exitcode'];
-            }
-
-            // The pipes are closed, so the child is on its way out; give it the
-            // moment it needs to be reaped.
-            usleep(1000);
-        }
-
-        return null;
+        return $status === null || $status < 0 ? null : $status;
     }
 
     /**
@@ -404,13 +335,12 @@ final class ProcessRunner
      * not on its way out. It carries on to the next task and gives the lock
      * back when it finishes, as it should.
      *
-     * @param resource $process
      * @param bool $ownership whether this stop decides what the run may
      *        release — true when it is a cancellation
      */
-    private function terminate(mixed $process, bool $ownership): Termination
+    private function terminate(StartedCommand $managed, bool $ownership): Termination
     {
-        $termination = $this->terminator->stop($process, self::TERMINATION_GRACE_SECONDS);
+        $termination = $this->terminator->stop($managed, self::TERMINATION_GRACE_SECONDS);
 
         if ($ownership) {
             Interruptions::recordTermination($termination);
@@ -420,18 +350,58 @@ final class ProcessRunner
     }
 
     /**
+     * That the command names a program this machine can run.
+     *
+     * Asked here rather than left to the library, which answers a command it
+     * could not spawn directly by running it through a shell instead — the same
+     * answer a shell gives for anything it cannot find, an exit status of 127
+     * on a command that never ran. A caller cannot tell that from a program
+     * that ran and exited 127, and this package's whole handling of a missing
+     * agent or a missing check depends on telling those apart: one is a
+     * configuration error naming what to install, the other is a failed check.
+     *
+     * {@see ExecutableFinder} is the same resolution preflight and the verifier
+     * report against, so a command rejected here is rejected for a reason a
+     * user has already been shown how to fix.
+     *
+     * @param list<string> $command
+     *
+     * @throws ProcessException when nothing executable answers to the name
+     */
+    private function requireExecutable(array $command, string $workingDirectory): void
+    {
+        $executable = $command[0];
+
+        if ($this->executables->find($executable, $workingDirectory) !== null) {
+            return;
+        }
+
+        throw $this->cannotStart($command, $workingDirectory, [
+            ExecutableFinder::isSearched($executable)
+                ? sprintf('"%s" was not found in %s.', $executable, $this->executables->describeSearchPath())
+                : sprintf('"%s" is not an executable file.', $executable),
+        ]);
+    }
+
+    /**
      * The environment for the child process.
      *
      * The caller's environment is inherited, because that is where an agent's
      * credentials and the user's PATH live, and overridden only where the
      * caller says. Values are never logged.
      *
+     * Passed in full, and with a removal for everything else the library would
+     * have filled in: left to itself it completes an environment from `$_ENV`
+     * and `$_SERVER`, and `$_SERVER` in a command-line process holds PHP's own
+     * entries — `PHP_SELF`, `SCRIPT_NAME`, `REQUEST_TIME` — which are not
+     * environment variables and have no business in a coding agent's.
+     *
      * @param array<string, string|false> $overrides
-     * @return array<string, string>
+     * @return array<string, string|false>
      */
     private static function environment(array $overrides): array
     {
-        $environment = getenv();
+        $environment = array_filter(getenv(), 'is_string');
 
         foreach ($overrides as $name => $value) {
             if ($value === false) {
@@ -443,35 +413,33 @@ final class ProcessRunner
             $environment[$name] = $value;
         }
 
-        return array_filter($environment, 'is_string');
+        /** @var array<string, string|false> $resolved */
+        $resolved = $environment;
+
+        foreach (array_keys($_ENV + $_SERVER) as $name) {
+            if (!array_key_exists($name, $resolved)) {
+                $resolved[(string) $name] = false;
+            }
+        }
+
+        return $resolved;
     }
 
     /**
      * @param list<string> $command
+     * @param list<string> $hints
      */
-    private function cannotStart(array $command, string $workingDirectory): ProcessException
+    private function cannotStart(array $command, string $workingDirectory, array $hints = []): ProcessException
     {
-        $hints = [];
-
         if (!is_dir($workingDirectory)) {
             $hints[] = sprintf('Its working directory %s does not exist.', $workingDirectory);
         } else {
             $hints[] = sprintf('Working directory: %s.', $workingDirectory);
         }
 
-        $reason = error_get_last()['message'] ?? null;
-        if (is_string($reason) && $reason !== '') {
-            $hints[] = 'PHP reported: ' . trim($reason) . '.';
-        }
-
         return new ProcessException(
             sprintf('Unable to start "%s".', implode(' ', $command)),
             $hints,
         );
-    }
-
-    private static function nullDevice(): string
-    {
-        return DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null';
     }
 }

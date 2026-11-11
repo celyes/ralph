@@ -27,7 +27,11 @@ use PHPUnit\Framework\TestCase;
  * installation, and that the declared platform requirements gate it.
  *
  * Each test installs into a temporary directory with a temporary Composer home,
- * so the developer's own global Composer setup is never read or modified.
+ * so the developer's own global Composer setup is never read or modified. The
+ * temporary home has no download cache, so an install here resolves the
+ * package's runtime dependency from Packagist and these tests need network
+ * access — the only part of the suite that does besides the shipped example's
+ * own run.
  */
 #[Group('installation')]
 final class ComposerInstallationTest extends TestCase

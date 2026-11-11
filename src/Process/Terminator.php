@@ -25,8 +25,9 @@ namespace Celyes\RalphPhp\Process;
  * before its children may start replacements. {@see ProcessTree::deepestFirst()}
  * is that order.
  *
- * **The handle is used for the root, signals for the rest.** `proc_terminate`
- * needs no extension and is the one way to stop the direct child on a build
+ * **The handle is used for the root, signals for the rest.** The direct child
+ * is signalled and asked about through the {@see ManagedProcess} that started
+ * it, which needs no extension and is the one way to reach it on a build
  * without ext-posix; descendants can only be reached with `posix_kill`. So a
  * system with no posix extension still stops the worker and reports that it
  * could not account for what the worker started, rather than quietly stopping
@@ -67,19 +68,19 @@ final class Terminator
     /**
      * Stop a process this package started, and everything it started.
      *
-     * @param resource $process the handle `proc_open` returned, which is how
-     *        the direct child is stopped and how its exit is confirmed
+     * @param ManagedProcess $process the command that was started, which is
+     *        how the direct child is stopped and how its exit is confirmed
      */
-    public function stop(mixed $process, float $grace = self::GRACE_SECONDS): Termination
+    public function stop(ManagedProcess $process, float $grace = self::GRACE_SECONDS): Termination
     {
-        $status = @proc_get_status($process);
-        $pid = (int) $status['pid'];
+        $pid = $process->pid();
+        $running = $process->isRunning();
 
         // Read while the child is still alive: once it has gone, nothing
         // connects its children to this run any more.
         $tree = ProcessTree::rootedAt($pid, $this->procfs);
 
-        if ($status['running'] === false) {
+        if ($running === false) {
             // The child has exited. Its descendants have not necessarily: an
             // agent that spawned a server and returned leaves one behind, and
             // it is holding the workspace open either way.
@@ -93,10 +94,8 @@ final class Terminator
 
     /**
      * Ask the tree to stop, then kill what is left of it.
-     *
-     * @param resource $process
      */
-    private function signal(ProcessTree $tree, mixed $process, float $grace, bool $rootHasExited): Termination
+    private function signal(ProcessTree $tree, ManagedProcess $process, float $grace, bool $rootHasExited): Termination
     {
         $targets = $tree->deepestFirst();
         $signalled = [];
@@ -104,7 +103,7 @@ final class Terminator
 
         foreach ($targets as $pid) {
             $sent = $pid === $tree->root() && !$rootHasExited
-                ? @proc_terminate($process)
+                ? $process->signal(self::SIGTERM)
                 : $this->send($pid, self::SIGTERM);
 
             if ($sent === null) {
@@ -136,7 +135,7 @@ final class Terminator
 
         foreach ($alive as $pid) {
             if ($pid === $tree->root() && !$rootHasExited) {
-                @proc_terminate($process, self::SIGKILL);
+                $process->signal(self::SIGKILL);
 
                 continue;
             }
@@ -167,11 +166,10 @@ final class Terminator
      * third answer and not a failure: see {@see Termination}.
      *
      * @param list<int> $pids
-     * @param resource  $process
      *
      * @return list<int>|null
      */
-    private function waitFor(array $pids, mixed $process, float $seconds, bool $rootHasExited): ?array
+    private function waitFor(array $pids, ManagedProcess $process, float $seconds, bool $rootHasExited): ?array
     {
         $deadline = microtime(true) + max(0.0, $seconds);
         $remaining = $pids;
@@ -203,21 +201,15 @@ final class Terminator
     /**
      * Whether one process of the tree is still running.
      *
-     * The direct child is asked through its handle, which is both authoritative
-     * and the only reading that reaps it: an unreaped child stays in `/proc` as
-     * a zombie, and `proc_get_status` is what collects its status. Descendants
-     * are read from the process filesystem.
-     *
-     * @param resource $process
+     * The direct child is asked through the handle that started it, which is
+     * both authoritative and the only reading that reaps it: an unreaped child
+     * stays in `/proc` as a zombie, and the library's status read is what
+     * collects its status. Descendants are read from the process filesystem.
      */
-    private function isAlive(int $pid, mixed $process, bool $rootHasExited): ?bool
+    private function isAlive(int $pid, ManagedProcess $process, bool $rootHasExited): ?bool
     {
-        if (!$rootHasExited) {
-            $status = @proc_get_status($process);
-
-            if ((int) $status['pid'] === $pid) {
-                return $status['running'] === true;
-            }
+        if (!$rootHasExited && $pid === $process->pid()) {
+            return $process->isRunning();
         }
 
         return ProcessTree::isProcessAlive($pid, $this->procfs);

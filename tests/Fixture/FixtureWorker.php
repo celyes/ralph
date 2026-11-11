@@ -40,13 +40,13 @@ use RuntimeException;
  * in a directory the test owns and which is *not* a task worktree: anything
  * written inside one would appear in the diff the runner stages (section F,
  * item 6), so a fixture living there would corrupt what it exists to test. The
- * same reason the briefing is spooled outside the workspace by
- * {@see \Celyes\RalphPhp\Process\ProcessRunner}.
+ * same reason {@see \Celyes\RalphPhp\Process\ProcessRunner} writes a
+ * briefing to the command's standard input rather than to a file.
  *
  * **It is a real executable.** A shebang line and the execute bit, so an
  * adapter starts it exactly as it would start `codex` or `claude`, through
- * {@see \Celyes\RalphPhp\Process\ExecutableFinder} and `proc_open` with no
- * shell. It is PHP rather than a shell script so that the plan, the journal and
+ * {@see \Celyes\RalphPhp\Process\ExecutableFinder} and an argument array with
+ * no shell. It is PHP rather than a shell script so that the plan, the journal and
  * the result protocol are the package's own classes instead of a second
  * implementation in another language.
  */

@@ -17,9 +17,15 @@ use RuntimeException;
  * symlinking turned off, so the install produces a real directory under
  * `vendor/celyes/ralph-php/` exactly as a download from Packagist would; a
  * symlinked install would instead point back at the checkout and leave the
- * installed layout untested. Packagist itself is switched off: the package
- * requires no third-party code, so the tests neither need the network nor may
- * depend on it.
+ * installed layout untested.
+ *
+ * Packagist stays switched on, for the one thing it is needed for: the package
+ * declares a runtime dependency (symfony/process), and an install that could
+ * not resolve it would not be an installation test. Nothing else is fetched —
+ * the package itself comes from the path repository, its development
+ * dependencies are not a consumer's, and no credential or paid service is
+ * involved. It does mean these tests need network access, which is stated on
+ * {@see \Celyes\RalphPhp\Tests\Installation\ComposerInstallationTest}.
  */
 final class InstallationWorkspace
 {
@@ -147,7 +153,6 @@ final class InstallationWorkspace
                 'url' => $this->packageSource,
                 'options' => ['symlink' => false],
             ],
-            ['packagist.org' => false],
         ];
     }
 }
