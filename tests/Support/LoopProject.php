@@ -71,6 +71,14 @@ final class LoopProject
      */
     private ?FixtureWorker $worker = null;
 
+    /**
+     * The bare repositories standing in for remotes, by the name the project's
+     * Git configuration knows each one by.
+     *
+     * @var array<string, string>
+     */
+    private array $remotes = [];
+
     private function __construct(
         private readonly TemporaryProject $project,
         /**
@@ -214,6 +222,101 @@ final class LoopProject
         @unlink($this->path(Defaults::ADAPTERS_FILE));
 
         return $this;
+    }
+
+    /**
+     * Give the project a remote to push to: a bare repository on the same disk.
+     *
+     * What PROJECT.md section J, item 6 asks a publication to be tested
+     * against. A bare repository is a real remote as far as `git push` is
+     * concerned — the real refspec, the real fast-forward rule, the real
+     * rejection message — and it needs no network, no server and no
+     * credentials (section J, item 8). What it cannot reproduce is an
+     * authentication failure or a slow link.
+     *
+     * It lives under {@see self::$tools}, outside the repository, so that the
+     * remote's own object store can never turn up in a diff a run stages, and
+     * so it is removed with everything else by {@see self::remove()}.
+     *
+     * @param string $name the name the repository knows it by, which is what
+     *        `git.push.remote` has to agree with
+     *
+     * @throws RuntimeException when the directory cannot be created
+     */
+    public function withBareRemote(string $name = 'origin'): self
+    {
+        $directory = $this->tools . DIRECTORY_SEPARATOR . $name . '.git';
+
+        if (!is_dir($directory) && !mkdir($directory, 0o700, true) && !is_dir($directory)) {
+            throw new RuntimeException('Unable to create ' . $directory . '.');
+        }
+
+        Git::initialise($directory, bare: true);
+        Git::run($this->root(), 'remote', 'add', $name, $directory);
+
+        $this->remotes[$name] = $directory;
+
+        return $this;
+    }
+
+    /**
+     * Where a remote this project was given actually is, to read it directly.
+     *
+     * Reading the remote repository rather than the pushing one is the point:
+     * `git ls-remote` and the local `refs/remotes/` both answer from the
+     * fetching side, and a publication is only published if the commit is in
+     * the other repository.
+     *
+     * @throws RuntimeException when the project was given no such remote
+     */
+    public function remote(string $name = 'origin'): string
+    {
+        return $this->remotes[$name]
+            ?? throw new RuntimeException('This project has no remote named "' . $name . '".');
+    }
+
+    /**
+     * The commit a branch points at in the remote, or null when it has no such
+     * branch.
+     *
+     * @throws RuntimeException when the project was given no such remote
+     */
+    public function remoteHeadOf(string $branch, string $remote = 'origin'): ?string
+    {
+        $result = Git::tryRun(
+            $this->remote($remote),
+            'rev-parse',
+            '--verify',
+            '--quiet',
+            'refs/heads/' . $branch,
+        );
+
+        return $result->exitCode === 0 ? trim($result->standardOutput) : null;
+    }
+
+    /**
+     * Every branch the remote holds, in a stable order.
+     *
+     * The whole set rather than a lookup: "the task branch was published" and
+     * "only the task branch was published" are different claims, and a push
+     * that sent the user's own branches too would only be caught by the
+     * second.
+     *
+     * @return list<string>
+     *
+     * @throws RuntimeException when the project was given no such remote
+     */
+    public function remoteBranches(string $remote = 'origin'): array
+    {
+        $branches = Git::run(
+            $this->remote($remote),
+            'branch',
+            '--format=%(refname:short)',
+        )->standardOutputLines();
+
+        sort($branches);
+
+        return $branches;
     }
 
     /**
