@@ -34,6 +34,9 @@ use RuntimeException;
  * - **Reporting nothing**, because "silence is not success" is a rule with
  *   consequences for the whole loop and a fixture that could not be silent
  *   could not test it.
+ * - **Reporting a block nothing can read**, because an unreadable report and no
+ *   report at all are two different failures: one can be quoted back to the
+ *   next attempt, the other can only be described.
  * - **How long it waits**, for the attempt timeout and the run budget.
  * - **Refusing to stop**, for the escalation from a termination signal to a
  *   kill.
@@ -56,6 +59,7 @@ final class FixtureStep
     private const string EDITS = 'edits';
     private const string SECONDS = 'seconds';
     private const string REPORTS = 'reports';
+    private const string MALFORMED = 'malformed';
     private const string IGNORES_TERMINATION = 'ignores_termination';
     private const string INTERRUPTS_RUNNER = 'interrupts_runner';
 
@@ -80,6 +84,7 @@ final class FixtureStep
         private readonly array $edits,
         private readonly int $seconds,
         private readonly bool $reports,
+        private readonly bool $malformed,
         private readonly bool $ignoresTermination,
         private readonly bool $interruptsTheRunner,
     ) {
@@ -147,6 +152,7 @@ final class FixtureStep
             [],
             $mode->waits() ? self::DEFAULT_WAIT_SECONDS : 0,
             true,
+            false,
             false,
             false,
         );
@@ -223,7 +229,27 @@ final class FixtureStep
      */
     public function reportingNothing(): self
     {
-        return $this->with(reports: false);
+        return $this->with(reports: false, malformed: false);
+    }
+
+    /**
+     * The same step, printing a result block that cannot be read.
+     *
+     * The other half of PROJECT.md section J, item 4's "malformed output": an
+     * attempt that reported *something* in the right place and in the right
+     * fence, and whose payload is not a report. It is a different failure from
+     * {@see self::reportingNothing()} — the package has a block to quote back,
+     * and the next attempt is told what was wrong with it rather than that
+     * nothing arrived — and it is the one agents actually produce, by being cut
+     * off mid-sentence or by wrapping their JSON in more prose.
+     *
+     * What is printed is the step's own report with its last byte missing
+     * ({@see FixtureWorkerProgram}), so it stays deterministic and stays
+     * recognisable as the report it was trying to be.
+     */
+    public function reportingMalformed(): self
+    {
+        return $this->with(reports: true, malformed: true);
     }
 
     /**
@@ -318,6 +344,14 @@ final class FixtureStep
         return $this->reports;
     }
 
+    /**
+     * Whether what it reports is a block nothing can read.
+     */
+    public function reportsMalformed(): bool
+    {
+        return $this->malformed;
+    }
+
     public function ignoresTermination(): bool
     {
         return $this->ignoresTermination;
@@ -343,6 +377,7 @@ final class FixtureStep
             self::EDITS => $this->edits,
             self::SECONDS => $this->seconds,
             self::REPORTS => $this->reports,
+            self::MALFORMED => $this->malformed,
             self::IGNORES_TERMINATION => $this->ignoresTermination,
             self::INTERRUPTS_RUNNER => $this->interruptsTheRunner,
         ];
@@ -392,6 +427,7 @@ final class FixtureStep
             $files,
             self::integer($raw, self::SECONDS),
             self::boolean($raw, self::REPORTS),
+            self::boolean($raw, self::MALFORMED),
             self::boolean($raw, self::IGNORES_TERMINATION),
             self::boolean($raw, self::INTERRUPTS_RUNNER),
         );
@@ -455,6 +491,7 @@ final class FixtureStep
         ?array $edits = null,
         ?int $seconds = null,
         ?bool $reports = null,
+        ?bool $malformed = null,
         ?bool $ignoresTermination = null,
         ?bool $interruptsTheRunner = null,
     ): self {
@@ -466,6 +503,7 @@ final class FixtureStep
             $edits ?? $this->edits,
             $seconds ?? $this->seconds,
             $reports ?? $this->reports,
+            $malformed ?? $this->malformed,
             $ignoresTermination ?? $this->ignoresTermination,
             $interruptsTheRunner ?? $this->interruptsTheRunner,
         );

@@ -32,10 +32,13 @@ use Throwable;
  * **Why it speaks the real protocol.** The report is built from
  * {@see ResultProtocol}'s own constants, so the fixture cannot drift into
  * printing a format nothing asks for, and every adapter reads it without
- * knowing it is a fixture. A test that needs malformed output scripts a step
- * that reports nothing ({@see FixtureStep::reportingNothing()}); it does not
- * need a worker that spells the protocol wrong, because that is
- * {@see \Celyes\RalphPhp\Tests\Agent\ReportReaderTest}'s subject.
+ * knowing it is a fixture. The one thing it can print wrong is a report it was
+ * cut off in the middle of ({@see FixtureStep::reportingMalformed()}), which is
+ * derived from the same correct block rather than spelled separately: the
+ * refusals a report can earn are
+ * {@see \Celyes\RalphPhp\Tests\Agent\ReportReaderTest}'s subject, and what
+ * a fixture is needed for is that an adapter running a real process refuses one
+ * at all.
  *
  * **Determinism.** Everything printed, written and returned comes from the
  * step. The clock is read only to wait, nothing is random, no network and no
@@ -148,7 +151,7 @@ final class FixtureWorkerProgram
             return $step->status();
         }
 
-        fwrite(STDOUT, self::report($step));
+        fwrite(STDOUT, $step->reportsMalformed() ? self::unreadableReport($step) : self::report($step));
 
         return $step->status();
     }
@@ -350,6 +353,32 @@ final class FixtureWorkerProgram
      */
     private static function report(FixtureStep $step): string
     {
+        return self::fenced(self::payload($step));
+    }
+
+    /**
+     * The step's result as an agent that was cut off mid-report left it.
+     *
+     * The correct payload with its last byte gone, which is the commonest shape
+     * of a report nothing can read: the fence is right, the block is there, and
+     * the JSON ends in the middle. Derived from {@see self::payload()} rather
+     * than written out, so a fixture asked for malformed output cannot print
+     * something that was never trying to be a report.
+     *
+     * @throws RuntimeException when the report cannot be encoded
+     */
+    private static function unreadableReport(FixtureStep $step): string
+    {
+        return self::fenced(substr(self::payload($step), 0, -1));
+    }
+
+    /**
+     * The step's report as JSON.
+     *
+     * @throws RuntimeException when the report cannot be encoded
+     */
+    private static function payload(FixtureStep $step): string
+    {
         $outcome = $step->mode()->declares();
 
         $fields = [
@@ -362,12 +391,18 @@ final class FixtureWorkerProgram
         }
 
         try {
-            $json = json_encode($fields, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+            return json_encode($fields, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         } catch (JsonException $exception) {
             throw new RuntimeException('cannot encode the step\'s result: ' . $exception->getMessage());
         }
+    }
 
-        return sprintf("```%s\n%s\n```\n", ResultProtocol::FENCE, $json);
+    /**
+     * A payload in the block the briefing asks an agent to print.
+     */
+    private static function fenced(string $payload): string
+    {
+        return sprintf("```%s\n%s\n```\n", ResultProtocol::FENCE, $payload);
     }
 
     private function __construct()

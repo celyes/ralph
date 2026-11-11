@@ -10,6 +10,7 @@ use Celyes\RalphPhp\Agent\CodexAdapter;
 use Celyes\RalphPhp\Agent\ExecutionBudget;
 use Celyes\RalphPhp\Agent\ExecutionRequest;
 use Celyes\RalphPhp\Agent\ExecutionResult;
+use Celyes\RalphPhp\Agent\ResultProtocol;
 use Celyes\RalphPhp\Agent\VersionRequirement;
 use Celyes\RalphPhp\Agent\Workspace;
 use Celyes\RalphPhp\Config\AgentDefinition;
@@ -211,6 +212,41 @@ final class FixtureWorkerTest extends TestCase
 
         // The edits are still there, unclaimed: a workspace with changes nobody
         // reported is exactly what section F must not commit.
+        self::assertFileExists($this->workspace . '/src/Import.php');
+    }
+
+    /**
+     * A worker can print a block the package cannot read.
+     *
+     * The other silence, and why {@see FixtureStep::reportingMalformed()}
+     * exists next to {@see FixtureStep::reportingNothing()}: the fence is
+     * right, the block is there, and the JSON ends in the middle, which is the
+     * commonest way a real agent's report is unusable. What the step prints is
+     * its own correct report minus its last byte, so the refusal quotes
+     * something recognisable — and the summary in it is *not* taken as a claim,
+     * because a claim read out of a block the package refused would be a claim
+     * it had already decided it could not read.
+     */
+    #[Test]
+    public function a_step_can_report_a_block_that_cannot_be_read(): void
+    {
+        $step = FixtureStep::success(['src/Import.php' => "<?php\n"])
+            ->saying('Added the option and a test.')
+            ->reportingMalformed();
+        $worker = FixtureWorker::install($this->tools, [$step]);
+
+        $result = $this->attemptAt($worker);
+        $evidence = $result->evidence()->toMarkdown();
+
+        self::assertSame(AttemptOutcome::Error, $result->outcome());
+        self::assertFalse($result->hasCandidate());
+        self::assertSame('', $result->claim()->text());
+        self::assertStringContainsString('could not read', $result->evidence()->label());
+        // The block as it was printed: the report it was trying to be, cut off.
+        self::assertStringContainsString('"' . ResultProtocol::OUTCOME . '"', $evidence);
+        self::assertStringContainsString($step->summary(), $evidence);
+        self::assertStringContainsString('not valid JSON', $evidence);
+        // And the edits are still there, unclaimed, as for any silence.
         self::assertFileExists($this->workspace . '/src/Import.php');
     }
 
