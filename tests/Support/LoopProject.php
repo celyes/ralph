@@ -66,6 +66,11 @@ final class LoopProject
      */
     private array $adapters = [];
 
+    /**
+     * The agent `agent` names by default, once a case has installed it.
+     */
+    private ?FixtureWorker $worker = null;
+
     private function __construct(
         private readonly TemporaryProject $project,
         /**
@@ -103,9 +108,26 @@ final class LoopProject
      */
     public function withWorker(FixtureStep ...$steps): self
     {
-        FixtureWorker::install($this->tools, array_values($steps));
+        $this->worker = FixtureWorker::install($this->tools, array_values($steps));
 
         return $this;
+    }
+
+    /**
+     * That agent, to ask what it was asked to do.
+     *
+     * The same question {@see self::agent()} answers for an agent installed
+     * under a name of its own: which invocations it made, where it made them,
+     * and what briefing arrived — which is how a case states that the workspace
+     * the agent worked in was the task's own, or that no agent was started at
+     * all.
+     *
+     * @throws RuntimeException when the case installed no worker
+     */
+    public function worker(): FixtureWorker
+    {
+        return $this->worker
+            ?? throw new RuntimeException('This project has no worker; nothing called withWorker().');
     }
 
     /**
