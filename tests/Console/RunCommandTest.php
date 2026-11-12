@@ -533,6 +533,64 @@ final class RunCommandTest extends TestCase
     }
 
     /**
+     * `--bail` stops the run at the first task that does not pass, and the
+     * command exits on the failure rather than on the end of the checklist.
+     *
+     * Through the binary because the option and the exit status are what only
+     * the command can be held to; that the loop stops where it says it does is
+     * {@see \Celyes\RalphPhp\Tests\Run\RunnerTest}.
+     */
+    #[Test]
+    public function the_bail_option_stops_the_run_at_the_first_failed_task(): void
+    {
+        $second = 'Document the import command in the README';
+
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// not good enough\n"]))
+            ->withTasks([self::TASK, $second])
+            // A check that is a real process and a real non-zero status.
+            ->withConfiguration(['checks' => [['command' => ['php', '-r', 'exit(1);']]]]);
+
+        $result = $this->project->ralph(['run', '--bail']);
+
+        self::assertSame(ExitCode::EXECUTION, $result->exitCode, $result->describe());
+        self::assertStringContainsString('bailing: --bail was given', $result->standardOutput, $result->describe());
+        self::assertStringContainsString(
+            'asked to stop at the first failure',
+            $result->standardOutput,
+            $result->describe(),
+        );
+
+        // The second task was never taken on: still pending, and no pass of
+        // its own.
+        self::assertStringContainsString('- [ ] ' . self::TASK, $this->project->checklist());
+        self::assertStringContainsString('- [ ] ' . $second, $this->project->checklist());
+        self::assertSame(1, $this->project->journal()->runs()->latest()?->iterations());
+        self::assertSame(StopKind::Failed, $this->project->journal()->runs()->latest()?->stopKind());
+    }
+
+    /**
+     * Both bail options at once is a refusal, because neither reading of it is
+     * more likely than a typo — and a run that guessed could work through a
+     * checklist the user expected it to stop in.
+     */
+    #[Test]
+    public function the_two_bail_options_together_are_refused_without_starting_a_run(): void
+    {
+        $this->project->withWorker()->withTasks([self::TASK])->withConfiguration();
+
+        $result = $this->project->ralph(['run', '--bail', '--no-bail']);
+
+        self::assertSame(ExitCode::USAGE, $result->exitCode, $result->describe());
+        self::assertStringContainsString('both "--bail" and "--no-bail"', $result->errorOutput);
+        self::assertStringContainsString('limits.bail_on_failure', $result->errorOutput);
+
+        // Nothing was taken on.
+        self::assertStringContainsString('- [ ] ' . self::TASK, $this->project->checklist());
+        self::assertStringNotContainsString('processing pending tasks', $result->standardOutput, $result->describe());
+    }
+
+    /**
      * A project that was never initialised is not run on the defaults.
      *
      * The defaults would write a state database, a branch and a worktree into a
@@ -585,5 +643,8 @@ final class RunCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertStringContainsString('Usage: ralph run [--agent NAME]', $result->standardOutput);
         self::assertStringContainsString('--agent NAME', $result->standardOutput);
+        self::assertStringContainsString('--bail', $result->standardOutput);
+        self::assertStringContainsString('--no-bail', $result->standardOutput);
+        self::assertStringContainsString('limits.bail_on_failure', $result->standardOutput);
     }
 }

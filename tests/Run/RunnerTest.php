@@ -559,6 +559,142 @@ final class RunnerTest extends TestCase
     }
 
     /**
+     * With bailing on, the first task the loop gives up on ends the run, and
+     * the tasks after it are never started.
+     *
+     * The counterpart of the case above, which is the same checklist and the
+     * same failing check with the setting off. What is asserted is the whole of
+     * the difference: one task taken on instead of two, the second left pending
+     * and unattempted, and a run whose row says why it stopped. The failed task
+     * itself is asserted to be left exactly as the carrying-on loop leaves it —
+     * unchecked, with its attempts and its evidence — because bailing is a
+     * decision about what happens next and must not also change what happened.
+     */
+    #[Test]
+    public function a_run_told_to_bail_stops_at_the_first_task_that_does_not_pass(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// not good enough\n"])]);
+
+        $terminal = new CapturingOutput();
+        $verifier = ScriptedVerifier::scripted([false, true]);
+        $report = $this->loopOver(
+            $verifier,
+            ['limits' => ['attempts_per_task' => 1, 'bail_on_failure' => true]],
+            $terminal,
+        );
+
+        // One task taken on, and the check ran once: the second task was never
+        // prepared, let alone verified.
+        self::assertCount(1, $report->results());
+        self::assertCount(1, $verifier->calls);
+
+        $failed = $report->results()[0];
+        self::assertTrue($failed->isFailure());
+        self::assertFalse($failed->wasChecked());
+        self::assertNull($failed->commitSha());
+        self::assertSame(1, $failed->attempts());
+        self::assertStringContainsString('verification failed', (string) $failed->blocker()?->reason());
+
+        // Neither box is ticked, and nothing was committed.
+        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
+        self::assertStringContainsString('- [ ] ' . self::SECOND, $this->tasksFile());
+        self::assertCount(0, $this->commitsBeyondBase());
+
+        $stop = $report->stop();
+        self::assertSame(StopKind::Failed, $stop->kind());
+        self::assertTrue($report->stoppedForAttention());
+        self::assertStringContainsString($failed->taskId()->value() . ' did not pass', $stop->reason());
+        self::assertStringContainsString('1 task untouched', $stop->reason());
+        self::assertStringContainsString('still pending', $stop->nextAction());
+
+        // The run was told at the start that it would stop this way, so a user
+        // watching it is not left to work that out from where it ended.
+        self::assertStringContainsString('bailing: limits.bail_on_failure is on', $terminal->standardOutput());
+        self::assertStringContainsString('next: ' . $stop->nextAction(), $terminal->standardOutput());
+
+        // And the row says it too, for the `ralph status` read the next morning.
+        $run = $this->journal()->runs()->get($report->run()->rowId());
+        self::assertSame(StopKind::Failed, $run->stopKind());
+        self::assertSame($stop->reason(), $run->stopReason());
+        self::assertSame($stop->nextAction(), $run->stopAction());
+        self::assertSame(1, $run->iterations(), 'Only the task it bailed on was taken on.');
+
+        // The second task is untouched rather than failed: no pass was ever
+        // opened for it, so `ralph run` has something to do.
+        $second = $report->tasks()->pending()[1];
+        self::assertSame(self::SECOND, $second->description());
+        self::assertSame([], $this->journal()->generations()->forTask($second->id()));
+    }
+
+    /**
+     * `--bail` stops a run whose project file says nothing about bailing.
+     *
+     * The option is the whole of the difference from the carrying-on case: the
+     * same checklist, the same failing check, the same configuration.
+     */
+    #[Test]
+    public function the_command_line_can_ask_for_a_bail_the_configuration_does_not(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// not good enough\n"])]);
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(
+            ScriptedVerifier::scripted([false, true]),
+            ['limits' => ['attempts_per_task' => 1]],
+            $terminal,
+            bail: true,
+        );
+
+        self::assertCount(1, $report->results());
+        self::assertTrue($report->results()[0]->isFailure());
+        self::assertSame(StopKind::Failed, $report->stop()->kind());
+        self::assertStringContainsString('asked to stop at the first failure', $report->stop()->reason());
+        self::assertStringContainsString('- [ ] ' . self::SECOND, $this->tasksFile());
+
+        // Named as the option rather than described as the configuration, which
+        // is not what turned it on here.
+        self::assertStringContainsString('bailing: --bail was given', $terminal->standardOutput());
+    }
+
+    /**
+     * `--no-bail` carries a run on past a failure the project file would have
+     * stopped it at.
+     *
+     * The direction that is easy to leave out, and the one that matters to
+     * anyone who turned the setting on for ordinary work and wants one run to
+     * get through the rest of a checklist regardless.
+     */
+    #[Test]
+    public function the_command_line_can_refuse_the_configured_bail_for_one_run(): void
+    {
+        $this->givenTasks([self::FIRST, self::SECOND]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// not good enough\n"])]);
+
+        $terminal = new CapturingOutput();
+        $report = $this->loopOver(
+            ScriptedVerifier::scripted([false, true]),
+            ['limits' => ['attempts_per_task' => 1, 'bail_on_failure' => true]],
+            $terminal,
+            bail: false,
+        );
+
+        // Both tasks taken on: the first failed and the second, which is
+        // independent work, was completed and checked off.
+        self::assertCount(2, $report->results());
+        self::assertTrue($report->results()[0]->isFailure());
+        self::assertTrue($report->results()[1]->isCompleted());
+        self::assertStringContainsString('- [x] ' . self::SECOND, $this->tasksFile());
+
+        // Ended as the carrying-on loop ends: at the end of the checklist,
+        // naming the task it gave up on rather than one it stopped at.
+        self::assertSame(StopKind::Attempts, $report->stop()->kind());
+        self::assertStringNotContainsString('first failure', $report->stop()->reason());
+        self::assertStringNotContainsString('bailing', $terminal->standardOutput());
+    }
+
+    /**
      * An agent that asks for human input blocks its task and stops the run,
      * rather than handing the next task to an agent that is waiting for an
      * answer.
@@ -2341,6 +2477,7 @@ final class RunnerTest extends TestCase
         ?CapturingOutput $terminal = null,
         ?RepositoryLock $lock = null,
         ?Clock $clock = null,
+        ?bool $bail = null,
     ): RunReport {
         return Runner::forProject(
             $this->configuration($overrides),
@@ -2349,7 +2486,7 @@ final class RunnerTest extends TestCase
             AdapterRegistry::default(),
             $clock,
             $lock,
-        )->run();
+        )->run(null, $bail);
     }
 
     /**

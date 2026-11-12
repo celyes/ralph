@@ -39,7 +39,7 @@ final class ResumeCommand extends LoopCommand
     public function help(): array
     {
         return [
-            'Usage: ralph resume [--agent NAME]',
+            'Usage: ralph resume [--agent NAME] [--bail|--no-bail]',
             '',
             'Reconciles worktree, branch and recorded commit state after an interruption and',
             'continues with the agent and settings recorded for the original run. An edit to',
@@ -57,6 +57,14 @@ final class ResumeCommand extends LoopCommand
             'Options:',
             '  --agent NAME  Confirm the agent the interrupted run recorded. A resume cannot',
             '                change agents, so naming a different one is refused.',
+            '  --bail        Stop at the first task that does not pass, leaving the tasks',
+            '                after it untouched and still pending.',
+            '  --no-bail     Carry on past a task that does not pass, even when',
+            '                "limits.bail_on_failure" is on in the project configuration.',
+            '',
+            'Bailing is this resume\'s own decision, unlike the agent: it shapes the tasks',
+            'still to come rather than the work already done, which is how the iteration and',
+            'time limits are read too. Neither given, "limits.bail_on_failure" decides.',
             '',
             'To use a different agent, reconcile the interrupted work first — "ralph status"',
             'shows what is outstanding — and then begin a new run with it:',
@@ -88,11 +96,11 @@ final class ResumeCommand extends LoopCommand
      */
     protected function options(): array
     {
-        return ['agent'];
+        return ['agent', 'bail', 'no-bail'];
     }
 
     protected function intent(Input $input, Configuration $configuration): RunIntent
     {
-        return RunIntent::resumed($this->requestedAgent($input));
+        return RunIntent::resumed($this->requestedAgent($input), $this->requestedBail($input));
     }
 }

@@ -34,7 +34,7 @@ final class RunCommand extends LoopCommand
     public function help(): array
     {
         return [
-            'Usage: ralph run [--agent NAME]',
+            'Usage: ralph run [--agent NAME] [--bail|--no-bail]',
             '',
             'Takes the checklist\'s pending tasks in file order, one at a time. For each:',
             'prepares an isolated worktree and the task\'s context, invokes the selected',
@@ -44,11 +44,20 @@ final class RunCommand extends LoopCommand
             '',
             'A task whose checks fail is attempted again while its attempt limit holds, and',
             'is left unchecked; the run carries on to the next task, which is independent',
-            'work. A task that stops to ask a question ends the run, because the answer is a',
-            'person\'s to give.',
+            'work — unless bailing is on, which stops the run there. A task that stops to ask',
+            'a question ends the run either way, because the answer is a person\'s to give.',
             '',
             'Options:',
             '  --agent NAME  Use this agent for the run instead of the configured default.',
+            '  --bail        Stop the run at the first task that does not pass, leaving the',
+            '                tasks after it untouched and still pending.',
+            '  --no-bail     Carry on past a task that does not pass, even when',
+            '                "limits.bail_on_failure" is on in the project configuration.',
+            '',
+            'Neither given, "limits.bail_on_failure" decides; it is off by default. A bailed',
+            'run exits 1 and names the task it stopped on, and the task is left exactly as a',
+            'failure the run walked past would be: unchecked, retriable, with its workspace',
+            'and logs kept.',
             '',
             'Nothing of yours is touched without being asked for: a checkout holding',
             'unrelated uncommitted changes is refused rather than stashed, task commits are',
@@ -85,11 +94,11 @@ final class RunCommand extends LoopCommand
      */
     protected function options(): array
     {
-        return ['agent'];
+        return ['agent', 'bail', 'no-bail'];
     }
 
     protected function intent(Input $input, Configuration $configuration): RunIntent
     {
-        return RunIntent::fresh($this->requestedAgent($input));
+        return RunIntent::fresh($this->requestedAgent($input), $this->requestedBail($input));
     }
 }

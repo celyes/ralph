@@ -146,6 +146,67 @@ final class RunStopTest extends TestCase
     }
 
     /**
+     * A bail: the run was asked to stop at the first task that did not pass,
+     * and what it reports is that task's own next action plus the standing of
+     * the tasks it never started.
+     *
+     * The distinction that matters is in the second half. A bailed run leaves
+     * two different kinds of unfinished work behind — one task that was
+     * attempted and failed, and however many that were never touched — and a
+     * user who is told only about the first will not know whether `ralph run`
+     * has anything left to do.
+     */
+    #[Test]
+    public function a_bail_names_the_failed_task_and_the_tasks_it_never_started(): void
+    {
+        $failed = $this->pass(
+            attempts: 2,
+            blocker: Blocker::raised(
+                'verification failed: tests exited 1',
+                'Read `ralph logs` for the failing check, then run `ralph retry`.',
+            ),
+        );
+
+        $stop = RunStop::bailed($failed, 3);
+
+        // Not `Attempts`: a bail can happen on a first attempt, and reporting
+        // spent attempts that were never spent would send the user to raise a
+        // limit that is not the problem.
+        self::assertSame(StopKind::Failed, $stop->kind());
+        self::assertTrue($stop->needsAttention());
+        self::assertSame($failed->taskId(), $stop->task());
+
+        self::assertStringContainsString($failed->taskId()->value() . ' did not pass', $stop->reason());
+        self::assertStringContainsString('asked to stop at the first failure', $stop->reason());
+        self::assertStringContainsString('3 tasks untouched', $stop->reason());
+
+        // The pass's own action first, then what is true of the rest of the
+        // checklist and how to stop bailing.
+        self::assertStringContainsString('Read `ralph logs`', $stop->nextAction());
+        self::assertStringContainsString('still pending', $stop->nextAction());
+        self::assertStringContainsString('--no-bail', $stop->nextAction());
+    }
+
+    /**
+     * A bail on the last pending task: there is nothing untouched to report, so
+     * nothing is said about any.
+     *
+     * "with 0 tasks untouched" is the kind of line that makes a user re-read a
+     * sentence to learn nothing, and offering `ralph run` to carry on with
+     * tasks that do not exist would be worse than saying nothing.
+     */
+    #[Test]
+    public function a_bail_with_nothing_left_says_nothing_about_untouched_tasks(): void
+    {
+        $stop = RunStop::bailed($this->pass(attempts: 1), 0);
+
+        self::assertSame(StopKind::Failed, $stop->kind());
+        self::assertStringNotContainsString('untouched', $stop->reason());
+        self::assertStringNotContainsString('still pending', $stop->nextAction());
+        self::assertStringContainsString('ralph logs', $stop->nextAction());
+    }
+
+    /**
      * Ambiguous ownership found while a task was being worked on: the pass
      * failed rather than blocked, so the loop carried on, and what the run
      * reports at the end is the refusal's own next action rather than a retry

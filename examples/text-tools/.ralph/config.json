@@ -54,6 +54,7 @@
         "iterations": 3,
         "attempts_per_task": 2,
         "task_timeout": 1200,
-        "run_timeout": 3600
+        "run_timeout": 3600,
+        "bail_on_failure": false
     }
 }

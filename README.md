@@ -237,7 +237,7 @@ including while a run is interrupted. Exits 0 when a run could start — warning
 included — and 78 when a check failed. `run` and `resume` perform the same
 checks before they start work.
 
-### `ralph run [--agent NAME]`
+### `ralph run [--agent NAME] [--bail|--no-bail]`
 
 The loop. Takes the checklist's pending tasks in file order, one at a time, and
 for each one: prepares an isolated worktree and the task's context, invokes the
@@ -246,8 +246,13 @@ changes on a task branch, pushes if pushing is enabled, and only then checks the
 item off.
 
 A task whose checks fail is attempted again while its attempt limit holds and is
-left unchecked; the run carries on to the next task. A task that stops to ask a
-question ends the run, because the answer is yours to give.
+left unchecked; the run then carries on to the next task. A task that stops to
+ask a question ends the run, because the answer is yours to give.
+
+`--bail` stops the run at the first task it gives up on instead of carrying on,
+and `--no-bail` carries on even when `limits.bail_on_failure` is set in the
+project configuration. With neither, that setting decides; it is off by default.
+See [Bailing out of a run](#bailing-out-of-a-run).
 
 ### `ralph status [--json]`
 
@@ -276,12 +281,16 @@ beside it are named rather than printed — the staged diff a stopped pass
 preserved, the evidence behind a no-change completion, the record behind a
 ticked box. See [Logs and diagnostics](#logs-and-diagnostics).
 
-### `ralph resume [--agent NAME]`
+### `ralph resume [--agent NAME] [--bail|--no-bail]`
 
 Reconciles worktree, branch and recorded commit state after an interruption and
 continues with the agent and settings recorded for the original run. A task is
 picked up at the phase it stopped in, and nothing earlier is repeated. See
 [Recovery](#recovery).
+
+`--bail` and `--no-bail` work as they do for `run`, and are this resume's own
+decision: they shape the tasks still to come rather than the work already done.
+The agent, unlike bailing, cannot be changed by a resume.
 
 ### `ralph retry TASK-ID`
 
@@ -378,7 +387,8 @@ any work starts.
     "iterations": 10,
     "attempts_per_task": 3,
     "task_timeout": 1800,
-    "run_timeout": 7200
+    "run_timeout": 7200,
+    "bail_on_failure": false
   }
 }
 ```
@@ -675,6 +685,7 @@ and any required push must succeed. Only then is the box ticked.
 | `limits.attempts_per_task` | 3 | attempts before a task is left failed |
 | `limits.task_timeout` | 1800s | seconds one task may spend in the agent |
 | `limits.run_timeout` | 7200s | seconds of active run time before stopping at a task boundary |
+| `limits.bail_on_failure` | `false` | whether the first task the loop gives up on ends the run |
 | `checks[].timeout` | 600s | seconds one verification command may run |
 | `workspace.prepare[].timeout` | 900s | seconds one preparation command may run |
 
@@ -684,6 +695,33 @@ stopped. Counters and elapsed time carry across a `resume`, so resuming finishes
 the interrupted run's work rather than restarting its budget. A deliberately new
 run starts with the limits whole and is identifiable as a new run, without losing
 completed task history.
+
+### Bailing out of a run
+
+By default a task the loop gives up on does not take the rest of the run with
+it: the task after it is independent work, so it is taken on, and the failed one
+is left unchecked for you to retry. Set `limits.bail_on_failure` to `true` to
+stop the run at the first task that does not pass instead:
+
+```json
+{"limits": {"bail_on_failure": true}}
+```
+
+`ralph run --bail` turns it on for one run, and `ralph run --no-bail` turns it
+off for one run when the configuration has it on. Both options work on `resume`
+too. Giving both at once is refused rather than guessed at.
+
+What a bail changes is only what happens *next*. The task it stopped on is left
+exactly as a failure the loop walks past would be — unchecked, retriable, with
+its attempts, workspace and logs kept — and the tasks after it are never
+started, so they stay pending and untouched and the next `ralph run` takes them
+on. A bailed run exits 1 and names the task it stopped on, together with how
+many tasks it left untouched.
+
+Worth turning on when a checklist's later tasks build on its earlier ones, or
+when you would rather look at a failure while it is the newest thing in the
+project than find six of them in the morning. A task that stops to *ask a
+question*, and an interrupted run, end the run whatever this setting says.
 
 ## Recovery
 

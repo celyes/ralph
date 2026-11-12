@@ -70,6 +70,7 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(Defaults::ATTEMPTS_PER_TASK, $config->limits()->attemptsPerTask());
         self::assertSame(Defaults::TASK_TIMEOUT_SECONDS, $config->limits()->taskTimeout());
         self::assertSame(Defaults::RUN_TIMEOUT_SECONDS, $config->limits()->runTimeout());
+        self::assertFalse($config->limits()->bailsOnFailure());
 
         self::assertCount(1, $config->checks());
         self::assertSame(['composer', 'test'], $config->checks()[0]->command());
@@ -119,6 +120,7 @@ final class ConfigurationLoaderTest extends TestCase
                 'attempts_per_task' => 2,
                 'task_timeout' => 900,
                 'run_timeout' => 3600,
+                'bail_on_failure' => true,
             ],
         ]);
 
@@ -145,6 +147,7 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(2, $config->limits()->attemptsPerTask());
         self::assertSame(900, $config->limits()->taskTimeout());
         self::assertSame(3600, $config->limits()->runTimeout());
+        self::assertTrue($config->limits()->bailsOnFailure());
 
         self::assertCount(2, $config->checks());
         self::assertSame('unit', $config->checks()[0]->name());

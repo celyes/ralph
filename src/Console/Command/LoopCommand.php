@@ -9,6 +9,7 @@ use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Exception\UsageException;
 use Celyes\RalphPhp\Run\RunIntent;
 use Celyes\RalphPhp\Run\RunReport;
 use Celyes\RalphPhp\Run\Runner;
@@ -64,6 +65,44 @@ abstract class LoopCommand extends ProjectCommand
      *         does not say
      */
     abstract protected function intent(Input $input, Configuration $configuration): RunIntent;
+
+    /**
+     * Whether this run was told to stop at the first task that does not pass.
+     *
+     * Three answers, not two: `--bail`, `--no-bail`, and nothing said — and
+     * nothing said is null rather than false, so that
+     * `limits.bail_on_failure` in the project file still decides
+     * ({@see RunIntent::bails()}). A command line that reads the setting back as
+     * `false` would make every invocation an implicit `--no-bail`.
+     *
+     * Both at once is refused rather than resolved by precedence. There is no
+     * reading of `ralph run --bail --no-bail` that is more likely than a
+     * mistake, and a run that guessed would be a run that worked through a
+     * checklist the user expected it to stop in.
+     *
+     * @throws UsageException when both options are given
+     */
+    protected function requestedBail(Input $input): ?bool
+    {
+        $bail = $input->hasOption('bail');
+        $carryOn = $input->hasOption('no-bail');
+
+        if ($bail && $carryOn) {
+            throw new UsageException(
+                sprintf('"ralph %s" cannot be given both "--bail" and "--no-bail".', $this->name()),
+                [
+                    'Give one of them, or neither to use "limits.bail_on_failure" from the '
+                    . 'project configuration.',
+                ],
+            );
+        }
+
+        return match (true) {
+            $bail => true,
+            $carryOn => false,
+            default => null,
+        };
+    }
 
     /**
      * The exit status for a run that finished and reported itself.

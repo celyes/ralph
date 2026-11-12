@@ -137,6 +137,18 @@ final class Defaults
     public const int RUN_TIMEOUT_SECONDS = 7200;
 
     /**
+     * Whether a task the run gives up on ends the run.
+     *
+     * Off, because the first release assumes tasks are independent work
+     * (PROJECT.md section 2): the task after a failed one usually has nothing
+     * to do with it, and stopping by default would turn one bad task into a
+     * checklist that never gets worked through. Projects whose tasks build on
+     * each other, and anyone who would rather look at a failure while it is
+     * fresh than find six of them in the morning, turn it on.
+     */
+    public const bool BAIL_ON_FAILURE = false;
+
+    /**
      * Seconds a single verification command may run.
      */
     public const int CHECK_TIMEOUT_SECONDS = 600;
@@ -269,6 +281,7 @@ final class Defaults
                 'attempts_per_task' => self::ATTEMPTS_PER_TASK,
                 'task_timeout' => self::TASK_TIMEOUT_SECONDS,
                 'run_timeout' => self::RUN_TIMEOUT_SECONDS,
+                'bail_on_failure' => self::BAIL_ON_FAILURE,
             ],
         ];
     }

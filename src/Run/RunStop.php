@@ -178,6 +178,49 @@ final class RunStop
     }
 
     /**
+     * A task was given up on and the run was asked not to carry on past that.
+     *
+     * The ending `limits.bail_on_failure` and `run --bail` exist for. Nothing
+     * about the pass itself differs from a failure the loop would have walked
+     * past — the task is unchecked, retriable and holds its own evidence — so
+     * the pass's own next action is what a user is given, with the tasks the
+     * run did not take on named afterwards, because those are untouched and
+     * still pending rather than failed.
+     *
+     * {@see StopKind::Failed} rather than {@see StopKind::Attempts}: a bail can
+     * happen on a task's first attempt, and reporting spent attempts that were
+     * never spent would send a user to raise a limit that is not the problem.
+     *
+     * @param int $pending tasks the run never took on
+     */
+    public static function bailed(TaskResult $result, int $pending): self
+    {
+        $id = $result->taskId();
+        $action = $result->blocker()?->nextAction() ?? sprintf(
+            'Read `ralph logs %s` for what the pass did, then run `ralph retry %s`.',
+            $id->value(),
+            $id->value(),
+        );
+
+        return self::of(
+            StopKind::Failed,
+            sprintf(
+                '%s did not pass and the run was asked to stop at the first failure%s',
+                $id->value(),
+                $pending < 1 ? '' : sprintf(', with %d task%s untouched', $pending, $pending === 1 ? '' : 's'),
+            ),
+            $pending < 1
+                ? $action
+                : sprintf(
+                    '%s The untouched tasks are still pending: run `ralph run` to carry on with them, '
+                    . 'or `--no-bail` to work through failures in one run.',
+                    $action,
+                ),
+            $id,
+        );
+    }
+
+    /**
      * A pass is waiting on a person, so the loop stopped.
      *
      * Section H, item 9's "unresolved decisions", and its "ambiguous ownership"

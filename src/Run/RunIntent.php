@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Run;
 
+use Celyes\RalphPhp\Config\Limits;
 use Celyes\RalphPhp\Tasks\TaskId;
 
 /**
@@ -16,7 +17,7 @@ use Celyes\RalphPhp\Tasks\TaskId;
  * apart: the lock, the checkout inspection, the frozen checks, the per-task
  * sequence and every one of the six endings are the same work whichever
  * command asked for it, and the parts that are *not* the same are exactly the
- * four questions this value answers.
+ * five questions this value answers.
  *
  *  - **Which agent.** A fresh run asks the configuration
  *    ({@see \Celyes\RalphPhp\Agent\AgentSelector}); a resume asks the run it is
@@ -30,6 +31,8 @@ use Celyes\RalphPhp\Tasks\TaskId;
  *    checklist in file order; `retry` works on the one task named and stops.
  *  - **What the lock records.** A conflicting runner is told which command it
  *    is conflicting with, not merely that something holds the repository.
+ *  - **Whether a failed task ends the run.** `--bail` and `--no-bail` answer it
+ *    for one run; left unsaid, `limits.bail_on_failure` does.
  *
  * Deliberately not a flag on the runner: a boolean `$resuming` would have left
  * `retry` to invent a third convention, and the lock purpose and the agent
@@ -57,6 +60,7 @@ final class RunIntent
         private readonly ?string $agent,
         private readonly ?TaskId $task,
         private readonly bool $continuesARun,
+        private readonly ?bool $bail = null,
     ) {
     }
 
@@ -65,10 +69,12 @@ final class RunIntent
      *
      * @param string|null $agent the name `--agent` gave, which overrides the
      *        project default for this run only
+     * @param bool|null $bail what `--bail` or `--no-bail` said about stopping
+     *        at the first failed task, or null to leave it to the configuration
      */
-    public static function fresh(?string $agent = null): self
+    public static function fresh(?string $agent = null, ?bool $bail = null): self
     {
-        return new self(self::RUN, $agent, null, false);
+        return new self(self::RUN, $agent, null, false, $bail);
     }
 
     /**
@@ -76,10 +82,15 @@ final class RunIntent
      *
      * @param string|null $agent the name `--agent` gave, which a resume may
      *        only use to confirm the agent the interrupted run recorded
+     * @param bool|null $bail what `--bail` or `--no-bail` said about stopping
+     *        at the first failed task. Unlike the agent, this is the resuming
+     *        run's own decision rather than the interrupted run's: it shapes
+     *        the tasks still to come, not the work already done, which is how
+     *        the iteration and time limits are read too.
      */
-    public static function resumed(?string $agent = null): self
+    public static function resumed(?string $agent = null, ?bool $bail = null): self
     {
-        return new self(self::RESUME, $agent, null, true);
+        return new self(self::RESUME, $agent, null, true, $bail);
     }
 
     /**
@@ -90,9 +101,9 @@ final class RunIntent
      * budget of the run that used them up would refuse the task before it
      * started.
      */
-    public static function retrying(TaskId $task, ?string $agent = null): self
+    public static function retrying(TaskId $task, ?string $agent = null, ?bool $bail = null): self
     {
-        return new self(self::RETRY, $agent, $task, false);
+        return new self(self::RETRY, $agent, $task, false, $bail);
     }
 
     /**
@@ -117,6 +128,33 @@ final class RunIntent
     public function task(): ?TaskId
     {
         return $this->task;
+    }
+
+    /**
+     * Whether a task the run gives up on ends the run, given what the
+     * configuration says.
+     *
+     * The command line wins where it spoke, and `limits.bail_on_failure`
+     * answers where it did not — the ordinary precedence, and the same one
+     * `--agent` follows. Resolved here rather than in {@see Runner} so that one
+     * reading of the two sources exists: a run that reports it bailed and a run
+     * that bailed are then the same run.
+     */
+    public function bails(Limits $limits): bool
+    {
+        return $this->bail ?? $limits->bailsOnFailure();
+    }
+
+    /**
+     * What the command line said about bailing, when it said anything.
+     *
+     * For the line the runner prints before it starts, which names an
+     * explicitly asked-for `--bail` rather than describing the configuration
+     * back to the user.
+     */
+    public function requestedBail(): ?bool
+    {
+        return $this->bail;
     }
 
     /**

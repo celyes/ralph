@@ -212,14 +212,16 @@ final class Runner
      *
      * @param string|null $requested the agent named on the command line, which
      *        overrides the project default for this run only
+     * @param bool|null $bail whether a task the run gives up on ends the run,
+     *        or null to leave it to `limits.bail_on_failure`
      *
      * @throws RalphException when the run cannot be set up, or when a task's
      *         outcome could not be recorded — the two cases where carrying on
      *         would mean guessing
      */
-    public function run(?string $requested = null): RunReport
+    public function run(?string $requested = null, ?bool $bail = null): RunReport
     {
-        return $this->start(RunIntent::fresh($requested));
+        return $this->start(RunIntent::fresh($requested, $bail));
     }
 
     /**
@@ -233,14 +235,16 @@ final class Runner
      *
      * @param string|null $requested the agent named on the command line, which
      *        a resume may only use to confirm the one already recorded
+     * @param bool|null $bail whether a task the resumed run gives up on ends
+     *        it, or null to leave it to `limits.bail_on_failure`
      *
      * @throws RalphException when there is no run to continue, when the agent
      *         cannot be the recorded one, when reconciliation needs a person,
      *         or when a task's outcome could not be recorded
      */
-    public function resume(?string $requested = null): RunReport
+    public function resume(?string $requested = null, ?bool $bail = null): RunReport
     {
-        return $this->start(RunIntent::resumed($requested));
+        return $this->start(RunIntent::resumed($requested, $bail));
     }
 
     /**
@@ -713,6 +717,12 @@ final class Runner
         );
 
         $limits = $this->configuration->limits();
+
+        // Resolved once, before the first task, and from the intent rather than
+        // the configuration alone: `--bail` is this run's answer and
+        // `limits.bail_on_failure` is the project's, and reading them per task
+        // would let an edit to the file change the policy halfway through a run.
+        $bails = $intent->bails($limits);
         $results = [];
         $stopped = $unreconciled === null ? null : RunStop::unreconciled($unreconciled);
         $drift = VerificationDrift::none();
@@ -796,6 +806,19 @@ final class Runner
                 $stopped = $result->isInterrupted()
                     ? $this->wasStopped($this->interruptions->requested(), $tasks, $results)
                     : RunStop::decision($result);
+
+                break;
+            }
+
+            // A failure the loop would otherwise walk past, which the run was
+            // asked not to. Checked after the pass has written its rows and
+            // been reported, so bailing changes what happens *next* and nothing
+            // about the task it stopped on: that task is left exactly as a
+            // failure is left when the loop carries on — unchecked, retriable,
+            // and holding its own evidence — and the tasks after it are never
+            // started, so they stay pending and untouched.
+            if ($bails && $result->isFailure()) {
+                $stopped = RunStop::bailed($result, $this->untaken($tasks, $results));
 
                 break;
             }
@@ -1174,6 +1197,17 @@ final class Runner
                 $run->carriedIterations(),
                 $run->carriedIterations() === 1 ? '' : 's',
                 $run->carriedSeconds(),
+            );
+        }
+
+        // Said when it is on, whichever source turned it on: once a bailed run
+        // has stopped it looks much like a run that worked through a short
+        // checklist, and a user who inherited the setting from the project file
+        // rather than typing it is owed the difference beforehand.
+        if ($intent->bails($this->configuration->limits())) {
+            $lines[] = sprintf(
+                'bailing: %s, so the first task that does not pass ends the run',
+                $intent->requestedBail() === true ? '--bail was given' : 'limits.bail_on_failure is on',
             );
         }
 
