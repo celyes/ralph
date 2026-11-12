@@ -203,9 +203,9 @@ instead of Codex, and how to start over. A run calls a paid coding agent once
 per task.
 
 [`docs/demonstrations.md`](docs/demonstrations.md) is what happened when that
-pass was actually run: Claude Code 2.1.226 over all three tasks, with the
-commits, the verification output, the elapsed time and the three places a person
-had to step in.
+pass was actually run, twice: Claude Code 2.1.226 over all three tasks, with the
+commits, the verification output, the elapsed time, and what a person had to do
+— three interventions the first time, none the second.
 
 The example has to be its own repository because each task is implemented in a
 linked worktree on a branch off the base commit — run it inside this checkout
