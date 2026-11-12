@@ -420,6 +420,19 @@ final class LoopProject
     }
 
     /**
+     * Run the binary in this project with nothing reading its output.
+     *
+     * `ralph run | head`: the terminal the command was writing to is gone
+     * before it has finished. {@see Cli::runWithoutAReader()}.
+     *
+     * @param list<string> $arguments
+     */
+    public function ralphWithoutAReader(array $arguments): CliResult
+    {
+        return Cli::runWithoutAReader($arguments, $this->root());
+    }
+
+    /**
      * Runtime files holding the given text, as paths relative to the project.
      *
      * For the one question PROJECT.md section I, item 6 asks about a finished

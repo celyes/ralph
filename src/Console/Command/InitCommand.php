@@ -181,24 +181,65 @@ final class InitCommand implements CommandInterface
         $this->reportKept($report, $output);
         $this->reportUnreferenced($report, $output);
 
-        // The paths come from the report rather than from the defaults: a
-        // project that configures its checklist elsewhere must be told where
-        // its own checklist is.
-        $output->lines([
-            'Next steps:',
-            sprintf('  1. Describe the project in %s.', $report->context()->label()),
-            sprintf(
-                '  2. Write the work you want done in %s, one task per checklist item.',
+        $output->line('Next steps:');
+
+        foreach ($this->nextSteps($report) as $index => $step) {
+            foreach ($step as $line => $text) {
+                $output->line($line === 0
+                    ? sprintf('  %d. %s', $index + 1, $text)
+                    : '     ' . $text);
+            }
+        }
+    }
+
+    /**
+     * What the user has to do, in the order they have to do it.
+     *
+     * The paths come from the report rather than from the defaults: a project
+     * that configures its checklist elsewhere must be told where its own
+     * checklist is.
+     *
+     * The commit step is here because leaving it out made the first `ralph run`
+     * of a new project stop: initialisation writes ignore rules into a file the
+     * user owns, a run refuses to start while the checkout holds uncommitted
+     * changes that are not Ralph PHP's own, and the rules it had just written
+     * were exactly such a change. The refusal is correct — a run must not
+     * commit or stash a user's file — so the remedy belongs where the file was
+     * written, before the reader meets a refusal caused by the command that
+     * printed these steps. It appears only when something was in fact written:
+     * the files under `.ralph/` are the package's own, and an untracked one is
+     * never what stops a run.
+     *
+     * @return list<list<string>> steps, each one or more lines
+     */
+    private function nextSteps(InitializationReport $report): array
+    {
+        $steps = [
+            [sprintf('Describe the project in %s.', $report->context()->label())],
+            [sprintf(
+                'Write the work you want done in %s, one task per checklist item.',
                 $report->tasks()->label(),
-            ),
-            sprintf(
-                '  3. Check the "checks", "git" and "agent" settings in %s: a task is',
-                $report->configuration()->label(),
-            ),
-            '     completed only once its verification commands pass.',
-            '  4. Run "ralph preflight" to check this machine can do the work.',
-            '  5. Run "ralph run".',
-        ]);
+            )],
+            [
+                sprintf(
+                    'Check the "checks", "git" and "agent" settings in %s: a task is',
+                    $report->configuration()->label(),
+                ),
+                'completed only once its verification commands pass.',
+            ],
+        ];
+
+        if ($report->ignoreFile()->outcome()->wrote()) {
+            $steps[] = [
+                sprintf('Commit %s: a run will not start while the checkout', $report->ignoreFile()->relativePath()),
+                'holds uncommitted changes it did not write, and these rules are one.',
+            ];
+        }
+
+        $steps[] = ['Run "ralph preflight" to check this machine can do the work.'];
+        $steps[] = ['Run "ralph run".'];
+
+        return $steps;
     }
 
     /**

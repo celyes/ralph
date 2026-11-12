@@ -39,6 +39,18 @@ final class Output
     private Secrets $secrets;
 
     /**
+     * Streams that have stopped accepting bytes, keyed by resource id.
+     *
+     * Keyed rather than a pair of flags because the two streams can be the same
+     * one — `ralph status 2>&1`, and the tests that hand both to a single
+     * in-memory handle — and because a stream that is gone is gone whichever of
+     * the two names it arrived under.
+     *
+     * @var array<int,true>
+     */
+    private array $closed = [];
+
+    /**
      * @param resource $standard stream for ordinary output
      * @param resource $diagnostic stream for errors and warnings
      */
@@ -136,14 +148,50 @@ final class Output
     }
 
     /**
+     * Write bytes, and stop writing to a stream that has stopped taking them.
+     *
+     * `ralph run | head` closes the read end of the pipe as soon as `head` has
+     * its lines, and `ralph status | less` does the same when the pager is quit
+     * early. Every write after that fails with `errno=32 Broken pipe`, which
+     * PHP raises as a warning and {@see Application::convertErrorsToExceptions()}
+     * turns into an exception — ending a run that was doing nothing wrong, with
+     * its remaining tasks unstarted, because somebody read only the first screen
+     * of its output. A terminal is a copy of what the package is doing, never
+     * the thing itself, so losing it is not a reason to stop: the write is
+     * suppressed, the stream is remembered as gone, and the run carries on
+     * writing its logs, its events and its commits as before.
+     *
+     * The loop covers a partial write, which a non-blocking stream can return
+     * without being broken at all; a write that makes no progress is the end of
+     * the stream rather than a slow one, because every stream this class is
+     * given is blocking.
+     *
      * @param resource $stream
      */
     private function write(mixed $stream, string $text): void
     {
-        if (!is_resource($stream)) {
+        if ($text === '' || !is_resource($stream)) {
             return;
         }
 
-        fwrite($stream, $text);
+        $id = get_resource_id($stream);
+
+        if (isset($this->closed[$id])) {
+            return;
+        }
+
+        $remaining = $text;
+
+        while ($remaining !== '') {
+            $written = @fwrite($stream, $remaining);
+
+            if ($written === false || $written <= 0) {
+                $this->closed[$id] = true;
+
+                return;
+            }
+
+            $remaining = substr($remaining, $written);
+        }
     }
 }

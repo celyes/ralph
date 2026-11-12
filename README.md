@@ -154,6 +154,7 @@ cd your-php-project          # a Git repository with a clean working tree
 ralph init                   # writes .ralph/ and appends ignore rules
 $EDITOR .ralph/CONTEXT.md    # describe the project for the agent
 $EDITOR .ralph/tasks.md      # write one task
+git commit -am "Ignore Ralph PHP runtime data"   # init edited .gitignore
 ralph preflight              # check this machine can do the work
 ralph run
 ```
@@ -174,7 +175,10 @@ first. Your ignore file is never rewritten in either mode — missing rules are
 appended, and a rule you have negated with `!` is left negated, so tracking the
 checklist yourself is a decision `ralph init` will not undo.
 
-Nothing in `ralph init` runs `git`.
+Nothing in `ralph init` runs `git` — which is why committing is a step of your
+own. The rules it appends leave your checkout with an uncommitted change, and
+`ralph run` will not start over a change it did not write; `init` prints the
+commit as one of its next steps for that reason.
 
 ## Example project
 
@@ -738,6 +742,12 @@ before pasting it into an issue.
 Lines beginning `--- ` in a log are Ralph PHP's own notes about the invocation;
 everything else is the agent's.
 
+**A terminal that goes away does not stop a run.** `ralph run | head`, or a
+pager quit on the first screen, closes the thing the command was writing to.
+The remaining output is dropped — the logs and the event stream are unaffected,
+because they are files — and the run carries on to its last task and exits on
+its own terms.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -780,11 +790,6 @@ Worth knowing before you rely on it.
 - **Claude Code attempts are not confined** to the workspace — see
   [Agent setup](#agent-setup).
 - **Raw worker logs are not fully redactable**, as described above.
-- **A closed standard output crashes the command.** `ralph run | head`, or a
-  pager quit early, ends the run with a broken-pipe `ErrorException` rather than
-  exiting quietly. Nothing durable is lost — what was committed and checked off
-  stays so — but the run is recorded as failed and any remaining tasks are not
-  started. Redirect to a file rather than piping.
 - **Weakened-verification detection is best-effort** and makes no completeness
   claim.
 - **Linux and WSL are the tested platforms.** macOS is likely to work and is not

@@ -135,9 +135,10 @@ final class CheckoutInspection
         }
 
         return sprintf(
-            '%s has %s that are not part of Ralph PHP\'s own files',
+            '%s has %s that %s not part of Ralph PHP\'s own files',
             $this->workingTree,
             self::countOf($this->unrelated),
+            count($this->unrelated) === 1 ? 'is' : 'are',
         );
     }
 

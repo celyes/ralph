@@ -50,6 +50,57 @@ final class Cli
     }
 
     /**
+     * Run `php bin/ralph <arguments>` with nothing reading its standard output.
+     *
+     * The shape of `ralph run | head` and of `ralph status | less` quit on the
+     * first screen: the consumer is gone while the command is still writing, so
+     * every write to standard output fails with `errno=32 Broken pipe`. The
+     * read end is closed before the child can have written anything, which
+     * makes it fail from its first write rather than at whichever byte a buffer
+     * happened to fill at.
+     *
+     * Diagnostics are still captured, because the question a case asks is what
+     * a command does about the loss — not whether it stopped saying anything.
+     *
+     * @param list<string> $arguments arguments after the binary name
+     * @param array<string, string|false> $environment variables to add to, or
+     *        with `false`, remove from the inherited environment
+     */
+    public static function runWithoutAReader(
+        array $arguments = [],
+        ?string $workingDirectory = null,
+        array $environment = [],
+        ?int $timeout = null,
+    ): CliResult {
+        $command = [PHP_BINARY, Paths::inPackage('bin/ralph'), ...$arguments];
+
+        $process = proc_open(
+            $command,
+            [
+                0 => ['file', self::nullDevice(), 'rb'],
+                1 => ['pipe', 'wb'],
+                2 => ['pipe', 'wb'],
+            ],
+            $pipes,
+            $workingDirectory ?? Paths::packageRoot(),
+            self::environment($environment),
+        );
+
+        if (!is_resource($process)) {
+            throw new RuntimeException('Unable to start ' . implode(' ', $command));
+        }
+
+        // The reader walking away, which is the event under test.
+        fclose($pipes[1]);
+
+        [, $errorOutput] = self::drain([2 => $pipes[2]], $timeout ?? self::TIMEOUT_SECONDS);
+
+        $exitCode = proc_close($process);
+
+        return new CliResult($command, $exitCode, '', $errorOutput);
+    }
+
+    /**
      * Run an arbitrary command and capture its result.
      *
      * Used for the binaries an installation produces, which live outside the

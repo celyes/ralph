@@ -471,7 +471,7 @@ final class WorkspacesThroughTheLoopTest extends TestCase
 
         self::assertSame(ExitCode::CONFIGURATION, $refused->exitCode, $refused->describe());
         self::assertStringContainsString(
-            'that are not part of Ralph PHP\'s own files',
+            'that is not part of Ralph PHP\'s own files',
             $refused->errorOutput,
             $refused->describe(),
         );

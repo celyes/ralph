@@ -79,6 +79,46 @@ final class InitCommandTest extends TestCase
         self::assertStringNotContainsString(Defaults::TASKS_FILE, $result->standardOutput, $result->describe());
     }
 
+    /**
+     * The step that keeps the first run from refusing.
+     *
+     * `ralph init` appends its rules to a file the user owns, and a run will
+     * not start while the checkout holds uncommitted changes that are not the
+     * package's own — so without this step, following the printed list in order
+     * ends at a refusal caused by the step before it.
+     */
+    #[Test]
+    public function the_next_steps_say_to_commit_the_ignore_rules_that_were_written(): void
+    {
+        $result = Cli::run(['init'], $this->project->root());
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString('Commit .gitignore', $result->standardOutput, $result->describe());
+        self::assertStringContainsString(
+            'holds uncommitted changes it did not write',
+            $result->standardOutput,
+            $result->describe(),
+        );
+    }
+
+    /**
+     * And it is not printed when there is nothing to commit: on a second
+     * `ralph init` the rules are already in the file, so nothing was written
+     * and no step is owed. The files under `.ralph/` are the package's own, and
+     * an untracked one of those never stops a run.
+     */
+    #[Test]
+    public function the_commit_step_is_left_out_when_no_ignore_rules_were_written(): void
+    {
+        Cli::run(['init'], $this->project->root());
+
+        $result = Cli::run(['init'], $this->project->root());
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringNotContainsString('Commit .gitignore', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('4. Run "ralph preflight"', $result->standardOutput, $result->describe());
+    }
+
     #[Test]
     public function a_second_run_keeps_the_user_s_files_and_says_so(): void
     {

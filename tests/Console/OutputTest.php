@@ -115,6 +115,83 @@ final class OutputTest extends TestCase
         self::assertSame('key [redacted TEST_KEY]' . PHP_EOL, (string) stream_get_contents($stream));
     }
 
+    /**
+     * A consumer that walks away does not take the command with it.
+     *
+     * `ralph run | head`: once `head` has its lines the pipe's read end is
+     * gone, and every write after that fails with `errno=32 Broken pipe` — a
+     * warning, which the application turns into an exception, which used to end
+     * a run that was doing nothing wrong. The terminal is a copy of the work,
+     * so the write is dropped and the command carries on.
+     *
+     * The second write asserts the other half: the stream is remembered as
+     * gone rather than retried, so a long run does not raise once per line for
+     * the rest of its life. `error_get_last()` is the evidence, since a failed
+     * `fwrite()` sets it and a write that never happened cannot.
+     */
+    #[Test]
+    public function writing_to_a_stream_whose_reader_has_gone_is_dropped_rather_than_raised(): void
+    {
+        $stream = $this->streamWithNoReader();
+        $output = new Output($stream, $stream);
+
+        $output->line('the first line nobody reads');
+
+        self::assertNotNull(error_get_last(), 'The write was expected to fail, and quietly.');
+
+        error_clear_last();
+        $output->line('and the second');
+        $output->text('and a chunk of the agent output');
+
+        self::assertNull(error_get_last(), 'A stream known to be gone was written to again.');
+    }
+
+    /**
+     * Losing one stream does not silence the other.
+     *
+     * `ralph run > /dev/full`, or a pipeline whose reader quit: the failure
+     * belongs to the stream it happened on, and an error still has somewhere to
+     * go.
+     */
+    #[Test]
+    public function losing_one_stream_leaves_the_other_one_writing(): void
+    {
+        $diagnostic = fopen('php://memory', 'rb+');
+        self::assertIsResource($diagnostic);
+
+        $output = new Output($this->streamWithNoReader(), $diagnostic);
+
+        $output->line('ordinary output nobody will see');
+        $output->diagnosticLine('ralph: the run could not carry on');
+
+        rewind($diagnostic);
+        self::assertSame(
+            'ralph: the run could not carry on' . PHP_EOL,
+            (string) stream_get_contents($diagnostic),
+        );
+    }
+
+    /**
+     * A stream that fails every write, the way a pipe does once its reader is
+     * gone.
+     *
+     * A socket pair gives both ends to this process, so closing the read end
+     * here is the whole event — no child process, no race with a buffer, and
+     * the same `errno=32` the CLI meets in a pipeline.
+     *
+     * @return resource
+     */
+    private function streamWithNoReader(): mixed
+    {
+        $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertIsArray($pair);
+
+        [$reader, $writer] = $pair;
+        fclose($reader);
+
+        return $writer;
+    }
+
     private function secrets(): Secrets
     {
         return AgentEnvironment::of(

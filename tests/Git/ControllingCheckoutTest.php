@@ -86,8 +86,13 @@ final class ControllingCheckoutTest extends TestCase
 
         $exception = $this->refusal();
 
-        self::assertStringContainsString('1 uncommitted change', $exception->getMessage());
-        self::assertStringContainsString('not part of Ralph PHP\'s own files', $exception->getMessage());
+        // One change, said as one: the sentence is the first thing a user sees
+        // of a refusal, and agreement is the difference between a message that
+        // reads as written and one that reads as assembled.
+        self::assertStringContainsString(
+            '1 uncommitted change that is not part of Ralph PHP\'s own files',
+            $exception->getMessage(),
+        );
         self::assertStringContainsString('modified: src/Foo.php', $exception->getMessage());
         self::assertSame(78, $exception->exitCode());
 

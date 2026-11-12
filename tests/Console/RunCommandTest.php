@@ -167,6 +167,48 @@ final class RunCommandTest extends TestCase
     }
 
     /**
+     * `ralph run | head`: the terminal stops reading, and the run carries on.
+     *
+     * PROJECT.md section H, item 9 and section J, item 13. Until this was
+     * fixed, the first write that failed with `errno=32 Broken pipe` became an
+     * `ErrorException` and ended the run — so a reader who piped a run into
+     * `head`, or quit a pager on the first screen, lost every task after the
+     * one being worked on and was told the run had failed. A terminal is a copy
+     * of what the loop is doing, never the thing itself: losing it is not a
+     * reason to stop.
+     *
+     * Two tasks, because the loss is only half the defect: the run that was
+     * reported as failed had also abandoned everything still pending.
+     */
+    #[Test]
+    public function a_run_whose_output_is_no_longer_read_finishes_its_work(): void
+    {
+        $this->project
+            ->withWorker(
+                FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]),
+                FixtureStep::success(['src/Export.php' => "<?php\n\n// --dry-run\n"]),
+            )
+            ->withTasks([self::TASK, 'Add a --dry-run option to the export command'])
+            ->withConfiguration();
+
+        $result = $this->project->ralphWithoutAReader(['run']);
+
+        // Not a failure, and not a broken-pipe exception on the way out.
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringNotContainsString('Broken pipe', $result->errorOutput, $result->describe());
+
+        // Both tasks were carried through, not just the one that was in flight
+        // when the reader went away.
+        self::assertSame(2, $this->project->journal()->tasks()->verified()->count(), $result->describe());
+        self::assertStringNotContainsString('- [ ] ', $this->project->checklist());
+        self::assertCount(2, $this->project->taskBranches());
+
+        $run = $this->project->journal()->runs()->latest();
+        self::assertNotNull($run);
+        self::assertSame(LifecycleState::Completed, $run->state(), $result->describe());
+    }
+
+    /**
      * The same run, written for a program: the event stream another process
      * follows while the run is going on (PROJECT.md section I, item 3).
      *

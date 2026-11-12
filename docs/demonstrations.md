@@ -144,6 +144,12 @@ failing.
    first thing a reader following `examples/README.md` will hit, which is why
    that walkthrough now commits them.
 
+   **Since this pass:** `ralph init` prints the commit as one of its own next
+   steps when it wrote ignore rules, so the refusal is now a documented step
+   rather than a surprise, and the refusal itself reads *"1 uncommitted change
+   that is not part of…"*. The behaviour is unchanged: a run still will not
+   touch a change it did not write.
+
 2. **Piping `ralph run` into `head` crashed the run.** `ralph run | head -20`
    closes standard output as soon as `head` has its twenty lines; the next write
    raises `fwrite(): Write of 129 bytes failed with errno=32 Broken pipe`, which
@@ -159,8 +165,15 @@ failing.
    reported as a failure it did not have, and the remaining tasks were not
    started. `ralph status | less` quit early is the same bug. It is a real defect
    rather than an operator error, it is recorded as one, and it is not something
-   this run worked around: the rest of the pass simply did not pipe. See
-   [Known limitations](#known-limitations).
+   this run worked around: the rest of the pass simply did not pipe.
+
+   **Since this pass: fixed.** A write that a stream will no longer accept is
+   dropped rather than raised, and the stream is not written to again, so a run
+   whose reader walks away finishes its remaining tasks and exits on its own
+   terms. The reproduction is in the suite
+   (`RunCommandTest::a_run_whose_output_is_no_longer_read_finishes_its_work`,
+   which fails with exactly the exception above against the old code), and the
+   two halves of the behaviour are pinned in `OutputTest`.
 
 3. **One task changed a file it was not asked to.** `TASK-44AEB58A` also edited
    `README.md` to document the new argument, and said so in its report — *"I
@@ -228,15 +241,12 @@ codex`.
 From this pass, beyond the ones the [README already
 lists](../README.md#limitations):
 
-- **A closed standard output crashes the command.** Piping into `head`, or
-  quitting a pager early, ends the run with an `ErrorException` about a broken
-  pipe instead of exiting quietly. Durable state is unaffected — whatever was
-  committed and checked off stays committed and checked off — but the run is
-  recorded as failed and any remaining tasks are not started. Avoid piping
-  `ralph run`; redirect to a file and read that instead.
+- ~~**A closed standard output crashes the command.**~~ Fixed since this pass —
+  see intervention 2. Piping into `head` or quitting a pager early now drops the
+  rest of the output and leaves the run to finish.
 - **`ralph init` makes `ralph run` refuse once.** The ignore rules `init` adds
   are an uncommitted change, and the pre-run inspection will not commit them for
-  you. Commit them, then run.
+  you. Commit them, then run — which `init` now says in its next steps.
 - **The agent may change more than the task.** See intervention 3. Nothing in
   the loop limits a diff to the files a task named, and nothing could; the
   commit is the unit of review.
