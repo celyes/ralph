@@ -188,6 +188,7 @@ cp -r examples/text-tools /tmp/text-tools && cd /tmp/text-tools
 git init && git add --all && git commit -m "Import the example package"
 composer install
 ralph init          # keeps the three .ralph/ files the example ships
+git commit -am "Ignore Ralph PHP runtime data"   # init edited .gitignore
 ralph preflight
 ralph run           # three tasks, three branches, three commits
 ```
@@ -196,6 +197,11 @@ ralph run           # three tasks, three branches, three commits
 tasks change, what to look at afterwards, how to run it with Claude Code
 instead of Codex, and how to start over. A run calls a paid coding agent once
 per task.
+
+[`docs/demonstrations.md`](docs/demonstrations.md) is what happened when that
+pass was actually run: Claude Code 2.1.226 over all three tasks, with the
+commits, the verification output, the elapsed time and the three places a person
+had to step in.
 
 The example has to be its own repository because each task is implemented in a
 linked worktree on a branch off the base commit — run it inside this checkout
@@ -774,6 +780,11 @@ Worth knowing before you rely on it.
 - **Claude Code attempts are not confined** to the workspace — see
   [Agent setup](#agent-setup).
 - **Raw worker logs are not fully redactable**, as described above.
+- **A closed standard output crashes the command.** `ralph run | head`, or a
+  pager quit early, ends the run with a broken-pipe `ErrorException` rather than
+  exiting quietly. Nothing durable is lost — what was committed and checked off
+  stays so — but the run is recorded as failed and any remaining tasks are not
+  started. Redirect to a file rather than piping.
 - **Weakened-verification detection is best-effort** and makes no completeness
   claim.
 - **Linux and WSL are the tested platforms.** macOS is likely to work and is not

@@ -59,6 +59,17 @@ ralph init
   extended .gitignore
 ```
 
+Commit that `.gitignore`, because `init` just changed your checkout and the next
+step will not touch a change it did not write:
+
+```bash
+git commit -am "Ignore Ralph PHP runtime data"
+```
+
+Skip it and `ralph run` refuses to start, naming the file — it will not stash,
+discard or commit work of yours, and it cannot tell the rules it just wrote from
+anything else you had in flight.
+
 **4. Check the machine, and the work.**
 
 ```bash
