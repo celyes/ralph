@@ -19,6 +19,7 @@ use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Limits;
 use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Memory\AttemptContextLoader;
 use Celyes\RalphPhp\State\AttemptOutcome;
 use Celyes\RalphPhp\Tasks\ChecklistParser;
@@ -101,9 +102,10 @@ final class ClaudeAdapterTest extends TestCase
 
     /**
      * The invocation, whole and in order: the flag that runs without a
-     * terminal, the output format the reading below expects, the permission
-     * mode an unattended attempt needs — and no positional argument, whose
-     * absence is what sends Claude Code to standard input for its prompt.
+     * terminal, the streamed output format with the two flags this CLI needs
+     * alongside it, the permission mode an unattended attempt needs — and no
+     * positional argument, whose absence is what sends Claude Code to standard
+     * input for its prompt.
      */
     #[Test]
     public function claude_is_run_non_interactively_in_the_tasks_workspace(): void
@@ -117,7 +119,9 @@ final class ClaudeAdapterTest extends TestCase
                 $this->executable,
                 '--print',
                 '--output-format',
-                'text',
+                'stream-json',
+                '--verbose',
+                '--include-partial-messages',
                 '--permission-mode',
                 'bypassPermissions',
             ],
@@ -304,7 +308,9 @@ final class ClaudeAdapterTest extends TestCase
                 $this->executable,
                 '--print',
                 '--output-format',
-                'text',
+                'stream-json',
+                '--verbose',
+                '--include-partial-messages',
                 '--permission-mode',
                 'bypassPermissions',
                 '--permission-mode',
@@ -356,6 +362,112 @@ final class ClaudeAdapterTest extends TestCase
         self::assertTrue($result->hasCandidate());
         self::assertSame('Added the option and a test.', $result->claim()->text());
         self::assertSame(0, $result->exitCode());
+    }
+
+    /**
+     * PROJECT.md section K: the session reaches the terminal while it is
+     * happening, not as the JSON it arrives in.
+     *
+     * The stub prints the events of a short session with a pause in the middle,
+     * so what is asserted is both halves: the tool call was shown before the
+     * session had ended — one chunk, then another, which is what streaming
+     * means — and what was shown is the rendering rather than the envelopes. A
+     * sink handed the whole feed at the end would satisfy a test that only
+     * looked at the text.
+     */
+    #[Test]
+    public function the_session_is_shown_while_it_happens_rather_than_as_json(): void
+    {
+        $sink = new RecordingSink();
+        $this->stub($this->streaming(
+            '{"outcome": "candidate", "summary": "Added the option and a test."}',
+            pauseMicroseconds: 300000,
+        ));
+
+        (new ClaudeAdapter())->execute($this->request(output: $sink));
+
+        $shown = $sink->textOf(OutputStream::Standard);
+
+        self::assertGreaterThanOrEqual(2, $sink->chunkCountOf(OutputStream::Standard));
+        self::assertStringContainsString('claude claude-opus-5 · session 01234567', $shown);
+        self::assertStringContainsString('✻ thinking Reading the import command', $shown);
+        self::assertStringContainsString('⏺ Bash(vendor/bin/phpunit --filter Import)', $shown);
+        self::assertStringContainsString('⎿ OK (3 tests, 5 assertions)', $shown);
+        self::assertStringContainsString('✓ done · 4 turns', $shown);
+        // The envelopes themselves are not what a reader is shown.
+        self::assertStringNotContainsString('{"type":', $shown);
+        // The tool call was on the terminal before the session's last event.
+        self::assertLessThan(
+            strpos($shown, '✓ done'),
+            (int) strpos($shown, '⏺ Bash'),
+        );
+    }
+
+    /**
+     * The format changed what a person sees and nothing about what the loop
+     * acts on: the report is read out of the session's final message, which the
+     * stream carries as its own field.
+     */
+    #[Test]
+    public function a_report_in_the_streamed_final_message_becomes_a_candidate_to_verify(): void
+    {
+        $this->stub($this->streaming('{"outcome": "candidate", "summary": "Added the option and a test."}'));
+
+        $result = (new ClaudeAdapter())->execute($this->request());
+
+        self::assertSame(AttemptOutcome::Candidate, $result->outcome());
+        self::assertSame('Added the option and a test.', $result->claim()->text());
+        self::assertSame(0, $result->exitCode());
+    }
+
+    /**
+     * What a failed session said, in the evidence the next attempt is handed:
+     * the agent's own words out of the stream, and the errors the result event
+     * carried — which name a failure its final message may not mention.
+     */
+    #[Test]
+    public function a_failed_streamed_session_has_the_agents_words_in_its_evidence(): void
+    {
+        $this->stub($this->streaming(
+            '{"outcome": "error", "summary": "the import command does not exist"}',
+            errors: ['tool use limit reached'],
+        ));
+
+        $result = (new ClaudeAdapter())->execute($this->request());
+        $evidence = $result->evidence()->toMarkdown();
+
+        self::assertSame(AttemptOutcome::Error, $result->outcome());
+        self::assertStringContainsString('could not do the work', $result->evidence()->label());
+        self::assertStringContainsString('tool use limit reached', $evidence);
+        self::assertStringContainsString('Added the option', $evidence);
+        // The feed itself is not what a person is asked to read.
+        self::assertStringNotContainsString('"stream_event"', $evidence);
+    }
+
+    /**
+     * Output with no events in it is left alone, by the renderer and by the
+     * reading both.
+     *
+     * Not a leftover from the earlier format but the case a project creates by
+     * putting `--output-format text` in `agents.claude.arguments`, where its
+     * occurrence is the one the CLI keeps — and the case a CLI creates by
+     * printing a fail-fast failure as prose before it emits anything. Either
+     * way the words are shown as they came and read as they came, rather than
+     * becoming an attempt that reported nothing.
+     */
+    #[Test]
+    public function a_session_that_printed_no_events_is_shown_and_read_as_it_came(): void
+    {
+        $sink = new RecordingSink();
+        $this->stub($this->printing('{"outcome": "candidate", "summary": "Added the option."}'));
+
+        $result = (new ClaudeAdapter())->execute($this->request(output: $sink));
+
+        self::assertSame(AttemptOutcome::Candidate, $result->outcome());
+        self::assertStringContainsString(
+            'Reading the import command...',
+            $sink->textOf(OutputStream::Standard),
+        );
     }
 
     /**
@@ -479,7 +591,10 @@ final class ClaudeAdapterTest extends TestCase
         (new ClaudeAdapter())->execute($this->request(output: $sink));
 
         self::assertStringContainsString('agent claude', $sink->notes[0]);
-        self::assertStringContainsString($this->executable . ' --print --output-format text', $sink->notes[1]);
+        self::assertStringContainsString(
+            $this->executable . ' --print --output-format stream-json --verbose --include-partial-messages',
+            $sink->notes[1],
+        );
         self::assertStringContainsString('characters on standard input', $sink->notes[1]);
         self::assertStringContainsString('claude exited with status 0', $sink->notes[2]);
     }
@@ -571,6 +686,97 @@ final class ClaudeAdapterTest extends TestCase
         return sprintf(
             "echo \"Reading the import command...\\n\";\necho %s;\nexit(%d);",
             var_export(sprintf("```%s\n%s\n```\n", ResultProtocol::FENCE, $report), true),
+            $status,
+        );
+    }
+
+    /**
+     * A stub body printing a session as `stream-json` carries it.
+     *
+     * The events of a short attempt in the order the real CLI emits them: the
+     * session's own line, a thought, a tool call, its result, and the closing
+     * result event with the final message in it. Written as the CLI writes
+     * them — one JSON object per line — because what is under test is the
+     * package's reading of that format, and a fixture that pretty-printed it
+     * would be testing a format nothing produces.
+     *
+     * @param list<string> $errors what the result event reports went wrong
+     * @param int $pauseMicroseconds how long the session takes between events,
+     *        for a test that needs to see output arrive before it ends
+     */
+    private function streaming(
+        string $report,
+        int $status = 0,
+        array $errors = [],
+        int $pauseMicroseconds = 0,
+    ): string {
+        $message = sprintf("Added the option.\n\n```%s\n%s\n```", ResultProtocol::FENCE, $report);
+
+        $events = [
+            ['type' => 'system', 'subtype' => 'init', 'session_id' => '0123456789abcdef', 'model' => 'claude-opus-5'],
+            [
+                'type' => 'stream_event',
+                'event' => ['type' => 'content_block_start', 'content_block' => ['type' => 'thinking']],
+            ],
+            [
+                'type' => 'stream_event',
+                'event' => [
+                    'type' => 'content_block_delta',
+                    'delta' => ['type' => 'thinking_delta', 'thinking' => 'Reading the import command'],
+                ],
+            ],
+            ['type' => 'stream_event', 'event' => ['type' => 'content_block_stop']],
+            [
+                'type' => 'assistant',
+                'message' => [
+                    'content' => [
+                        [
+                            'type' => 'tool_use',
+                            'name' => 'Bash',
+                            'input' => ['command' => 'vendor/bin/phpunit --filter Import'],
+                        ],
+                    ],
+                ],
+            ],
+            [
+                'type' => 'user',
+                'message' => [
+                    'content' => [
+                        [
+                            'type' => 'tool_result',
+                            'content' => [['type' => 'text', 'text' => 'OK (3 tests, 5 assertions)']],
+                        ],
+                    ],
+                ],
+            ],
+            [
+                'type' => 'stream_event',
+                'event' => [
+                    'type' => 'content_block_delta',
+                    'delta' => ['type' => 'text_delta', 'text' => 'Added the option.'],
+                ],
+            ],
+            [
+                'type' => 'result',
+                'subtype' => $status === 0 ? 'success' : 'error_during_execution',
+                'is_error' => $status !== 0,
+                'num_turns' => 4,
+                'duration_ms' => 8123,
+                'total_cost_usd' => 0.0412,
+                'result' => $message,
+                'errors' => $errors,
+            ],
+        ];
+
+        $lines = array_map(
+            static fn (array $event): string => (string) json_encode($event, JSON_UNESCAPED_SLASHES),
+            $events,
+        );
+
+        return sprintf(
+            "foreach (%s as \$line) {\n    echo \$line, \"\\n\";\n    usleep(%d);\n}\nexit(%d);",
+            var_export($lines, true),
+            $pauseMicroseconds,
             $status,
         );
     }

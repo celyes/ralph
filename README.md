@@ -528,10 +528,30 @@ Install the Claude Code CLI (2.0 or newer) and log in so that `claude` works.
 Each attempt is run as:
 
 ```
-claude --print --output-format text --permission-mode bypassPermissions [--model M] [your arguments…]
+claude --print --output-format stream-json --verbose --include-partial-messages \
+       --permission-mode bypassPermissions [--model M] [your arguments…]
 ```
 
 `--print` is the non-interactive form; the briefing goes in on standard input.
+`--output-format stream-json`, with the two flags this CLI requires alongside
+it, is what makes the session watchable: it emits one JSON event per line as
+the work happens, and Ralph PHP renders those events into readable output on
+your terminal and in the attempt's log — the model and session id, each tool
+call with its subject, each result in a line, the message as it is written, an
+API error while it is being retried, and a closing summary with the turns, the
+duration and the cost. `--print --output-format text` prints the final message
+and nothing before it, which for an attempt that takes several minutes is a
+terminal you cannot tell apart from a hung one.
+
+Two consequences worth knowing. The attempt's log now holds the whole session
+rather than just its last message — but the **result block is still read from
+the final message only**, so a report printed in the middle of a session is
+visible in the log and is not what the attempt is judged by. And if you put
+`--output-format text` in `agents.claude.arguments`, your occurrence is the one
+the CLI keeps: output with no events in it is passed through and read as it
+came, so that still works — you simply stop seeing the session as it happens.
+
+
 `--permission-mode bypassPermissions` is needed because in print mode there is
 nobody to approve a tool call, and an agent that cannot run your test suite
 cannot check its own work. Note the asymmetry with Codex: **Claude Code has no
@@ -886,6 +906,15 @@ before pasting it into an issue.
 
 Lines beginning `--- ` in a log are Ralph PHP's own notes about the invocation;
 everything else is the agent's.
+
+**One exception, for Claude Code.** That CLI's session arrives as a machine
+format, so what reaches your terminal and the log is Ralph PHP's rendering of
+its events rather than the bytes it printed — the glyph lines (`⏺`, `  ⎿`, `✻`,
+`✓ done`) are composed by this package out of what each event said. The agent's
+own words inside them are the agent's, verbatim and unredacted as above, and a
+line the CLI printed as plain text is passed through untouched, which is how a
+usage limit reached before the session started stays visible. The underlying
+events are not kept: the log holds the readable session, not the feed.
 
 **A terminal that goes away does not stop a run.** `ralph run | head`, or a
 pager quit on the first screen, closes the thing the command was writing to.

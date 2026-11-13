@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Agent;
 
 use Celyes\RalphPhp\Exception\ProcessException;
+use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Log\StreamFilter;
 use Celyes\RalphPhp\Process\ExecutableFinder;
 use Celyes\RalphPhp\Process\ProcessResult;
 use Celyes\RalphPhp\Process\ProcessRunner;
@@ -121,6 +123,12 @@ abstract class ProcessAdapter implements ExecutionAdapter
         $environment = $this->authenticate($request);
         $output->note('running ' . $invocation->describe());
 
+        // An agent whose output is a machine format is rendered on the way to
+        // the terminal and the log; one whose output is already readable is
+        // streamed as it is. Either way the sink below is the only thing the
+        // runner knows about (section E, item 4).
+        $streaming = $this->observe($output);
+
         $captured = $this->processes->run(
             $invocation->command(),
             // The one working directory this process may have. Not a default,
@@ -136,8 +144,13 @@ abstract class ProcessAdapter implements ExecutionAdapter
             // The terminal and the attempt's log. Not closed here: the
             // verification commands of section G write into the same log after
             // this returns, and whoever opened it closes it.
-            $output,
+            $streaming ?? $output,
         );
+
+        // Whatever the filter was still holding when the process ended, which
+        // for a session that was killed is the line saying what it was doing.
+        // Before the notes below, so the log reads in the order it happened.
+        $streaming?->flush();
 
         // The one process in this package that is handed a credential is the
         // one whose output is read back into evidence, claims and blockers, so
@@ -146,7 +159,12 @@ abstract class ProcessAdapter implements ExecutionAdapter
         // to the attempt's log as it arrived is a verbatim copy and stays one;
         // {@see \Celyes\RalphPhp\Log\LogFile} says why, and
         // `ralph logs --help` documents it.
-        $result = $captured->redactedWith($environment->secrets());
+        // Decoded before anything reads it, so that every reading below — the
+        // evidence of a timeout, the evidence of a cancellation, the result
+        // block, a check's excerpt — is of the agent's own words rather than of
+        // the envelopes a structured format carried them in. An adapter whose
+        // CLI prints prose decodes nothing.
+        $result = $this->decode($captured->redactedWith($environment->secrets()));
 
         // A run the user stopped. Before the timeout below and before anything
         // is interpreted, because an attempt that was cancelled has no verdict
@@ -212,6 +230,46 @@ abstract class ProcessAdapter implements ExecutionAdapter
      * way to.
      */
     abstract protected function invocationFor(ExecutionRequest $request): AgentInvocation;
+
+    /**
+     * How this agent's output should be shown while it is being produced.
+     *
+     * Null — the default, and the right answer for a CLI that prints prose —
+     * means the bytes go to the terminal and the log as they came off the pipe,
+     * which is section E, item 4 as it has always worked here. An adapter whose
+     * agent's non-interactive output is a machine format returns a
+     * {@see StreamFilter} instead, because forwarding a JSON object per line is
+     * streaming that shows a user nothing: {@see ClaudeStream} is that case.
+     *
+     * The filter is written to in place of the sink and is flushed when the
+     * process ends. It must not close what it was given — an attempt's log
+     * outlives this invocation — and what it writes reaches the log file too,
+     * so it writes text rather than terminal escapes.
+     */
+    protected function observe(OutputSink $output): ?StreamFilter
+    {
+        return null;
+    }
+
+    /**
+     * The captured output as the text everything downstream should read.
+     *
+     * The counterpart of {@see self::observe()} for the copy that is kept
+     * rather than the copy that is watched, and the reason both exist: an
+     * agent's structured output has to be rendered for a person *and* reduced
+     * to the agent's own words for {@see ReportReader}, a piece of failure
+     * evidence and a diagnostic — and those are different jobs on the same
+     * bytes. Returning the result unchanged, which is the default, is what an
+     * adapter whose CLI prints its message plainly wants.
+     *
+     * Applied before anything is interpreted, including the timeout and
+     * cancellation cases, so that no reading in this class has to know which
+     * agent it is looking at.
+     */
+    protected function decode(ProcessResult $result): ProcessResult
+    {
+        return $result;
+    }
 
     /**
      * What the agent's output means, as one of the normalised outcomes.

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Agent;
 
+use Celyes\RalphPhp\Log\OutputSink;
+use Celyes\RalphPhp\Log\StreamFilter;
 use Celyes\RalphPhp\Process\ProcessResult;
 
 /**
@@ -68,13 +70,25 @@ use Celyes\RalphPhp\Process\ProcessResult;
  * rather give up running commands puts `--permission-mode acceptEdits` in
  * `agents.claude.arguments`, where its occurrence is the one the CLI keeps.
  *
- * **Why `--output-format text` is stated although it is the default.** The
- * reading below is of a plain transcript, so the format the agent's words
- * arrive in is something this adapter depends on rather than merely accepts.
- * Stating it puts the dependency in the command line and in the log, and
- * leaves a project the usual last word over it — with the usual consequence
- * that a project which asks for another format is asking for output
- * {@see ReportReader} will not find a report in.
+ * **Why `--output-format stream-json`, with `--verbose` and
+ * `--include-partial-messages`.** So that the session can be watched while it
+ * happens (PROJECT.md section K). `--print --output-format text` prints the
+ * final message and nothing before it: an attempt is routinely several minutes
+ * of silence, and a terminal that shows nothing until the end cannot be told
+ * apart from one whose agent has hung. The events are the only form in which
+ * this CLI says what it is doing while it does it — which tool it is running,
+ * what it is writing, that the API is making it wait — so `--verbose`, which
+ * this format requires in print mode, and `--include-partial-messages`, which
+ * is what makes the message arrive as it is written rather than a message
+ * behind, are part of the same decision rather than extras.
+ *
+ * The cost is that the output is no longer prose, and it is paid in one place:
+ * {@see ClaudeStream} renders the events for the terminal and the log as they
+ * arrive, and reduces the captured session back to the agent's own words for
+ * everything that reads an attempt afterwards. A project still has the last
+ * word — `--output-format text` in `agents.claude.arguments` is the CLI's
+ * final occurrence and wins — and that case stays readable, because output
+ * with no events in it is passed through untouched.
  *
  * **Anything the project wants said differently, it says last.** The
  * configured model and extra argument array are appended after these flags, so
@@ -86,17 +100,16 @@ use Celyes\RalphPhp\Process\ProcessResult;
  * **What its output is read for.** The {@see ResultProtocol} block the briefing
  * asks for, read by {@see ProcessAdapter::reported()} — the same reading the
  * other built-in adapter uses, which is section E, item 10 holding by
- * construction rather than by two adapters agreeing. `--output-format
- * stream-json` is deliberately not asked for: it would wrap every one of the
- * agent's words in an envelope to unwrap, and the block is findable in the
- * plain output.
+ * construction rather than by two adapters agreeing. What that reading is given
+ * is the session's final message, which the stream carries as its own field:
+ * the same text `--output-format text` would have printed, so changing the
+ * format changed what a person sees and nothing about what the loop acts on.
  *
- * That plain output has one limitation an operator should know about, and it is
- * the reason the preamble says where the report has to go. In print mode Claude
- * Code prints its *final message*, not a running account of the tool calls it
- * made along the way, so the attempt's log holds the result and whatever the
- * agent chose to say about it rather than a transcript of the session. A
- * report printed anywhere but the last message is a report nothing captured.
+ * The limitation an operator should know about is the reason the preamble says
+ * where the report has to go. The log now holds the whole session — every tool
+ * call, every message — but the report is read from the last message only. A
+ * report printed in the middle of a session is visible in the log and is not
+ * what the attempt is judged by.
  *
  * **Cancellation.** The timeout is {@see ExecutionRequest::seconds()} and the
  * enforcement is {@see ProcessAdapter}'s: the process is asked to stop, killed
@@ -122,9 +135,24 @@ final class ClaudeAdapter extends ProcessAdapter implements VersionedAdapter
     public const string NON_INTERACTIVE = '--print';
 
     /**
-     * The output format the reading below expects: the agent's own words.
+     * The output format the session is streamed in: one JSON event per line,
+     * read by {@see ClaudeStream}. See the class description.
      */
-    public const string OUTPUT_FORMAT = 'text';
+    public const string OUTPUT_FORMAT = 'stream-json';
+
+    /**
+     * What this CLI requires alongside {@see self::OUTPUT_FORMAT} in print
+     * mode. Without it the session refuses to start, which would be a usage
+     * message once per attempt rather than an attempt.
+     */
+    public const string VERBOSE = '--verbose';
+
+    /**
+     * The flag that makes a message arrive as it is written instead of when it
+     * is finished — the difference between a stream and a feed of finished
+     * messages.
+     */
+    public const string PARTIAL_MESSAGES = '--include-partial-messages';
 
     /**
      * The permission mode an unattended attempt runs under: everything
@@ -168,7 +196,8 @@ final class ClaudeAdapter extends ProcessAdapter implements VersionedAdapter
     }
 
     /**
-     * `claude --print --output-format text --permission-mode bypassPermissions [--model M] [extra…]`
+     * `claude --print --output-format stream-json --verbose --include-partial-messages
+     * --permission-mode bypassPermissions [--model M] [extra…]`
      *
      * In that order for the reasons the class description gives: the flags this
      * adapter needs first, the project's own after them so they win, and no
@@ -183,6 +212,10 @@ final class ClaudeAdapter extends ProcessAdapter implements VersionedAdapter
             self::NON_INTERACTIVE,
             '--output-format',
             self::OUTPUT_FORMAT,
+            // Required by this CLI alongside that format, and what makes the
+            // session arrive as it happens rather than as a final message.
+            self::VERBOSE,
+            self::PARTIAL_MESSAGES,
             '--permission-mode',
             self::PERMISSIONS,
         ]);
@@ -199,6 +232,32 @@ final class ClaudeAdapter extends ProcessAdapter implements VersionedAdapter
         return $invocation
             ->with(...$definition->arguments())
             ->withInput($this->prompt($request));
+    }
+
+    /**
+     * Render the session for whoever is watching it.
+     *
+     * The live half of section K: the events are turned into a readable account
+     * on their way to the terminal and the attempt's log, so a user can see
+     * which tool the agent is running and what it is saying while it does.
+     * {@see ClaudeStream} is the whole of the format's reading.
+     */
+    protected function observe(OutputSink $output): ?StreamFilter
+    {
+        return ClaudeStream::rendering($output);
+    }
+
+    /**
+     * Hand the reading of record the agent's words rather than the envelopes.
+     *
+     * The other half, and the reason the format change costs nothing
+     * downstream: what {@see ProcessAdapter} interprets, quotes as evidence and
+     * puts in a diagnostic is the session's final message — the same text this
+     * CLI would have printed under `--output-format text`.
+     */
+    protected function decode(ProcessResult $result): ProcessResult
+    {
+        return $result->withStandardOutput(ClaudeStream::transcript($result->standardOutput()));
     }
 
     /**
@@ -257,9 +316,10 @@ final class ClaudeAdapter extends ProcessAdapter implements VersionedAdapter
             '- **Nothing is waiting on you to ask:** if the task genuinely needs a decision a person'
                 . ' has to make, report it as described below rather than guessing or stopping'
                 . ' silently.',
-            '- **Put the result block in your final message.** Run in this mode, only your last'
-                . ' message is captured; a report printed before it is lost, and an attempt with no'
-                . ' report is an execution error whatever its exit status.',
+            '- **Put the result block in your final message.** The whole session is logged, but the'
+                . ' report is read from your last message only; one printed earlier is not what the'
+                . ' attempt is judged by, and an attempt with no report in its final message is an'
+                . ' execution error whatever its exit status.',
         ]);
 
         return $preamble . "\n\n" . $request->toMarkdown();

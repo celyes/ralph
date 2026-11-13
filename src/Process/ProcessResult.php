@@ -98,6 +98,40 @@ final class ProcessResult
     }
 
     /**
+     * The same result with its standard output replaced.
+     *
+     * For the one caller that has a better text than the bytes it captured:
+     * {@see \Celyes\RalphPhp\Agent\ProcessAdapter::decode()}, where an agent
+     * whose non-interactive output is a machine format hands over the words
+     * that format carried ({@see \Celyes\RalphPhp\Agent\ClaudeStream}). Only
+     * the output changes — the command, the status, the duration and what
+     * stopped it are the package's own observations and are not an adapter's to
+     * restate.
+     *
+     * The error output is left alone deliberately. It is not part of a
+     * structured stream: a CLI writes its warnings and its own failures there,
+     * and that is the one text a decoding must not touch, since a session that
+     * failed before it emitted anything says so only there.
+     */
+    public function withStandardOutput(string $standardOutput): self
+    {
+        if ($standardOutput === $this->standardOutput) {
+            return $this;
+        }
+
+        return new self(
+            $this->command,
+            $this->exitCode,
+            $standardOutput,
+            $this->errorOutput,
+            $this->timedOut,
+            $this->seconds,
+            $this->cancelledBy,
+            $this->termination,
+        );
+    }
+
+    /**
      * @return list<string>
      */
     public function command(): array

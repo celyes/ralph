@@ -496,6 +496,8 @@ final class BuiltInAdapterFixtureTest extends TestCase
                 ClaudeAdapter::NON_INTERACTIVE,
                 '--output-format',
                 ClaudeAdapter::OUTPUT_FORMAT,
+                ClaudeAdapter::VERBOSE,
+                ClaudeAdapter::PARTIAL_MESSAGES,
                 '--permission-mode',
                 ClaudeAdapter::PERMISSIONS,
             ],
