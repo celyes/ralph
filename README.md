@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/ralph-wiggum.svg" alt="Ralph PHP" width="180">
+  <img src="https://upload.wikimedia.org/wikipedia/en/1/14/Ralph_Wiggum.png?utm_source=en.wikipedia.org&utm_campaign=imageinfo&utm_content=thumbnail_unscaled" alt="Ralph PHP" width="180">
 </p>
 
 <h1 align="center">Ralph PHP</h1>
