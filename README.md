@@ -2,18 +2,88 @@
 
 A Ralph-style development loop for PHP.
 
-Ralph PHP reads development tasks from a Markdown checklist, hands the next one
-to a coding agent — Codex or Claude Code — in an isolated Git worktree, runs
-your verification commands itself, commits what passed on its own branch, and
-only then ticks the box. When something needs a person, it stops and says so.
+You keep a Markdown checklist of tasks. Ralph PHP works through it one task at a
+time. For each task it opens an isolated Git worktree, hands the task to a
+coding agent — Codex or Claude Code — runs your verification commands itself,
+commits what passed on a branch of its own, and only then ticks the box. When
+something needs a person, it stops and says so.
 
-The loop, not the agent, owns task selection, state, Git and verification. The
-agent only implements. That split is what makes a run bounded, resumable and
-reviewable: every commit it produces is one you can find, read and throw away.
+**The loop owns the work; the agent only implements it.** Task selection, state,
+Git and verification belong to Ralph PHP. That split is what makes a run
+bounded, resumable and reviewable: every commit it produces is one you can find,
+read and throw away.
 
-One task through the loop, abridged — lines beginning `---` are Ralph PHP's own
-notes, everything else is the agent's or your test suite's (on a terminal this
-is in colour — see [Colour](#colour)):
+New here, read three things in order: [How it works](#how-it-works) for the
+shape of a run, [Getting started](#getting-started) for the five minutes of
+setup, and [Example project](#example-project) for a repository you can run it
+on today. The rest is reference you can come back to.
+
+## How it works
+
+### The loop, one phase at a time
+
+`ralph run` takes the checklist's pending tasks in file order. Each task goes
+through six phases, and the run names each one as it enters it:
+
+| Phase | What happens | Who does the work |
+| --- | --- | --- |
+| **preparing** | A worktree and a branch are created for the task off the base commit, and the briefing is assembled: the task, your context file, and notes from earlier attempts. | Ralph PHP |
+| **executing** | The agent is started in that worktree with the briefing on its standard input. Its output is streamed to your terminal and to the task's log. | the agent |
+| **verifying** | Your `checks` commands are run in the worktree. Each command's output, exit code and duration are recorded. | Ralph PHP |
+| **committing** | The worktree's changes are staged and committed on the task branch, with the task identifier in the commit trailers. | Ralph PHP |
+| **publishing** | The branch is pushed to your remote, if you enabled pushing. Skipped otherwise. | Ralph PHP |
+| **finalizing** | The task's checkbox is ticked in `.ralph/tasks.md`. | Ralph PHP |
+
+The order matters: the box is ticked last, when there is already a commit to
+point at. Each phase is recorded as it begins, which is how `ralph resume` can
+tell that an interrupted task needs only its push retried rather than its agent
+run again.
+
+### What stops a task, and what happens next
+
+| Situation | What Ralph PHP does |
+| --- | --- |
+| A check failed | Attempts the task again with the failure evidence in the next briefing, until `limits.attempts_per_task` runs out. The box stays unticked. |
+| The agent asked a question | Ends the run. The answer is yours to give, so no further task is started. |
+| Something is ambiguous — a branch owned by unrelated work, a change that looks like it weakens your checks | Stops that task, keeps the worktree and the diff as evidence, and says what to look at. |
+| You pressed Ctrl+C | Stops the agent, records the interruption, keeps the files, exits 130. `ralph resume` picks it up. |
+| A limit was reached | Stops at a task boundary and exits 124. Running `ralph run` again carries on. |
+
+A task the loop gives up on does not take the rest of the run with it by
+default: the next task is independent work, so it is taken on, and the failed
+one is left for you to retry. `--bail` changes that — see [Bailing out of a
+run](#bailing-out-of-a-run).
+
+### Words this README uses
+
+| Word | What it means here |
+| --- | --- |
+| **task** | One top-level `- [ ]` item in `.ralph/tasks.md`. Identified by a hash of its description, like `TASK-19E0214A`. |
+| **run** | One invocation of `ralph run`, processing tasks until they run out or a limit stops it. |
+| **pass** | One go at a single task, with its own branch and worktree. Unticking a completed task starts a second pass, whose names carry a `-g2` suffix. Also called a *generation*. |
+| **attempt** | One invocation of the agent inside a pass. Failed checks buy another attempt; they do not start a new pass. |
+| **check** | One verification command from `checks`, run by Ralph PHP in the task's worktree, never by the agent. |
+| **workspace** | The linked Git worktree a pass works in, under `.ralph/runtime/worktrees/`. Your own checkout is never worked in. |
+| **state** | Where a pass stands: `pending`, `running`, `completed`, `skipped`, `blocked`, `failed` or `interrupted`. |
+
+### What it never does
+
+- **It never works in your checkout.** Nothing of yours is stashed, discarded or
+  committed. The only file of yours it writes is the checkbox of a task that
+  passed.
+- **It never merges, deploys, or opens a pull request.** It produces branches
+  and commits for you to review.
+- **It never takes the agent's word for it.** A zero exit code, a confident
+  summary, or a checkbox the agent ticked itself is not a completed task — only
+  passing checks and a real commit are.
+- **It never silently switches agents.** A missing executable or an unsupported
+  CLI version is an error, not a fallback.
+
+### One task through the loop, abridged
+
+Lines beginning `---` are Ralph PHP's own notes; everything else is the agent's
+output or your test suite's. On a terminal this is in colour — see
+[Colour](#colour).
 
 ```
 $ ralph run
@@ -40,15 +110,27 @@ run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — e
   next: Review the task branches, then add the next work to .ralph/tasks.md and run `ralph run`.
 ```
 
+## Contents
+
+**Start here**
+
+- [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Getting started](#getting-started)
 - [Example project](#example-project)
+
+**Daily use**
+
 - [Commands](#commands)
 - [Task checklist syntax](#task-checklist-syntax)
 - [Configuration](#configuration)
 - [Agent setup](#agent-setup)
 - [Agent selection](#agent-selection)
+- [Troubleshooting](#troubleshooting)
+
+**Reference**
+
 - [Custom adapters](#custom-adapters)
 - [Git behaviour](#git-behaviour)
 - [Context and memory](#context-and-memory)
@@ -59,6 +141,7 @@ run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — e
 - [Colour](#colour)
 - [Exit codes](#exit-codes)
 - [Limitations](#limitations)
+- [Why so few dependencies](#why-so-few-dependencies)
 - [Development](#development)
 - [License](#license)
 
@@ -79,82 +162,42 @@ Without `pcntl` and `posix`, Ctrl+C cannot be handled cleanly: the run cannot
 stop the agent, record the interruption and release its lock in order. Install
 them if you intend to interrupt runs.
 
-## Dependencies
-
-One package is installed with Ralph PHP:
-
-| Package | What it does here |
-| --- | --- |
-| [symfony/process](https://github.com/symfony/process) | Starts and supervises every command the loop runs — `git`, the coding agent, each verification command. The argument-array launch with no shell, both output pipes drained while a briefing is written to standard input, and the exit status read back. |
-
-The rest the package does itself, and each of those is a decision rather than
-something nobody got round to:
-
-- **Git** is the `git` binary, run through the component above. The wrappers
-  available for PHP (`czproject/git-php`, `gitonomy/gitlib`) model commits,
-  branches and logs; what this loop needs is linked worktrees, `status
-  --porcelain=v2`, a push whose rejection has to be told apart from a network
-  failure, and branch ownership — none of which they expose, so using one would
-  mean dropping to its escape hatch for most calls.
-- **Stopping a worker** is this package's own (see [Recovery](#recovery)). A
-  process library stops the process it started;
-  an agent's test runner and language server are its children, and leaving
-  those running in a task worktree is the failure the repository lock exists to
-  make impossible. So the process tree is read from `/proc` and signalled
-  deepest first here.
-- **The task checklist** is parsed and edited by the package. A Markdown
-  library (`league/commonmark`) would read it, but what is written back is one
-  checkbox character in a file the user also edits by hand: every other byte,
-  including the ones no parser preserves — trailing spaces, tab indentation,
-  the exact blank lines — has to survive, and a concurrent edit has to be
-  detected by comparing the source that was read. That is a byte-level job, not
-  an abstract-syntax-tree one.
-- **The command line** is the package's own small parser and help text. A
-  console framework would replace them with its own conventions and its own
-  error messages; `ralph` prefers to say `Unknown option "--jason" for "ralph
-  status".` and name the command to run next, which is a difference you see on
-  every mistake. The same goes for the colour of the output
-  ([Colour](#colour)): the implementation is a handful of SGR codes and one
-  per-stream decision, and `symfony/console` would earn its place as a *command
-  framework* rather than as a replacement for that — which means taking its
-  argument parsing and its help layout with it.
-- **State** is SQLite through PDO, which is the maintained database layer PHP
-  ships. There is no schema a query builder or an ORM would help with: eight
-  tables, written by one process holding a lock.
-
 ## Installation
 
-As a development dependency of the project you want worked on:
+> **Not on Packagist yet.** Until it is, add the repository to the
+> `composer.json` of the project you are installing into, and the commands below
+> will resolve:
+>
+> ```json
+> {
+>   "repositories": [
+>     {"type": "vcs", "url": "https://github.com/celyes/ralph-php"}
+>   ]
+> }
+> ```
+
+There are two ways to install it, and both are tested.
+
+**As a development dependency** of the project you want worked on:
 
 ```bash
 composer require --dev celyes/ralph-php
 vendor/bin/ralph --version
 ```
 
-Or as a global tool, to use it in any repository:
+**As a global tool**, to use it in any repository:
 
 ```bash
 composer global require celyes/ralph-php
 ralph --version          # with ~/.composer/vendor/bin or ~/.config/composer/vendor/bin on PATH
 ```
 
-Both are tested. The difference matters in exactly one place: a global
-installation runs under its own autoloader and knows nothing of your project's
-classes, which affects [custom adapters](#custom-adapters) only.
+The choice matters in exactly one place: a global installation runs under its
+own autoloader and knows nothing of your project's classes, which affects
+[custom adapters](#custom-adapters) and nothing else.
 
-Until 0.1 is tagged and published, install from the repository:
-
-```json
-{
-  "repositories": [
-    {"type": "vcs", "url": "https://github.com/celyes/ralph-php"}
-  ],
-  "require-dev": {"celyes/ralph-php": "dev-main"}
-}
-```
-
-Examples below write `ralph`; use `vendor/bin/ralph` for a project
-installation.
+Examples below are written as `ralph`. Read them as `vendor/bin/ralph` if you
+installed it into a project.
 
 ## Getting started
 
@@ -190,10 +233,11 @@ first. Your ignore file is never rewritten in either mode — missing rules are
 appended, and a rule you have negated with `!` is left negated, so tracking the
 checklist yourself is a decision `ralph init` will not undo.
 
-Nothing in `ralph init` runs `git` — which is why committing is a step of your
-own. The rules it appends leave your checkout with an uncommitted change, and
-`ralph run` will not start over a change it did not write; `init` prints the
-commit as one of its next steps for that reason.
+**Why you have to commit in the middle of that.** `ralph init` never runs
+`git`, so the ignore rules it appends are left as an uncommitted change in your
+checkout. A run refuses to start over changes it did not write
+([Git behaviour](#git-behaviour)), so that change has to be yours to deal with.
+`init` prints the commit as one of its next steps for exactly this reason.
 
 ## Example project
 
@@ -228,11 +272,22 @@ and those branches would be made here.
 
 ## Commands
 
-Every command takes `-h`/`--help` for its own usage and `-v`/`--verbose` to
-include stack traces in error output; `ralph help COMMAND` prints the same
+| Command | Use it to |
+| --- | --- |
+| [`ralph init`](#ralph-init---force) | Set the project up: configuration, checklist, context file, ignore rules. Run once. |
+| [`ralph preflight`](#ralph-preflight---agent-name) | Ask whether a run could start, without starting one. Writes nothing. |
+| [`ralph run`](#ralph-run---agent-name---bail--no-bail) | Work through the pending tasks. This is the loop. |
+| [`ralph status`](#ralph-status---json) | See where every task stands, and how the last run ended. |
+| [`ralph logs TASK-ID`](#ralph-logs-task-id) | Read what the agent and the checks actually produced for one task. |
+| [`ralph resume`](#ralph-resume---agent-name---bail--no-bail) | Continue an interrupted run from the phase it stopped in. |
+| [`ralph retry TASK-ID`](#ralph-retry-task-id) | Have another go at one failed or blocked task, keeping its history. |
+| [`ralph help`](#ralph-help-command-ralph-version) | Read the usage for the application or one command. |
+
+Every command takes `-h`/`--help` for its own usage, and `-v`/`--verbose` to
+include stack traces in error output. `ralph help COMMAND` prints the same
 detail as `--help`. `--color` and `--no-color` decide the colour of what is
-printed ([Colour](#colour)). `-V`/`--version` belongs to the application
-itself, so it is `ralph --version` rather than `ralph run --version`.
+printed ([Colour](#colour)). `-V`/`--version` belongs to the application rather
+than to a command, so it is `ralph --version`, not `ralph run --version`.
 
 ### `ralph init [--force]`
 
@@ -255,15 +310,9 @@ checks before they start work.
 
 ### `ralph run [--agent NAME] [--bail|--no-bail]`
 
-The loop. Takes the checklist's pending tasks in file order, one at a time, and
-for each one: prepares an isolated worktree and the task's context, invokes the
-agent, runs the verification commands independently of it, commits the verified
-changes on a task branch, pushes if pushing is enabled, and only then checks the
-item off.
-
-A task whose checks fail is attempted again while its attempt limit holds and is
-left unchecked; the run then carries on to the next task. A task that stops to
-ask a question ends the run, because the answer is yours to give.
+The loop itself: the checklist's pending tasks in file order, one at a time,
+each through the six phases described in [How it works](#how-it-works). It is
+the only command that starts an agent, writes a commit, or ticks a box.
 
 `--bail` stops the run at the first task it gives up on instead of carrying on,
 and `--no-bail` carries on even when `limits.bail_on_failure` is set in the
@@ -351,13 +400,19 @@ out: a checkbox with nothing after it, and a checkbox indented under another
 item. This release runs top-level items only — promote a nested item, or write
 it as a plain `- ` bullet to keep it as a detail of the item above.
 
-**Task identity.** A task is identified by its description alone, not by its
-checkbox and not by where it sits in the file; the identifier is a hash of the
-normalized description, like `TASK-19E0214A`. So you can reorder the list, tick
-an item or rewrite the notes under one without losing that task's history.
-Capitalisation and spacing are ignored in the comparison, which also means two
-items that read the same are one task: a repeated description is an error rather
-than work done twice. Rewording a task makes it a *different* task.
+**Task identity.** A task's identifier is a hash of its description alone —
+like `TASK-19E0214A` — with capitalisation and spacing normalised away. Neither
+its checkbox nor its position in the file is part of it. In practice:
+
+| You do this | And the task's history |
+| --- | --- |
+| Reorder the list | survives — position is not part of the identity |
+| Tick or untick an item | survives — the checkbox is not part of the identity |
+| Rewrite the indented notes under an item | survives — only the item's own line counts |
+| Reword the item itself | is left behind: that is now a *different* task |
+
+Because the comparison ignores case and spacing, two items that read the same
+are one task. A repeated description is an error rather than work done twice.
 
 **What makes a task work well here:** it describes one change small enough to
 verify on its own; it says how the change is verified, not only what it should
@@ -567,13 +622,15 @@ Notes worth having in advance:
   in its own process — with the same trust your `phpunit.xml` bootstrap already
   has. `ralph init` does not create it; a project that does not extend the
   package should not acquire an executed PHP file by default.
-- **Three obligations on an adapter**, all about the loop being able to trust the
-  result: normalise whatever the agent printed into one of the defined outcomes
-  (candidate implementation, request for human input, execution error, timeout)
-  and never guess at a candidate; stop within the time budget it was given; and
-  work only in the workspace it was handed, with an argument array rather than a
-  shell string. The three outcomes are what keep verification and Git behaviour
-  identical across agents.
+- **Three obligations on an adapter**, all of them about the loop being able to
+  trust what comes back:
+  1. **Report one of the defined outcomes** — candidate implementation, request
+     for human input, execution error, or timeout — and never guess at a
+     candidate. These outcomes are what keep verification and Git behaviour
+     identical whichever agent ran.
+  2. **Stop within the time budget it was given.**
+  3. **Work only in the workspace it was handed**, launched with an argument
+     array rather than a shell string.
 - Extending `ProcessAdapter` gives you the executable resolution, working
   directory, streaming, budget enforcement, log notes and cancellation that both
   built-in adapters share, so a new CLI adapter is usually a flag list and a
@@ -640,11 +697,18 @@ its own commits or moved a branch stops the pass with its work preserved.
 
 **Cleanup is biased towards leaving things alone.** A failed or interrupted
 pass's worktree is kept, because it is the evidence. A worktree is removed only
-when this pass created it, the pass is closed, Git has it registered and
-unlocked, there is nothing uncommitted in it, its HEAD is the commit the record
-names, and the pass's branch holds that commit — so the commit stays reachable
-after the worktree is gone. Anything else is kept, with the reason stated.
-Cleanup never withdraws work that has already been earned.
+when every one of these holds:
+
+- this pass created it;
+- the pass is closed;
+- Git has it registered and unlocked;
+- nothing in it is uncommitted;
+- its HEAD is the commit the record names;
+- the pass's branch holds that commit, so the commit stays reachable once the
+  worktree is gone.
+
+Anything else is kept, with the reason stated. Cleanup never withdraws work that
+has already been earned.
 
 ## Context and memory
 
@@ -876,6 +940,27 @@ iteration budget exits 124, and `ralph status` afterwards exits 0, because the
 tasks it left are indistinguishable from the pending tasks of a project nobody
 has run yet.
 
+## Troubleshooting
+
+Where to look first when a run does not do what you expected. Every command also
+prints a `next:` line naming the action to take, and `ralph status` is always
+safe to run.
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| `ralph run` refuses to start, exit 78, naming uncommitted changes | Your checkout holds changes the run did not write, and a task's worktree would not contain them. | Commit or stash them yourself. Ralph PHP will not do it for you. Right after `ralph init`, the change is the ignore rules it appended. |
+| Exit 78 from `ralph preflight` | Something about the machine or project is missing: a PHP extension, Git, the agent's executable, its credentials, a check command that cannot be resolved. | The report names each failing check and what it expected. Fix those and run `preflight` again — it writes nothing and starts no agent. |
+| A run says another runner holds the repository | A `ralph run` is in progress elsewhere, or one died without releasing the lock. | Look for the other process. Once it is gone, `ralph resume` confirms it has stopped and takes over. |
+| A task is left unchecked and the run carried on | Its checks kept failing, or its attempt allowance ran out. | `ralph logs TASK-ID` shows each attempt and each check. Fix the task's wording or your check, then `ralph retry TASK-ID`. |
+| Exit 75, "waiting for a person" | The agent asked a question, or ownership of a branch or change was ambiguous. | Read the last line of output and `ralph logs TASK-ID`. Resolve the question — usually by rewriting the task to answer it — then `ralph retry TASK-ID`. |
+| Exit 130 | The run was interrupted. The work is preserved. | `ralph resume`. It continues from the phase the task stopped in and never repeats earlier phases. |
+| Exit 124 | A configured limit stopped the run while tasks remained. | Nothing is wrong. Run `ralph run` again, or raise `limits.iterations` / `limits.run_timeout`. |
+| A branch was refused as unrelated work | A branch with the name this pass would use already exists and is not recorded as the run's. | Rename or delete that branch, or change `git.branch_prefix`. Ralph PHP will not reset a branch it does not own. |
+| A push was rejected, but the commit is there | Publication is recorded as outstanding and the local commit is kept. | Fix the remote side — usually a pull or a force-push decision of your own — then `ralph resume`, which retries only the push. |
+| Checks pass in your checkout but fail in the worktree | A fresh worktree has your tracked files and nothing else: no `vendor/`, no `.env`, no build output. | Put the commands that make a worktree usable in `workspace.prepare` (`composer install`), and files no commit carries in `workspace.copy`. |
+| The run pauses saying a task changed | The task file was edited while the run was working on it. | Leave `.ralph/tasks.md` alone during a run. Reconcile the edit, then run again. |
+| A box is ticked but `ralph status` calls it yours, not the runner's | The box was ticked by hand or by an agent, with no verified commit behind it. | Nothing to fix, but nothing is vouched for either. Untick it to have the loop do the work and earn the tick. |
+
 ## Limitations
 
 Worth knowing before you rely on it.
@@ -900,6 +985,53 @@ Worth knowing before you rely on it.
 - **Without `pcntl`/`posix`, Ctrl+C handling is degraded.**
 - **Agent cost is not metered** by this package.
 
+## Why so few dependencies
+
+Installing Ralph PHP pulls in one package, and that is on purpose. This section
+is the reasoning, for anyone auditing the dependency tree or wondering why a
+familiar library is missing.
+
+The one package:
+
+| Package | What it does here |
+| --- | --- |
+| [symfony/process](https://github.com/symfony/process) | Starts and supervises every command the loop runs — `git`, the coding agent, each verification command. The argument-array launch with no shell, both output pipes drained while a briefing is written to standard input, and the exit status read back. |
+
+The rest the package does itself, and each of those is a decision rather than
+something nobody got round to:
+
+- **Git** is the `git` binary, run through the component above. The wrappers
+  available for PHP (`czproject/git-php`, `gitonomy/gitlib`) model commits,
+  branches and logs; what this loop needs is linked worktrees, `status
+  --porcelain=v2`, a push whose rejection has to be told apart from a network
+  failure, and branch ownership — none of which they expose, so using one would
+  mean dropping to its escape hatch for most calls.
+- **Stopping a worker** is this package's own (see [Recovery](#recovery)). A
+  process library stops the process it started;
+  an agent's test runner and language server are its children, and leaving
+  those running in a task worktree is the failure the repository lock exists to
+  make impossible. So the process tree is read from `/proc` and signalled
+  deepest first here.
+- **The task checklist** is parsed and edited by the package. A Markdown
+  library (`league/commonmark`) would read it, but what is written back is one
+  checkbox character in a file the user also edits by hand: every other byte,
+  including the ones no parser preserves — trailing spaces, tab indentation,
+  the exact blank lines — has to survive, and a concurrent edit has to be
+  detected by comparing the source that was read. That is a byte-level job, not
+  an abstract-syntax-tree one.
+- **The command line** is the package's own small parser and help text. A
+  console framework would replace them with its own conventions and its own
+  error messages; `ralph` prefers to say `Unknown option "--jason" for "ralph
+  status".` and name the command to run next, which is a difference you see on
+  every mistake. The same goes for the colour of the output
+  ([Colour](#colour)): the implementation is a handful of SGR codes and one
+  per-stream decision, and `symfony/console` would earn its place as a *command
+  framework* rather than as a replacement for that — which means taking its
+  argument parsing and its help layout with it.
+- **State** is SQLite through PDO, which is the maintained database layer PHP
+  ships. There is no schema a query builder or an ORM would help with: eight
+  tables, written by one process holding a lock.
+
 ## Development
 
 ```bash
@@ -910,9 +1042,9 @@ composer test:example      # the shipped example project, and a run inside a cop
 vendor/bin/phpstan analyse src bin tests --level=9
 ```
 
-PHPStan at level 9 currently reports 43 errors — casts of values PDO types as
-`mixed` when a SQLite row is read, and the same in the tests that read one. They
-are known and are being cleared before 0.1 is tagged, which is why CI runs the
+PHPStan at level 9 currently reports 44 errors, all of one kind: casts of
+values PDO types as `mixed` when a SQLite row is read, plus the same in the
+tests that read one. They are known and tracked, and they are why CI runs the
 test suite and `composer validate` rather than static analysis.
 
 The suite needs no model credentials and no paid external service: agents are
