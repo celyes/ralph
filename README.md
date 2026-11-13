@@ -1,6 +1,19 @@
-# Ralph PHP
+<p align="center">
+  <img src="docs/ralph-wiggum.svg" alt="Ralph PHP" width="180">
+</p>
 
-A Ralph-style development loop for PHP.
+<h1 align="center">Ralph PHP</h1>
+
+<p align="center">A Ralph-style development loop for PHP.</p>
+
+<p align="center">
+  <a href="https://packagist.org/packages/celyes/ralph-php"><img src="https://img.shields.io/packagist/v/celyes/ralph-php?label=packagist&color=blue" alt="Latest version on Packagist"></a>
+  <a href="https://packagist.org/packages/celyes/ralph-php/stats"><img src="https://img.shields.io/packagist/dt/celyes/ralph-php?label=installs&color=blue" alt="Installs"></a>
+  <a href="https://github.com/celyes/ralph/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/celyes/ralph/ci.yml?branch=main&label=CI" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/tests-2854%20passing-brightgreen" alt="2854 tests">
+  <img src="https://img.shields.io/packagist/dependency-v/celyes/ralph-php/php?color=777bb4" alt="Required PHP version">
+  <a href="LICENSE"><img src="https://img.shields.io/packagist/l/celyes/ralph-php?color=green" alt="MIT licensed"></a>
+</p>
 
 You keep a Markdown checklist of tasks. Ralph PHP works through it one task at a
 time. For each task it opens an isolated Git worktree, hands the task to a
@@ -1063,3 +1076,8 @@ exactly as a reader's run would.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The loop is named after the Ralph technique, which is itself named after Ralph
+Wiggum. The drawing at the top of this file is an original illustration in that
+spirit; it is not artwork from the television series, and this package is not
+affiliated with or endorsed by its rightsholders.
