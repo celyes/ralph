@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Tests\Console;
 
 use Celyes\RalphPhp\Agent\AgentEnvironment;
 use Celyes\RalphPhp\Config\AgentDefinition;
+use Celyes\RalphPhp\Console\ColourChoice;
 use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Support\Secrets;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -113,6 +114,65 @@ final class OutputTest extends TestCase
 
         rewind($stream);
         self::assertSame('key [redacted TEST_KEY]' . PHP_EOL, (string) stream_get_contents($stream));
+    }
+
+    /**
+     * The same split as the redaction above, in the other direction: the
+     * package's own lines may be coloured, and a worker's bytes go through as
+     * they came.
+     */
+    #[Test]
+    public function colour_is_decided_per_stream_rather_than_per_process(): void
+    {
+        $capture = new CapturingOutput();
+
+        // What an in-memory stream answers, which is what the whole of this
+        // suite depends on: a driven command produces plain text.
+        self::assertFalse($capture->output()->style()->isEnabled());
+        self::assertFalse($capture->output()->diagnosticStyle()->isEnabled());
+
+        $capture->output()->useColour(ColourChoice::Always);
+
+        self::assertTrue($capture->output()->style()->isEnabled());
+        self::assertTrue($capture->output()->diagnosticStyle()->isEnabled());
+    }
+
+    /**
+     * `--no-color` arrives after the streams exist, so the decision has to
+     * reach the output already in use rather than produce a second one.
+     */
+    #[Test]
+    public function a_later_choice_replaces_the_one_the_streams_would_have_made(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->useColour(ColourChoice::Always);
+        self::assertTrue($capture->output()->style()->isEnabled());
+
+        $capture->output()->useColour(ColourChoice::Never);
+        self::assertFalse($capture->output()->style()->isEnabled());
+    }
+
+    /**
+     * Styling is applied around a field and redaction replaces a value inside
+     * one, so the two must not interfere: a coloured line still has the key
+     * taken out of it.
+     */
+    #[Test]
+    public function a_styled_line_is_still_redacted(): void
+    {
+        $capture = new CapturingOutput();
+        $capture->output()->redact($this->secrets());
+        $capture->output()->useColour(ColourChoice::Always);
+
+        $style = $capture->output()->style();
+        $capture->output()->line($style->warn('the agent was given ' . self::SECRET));
+
+        $written = $capture->standardOutput();
+
+        self::assertStringNotContainsString(self::SECRET, $written);
+        self::assertStringContainsString('[redacted TEST_KEY]', $written);
+        self::assertStringContainsString("[", $written);
     }
 
     /**

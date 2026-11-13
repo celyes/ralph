@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Console\Command;
 
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
+use Celyes\RalphPhp\Console\Application;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\UsageException;
@@ -74,7 +75,7 @@ abstract class ProjectCommand implements CommandInterface
     {
         $unrecognised = array_values(array_diff(
             $input->optionNames(),
-            [...$this->options(), 'h', 'help', 'v', 'verbose'],
+            [...$this->options(), ...Application::GLOBAL_OPTIONS],
         ));
 
         if ($unrecognised !== []) {

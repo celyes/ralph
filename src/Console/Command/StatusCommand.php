@@ -9,6 +9,7 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Run\Journal;
 use Celyes\RalphPhp\State\GenerationRecord;
@@ -17,6 +18,7 @@ use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\Support\Json;
 use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Tasks\ChecklistReader;
+use Celyes\RalphPhp\Tasks\Completion;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskList;
 
@@ -382,23 +384,39 @@ final class StatusCommand extends ProjectCommand
      */
     private function reportProject(Configuration $configuration, TaskList $tasks, Output $output): void
     {
-        $output->line(sprintf('Ralph PHP status for %s', $configuration->projectRoot()));
+        $style = $output->style();
+
         $output->line(sprintf(
-            '  configuration  %s',
+            '%s %s',
+            $style->heading('Ralph PHP status for'),
+            $style->identifier($configuration->projectRoot()),
+        ));
+        $output->line(sprintf(
+            '  %s  %s',
+            $style->label('configuration'),
             $configuration->source() ?? 'defaults (no configuration file)',
         ));
         $output->line(sprintf(
-            '  checklist      %s — %d task%s, %d checked, %d pending',
-            $configuration->tasksPath(),
-            $tasks->count(),
-            $tasks->count() === 1 ? '' : 's',
-            $tasks->doneCount(),
-            $tasks->pendingCount(),
+            '  %s  %s %s',
+            $style->label('checklist    '),
+            $style->identifier($configuration->tasksPath()),
+            $style->muted(sprintf(
+                '— %d task%s, %d checked, %d pending',
+                $tasks->count(),
+                $tasks->count() === 1 ? '' : 's',
+                $tasks->doneCount(),
+                $tasks->pendingCount(),
+            )),
         ));
-        $output->line(sprintf('  agent          %s (project default)', $configuration->defaultAgent()));
+        $output->line(sprintf(
+            '  %s  %s %s',
+            $style->label('agent        '),
+            $configuration->defaultAgent(),
+            $style->muted('(project default)'),
+        ));
 
         if ($tasks->count() > 0) {
-            $output->line(sprintf('  progress       %s', $this->progressOf($tasks)));
+            $output->line(sprintf('  %s  %s', $style->label('progress     '), $this->progressOf($tasks)));
         }
     }
 
@@ -444,35 +462,70 @@ final class StatusCommand extends ProjectCommand
      */
     private function reportRun(RunRecord $run, Output $output): void
     {
-        $output->line(sprintf('Latest run %s — %s', $run->runId(), $this->describe($run)));
-        $output->line(sprintf('  agent        %s', $run->agent()->describe()));
+        $style = $output->style();
+
         $output->line(sprintf(
-            '  base         %s at %s',
-            $run->baseReference(),
-            $run->baseSha() === null ? 'no commit recorded' : substr($run->baseSha(), 0, 12),
+            '%s %s — %s',
+            $style->heading('Latest run'),
+            $style->identifier($run->runId()),
+            $this->paintRun($run, $this->describe($run), $style),
         ));
-        $output->line(sprintf('  checks       %s', implode(', ', $run->checkNames())));
+        $output->line(sprintf('  %s  %s', $style->label('agent      '), $run->agent()->describe()));
         $output->line(sprintf(
-            '  iterations   %d%s',
+            '  %s  %s at %s',
+            $style->label('base       '),
+            $run->baseReference(),
+            $run->baseSha() === null
+                ? $style->muted('no commit recorded')
+                : $style->identifier(substr($run->baseSha(), 0, 12)),
+        ));
+        $output->line(sprintf('  %s  %s', $style->label('checks     '), implode(', ', $run->checkNames())));
+        $output->line(sprintf(
+            '  %s  %d%s',
+            $style->label('iterations '),
             $run->iterations(),
             $run->isResume()
-                ? sprintf(' (%d of them inherited from %s)', $run->carriedIterations(), $run->resumedFromRunId() ?? 'an earlier run')
+                ? $style->muted(sprintf(
+                    ' (%d of them inherited from %s)',
+                    $run->carriedIterations(),
+                    $run->resumedFromRunId() ?? 'an earlier run',
+                ))
                 : '',
         ));
-        $output->line(sprintf('  active time  %ds', $run->activeSeconds()));
-        $output->line(sprintf('  started      %s', $run->startedAt()->value()));
+        $output->line(sprintf('  %s  %ds', $style->label('active time'), $run->activeSeconds()));
+        $output->line(sprintf('  %s  %s', $style->label('started    '), $run->startedAt()->value()));
 
         $reason = $run->stopReason();
 
         if ($reason !== null) {
-            $output->line(sprintf('  stopped      %s', $reason));
+            $output->line(sprintf(
+                '  %s  %s',
+                $style->label('stopped    '),
+                $this->paintRun($run, $reason, $style),
+            ));
         }
 
         $action = $run->stopAction();
 
         if ($action !== null) {
-            $output->line(sprintf('  next         %s', $action));
+            $output->line(sprintf('  %s  %s', $style->label('next       '), $action));
         }
+    }
+
+    /**
+     * A line about the latest run, in the colour that run reads in.
+     *
+     * The stop kind when the row has one, because that is what the sentence is
+     * about ({@see self::describe()}); a run still going has no kind yet and is
+     * coloured by its state.
+     */
+    private function paintRun(RunRecord $run, string $text, Style $style): string
+    {
+        $kind = $run->stopKind();
+
+        return $kind === null
+            ? $style->state($run->state(), $text)
+            : $style->stop($kind, $text);
     }
 
     /**
@@ -498,21 +551,23 @@ final class StatusCommand extends ProjectCommand
      */
     private function reportTasks(TaskList $tasks, ?Journal $journal, Output $output): array
     {
+        $style = $output->style();
+
         if ($tasks->count() === 0) {
-            $output->line('No tasks.');
+            $output->line($style->muted('No tasks.'));
 
             return [];
         }
 
-        $output->line('Tasks');
-        $output->line(sprintf(
+        $output->line($style->heading('Tasks'));
+        $output->line($style->label(sprintf(
             '  %-11s  %-13s  %-8s  %-12s  %s',
             'state',
             'id',
             'attempts',
             'commit',
             'task',
-        ));
+        )));
 
         $passes = [];
 
@@ -523,17 +578,21 @@ final class StatusCommand extends ProjectCommand
                 $passes[] = $record;
             }
 
+            $sha = $record?->commitSha();
+
             $output->line(sprintf(
-                '  %-11s  %-13s  %-8s  %-12s  %s',
-                $this->stateOf($task, $tasks, $record),
-                $task->id()->value(),
+                '  %s  %s  %-8s  %s  %s',
+                $this->paintState($this->stateOf($task, $tasks, $record), $task, $tasks, $record, $style),
+                $style->column($task->id()->value(), 13, $style->identifier(...)),
                 $record === null ? '-' : (string) $record->attempts(),
-                $record?->commitSha() === null ? '-' : substr($record->commitSha(), 0, 12),
+                $sha === null
+                    ? $style->column('-', 12, $style->muted(...))
+                    : $style->column(substr($sha, 0, 12), 12, $style->identifier(...)),
                 $this->shorten($task->description()),
             ));
 
             foreach ($this->notes($task, $tasks, $record, $journal) as $note) {
-                $output->line('                 ' . $note);
+                $output->line('                 ' . $this->paintNote($note, $style));
             }
         }
 
@@ -555,6 +614,61 @@ final class StatusCommand extends ProjectCommand
         }
 
         return $tasks->completionOf($task->id())->label();
+    }
+
+    /**
+     * A task's state column, padded and in the colour its state reads in.
+     *
+     * A task with a pass behind it is coloured by that pass's state, which is
+     * {@see Style::state()} and the same mapping a run's own output uses. A
+     * task with only a checkbox is coloured by whose word it is: a box this
+     * package verified reads like a pass, and a box the user ticked reads as
+     * something to look at, because an unverified "done" is the one claim in
+     * this table that nothing stands behind (PROJECT.md section C, item 5).
+     */
+    private function paintState(
+        string $label,
+        Task $task,
+        TaskList $tasks,
+        ?GenerationRecord $record,
+        Style $style,
+    ): string {
+        if ($record !== null) {
+            return $style->column($label, 11, static fn (string $text): string => $style->state(
+                $record->state(),
+                $text,
+            ));
+        }
+
+        return $style->column($label, 11, match ($tasks->completionOf($task->id())) {
+            Completion::RunnerVerified => $style->pass(...),
+            Completion::UserCompleted => $style->warn(...),
+            Completion::Pending => $style->muted(...),
+        });
+    }
+
+    /**
+     * A note under a task's row.
+     *
+     * Dimmed, except for the two notes that are addressed to the reader rather
+     * than describing the row: what the task is waiting for, and what to do
+     * about it. Those keep their text at full weight — they are what the rest
+     * of the row leads to — with only their prefix marked, and the prefixes
+     * differ because the two lines are not the same kind of thing: `waiting:`
+     * is a problem and is coloured like one, and `next:` is a label on an
+     * instruction, exactly as it is on the line a run ends with.
+     */
+    private function paintNote(string $note, Style $style): string
+    {
+        if (str_starts_with($note, 'waiting: ')) {
+            return $style->warn('waiting: ') . substr($note, strlen('waiting: '));
+        }
+
+        if (str_starts_with($note, 'next: ')) {
+            return $style->label('next: ') . substr($note, strlen('next: '));
+        }
+
+        return $style->muted($note);
     }
 
     /**

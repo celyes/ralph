@@ -24,6 +24,13 @@ use Celyes\RalphPhp\Support\Secrets;
  * mid-value, and a terminal showing something different from the attempt's log
  * would be worse than either. That split is PROJECT.md section I, item 6, and
  * the limits of it are documented in `ralph logs --help`.
+ *
+ * **The lines this package writes may be coloured; a worker's bytes are passed
+ * through as they came.** The same split, for the same reason. Styling is
+ * decided per stream and per invocation ({@see self::style()},
+ * {@see ColourChoice}) and is applied where a line is composed rather than
+ * here: by the time a string reaches {@see self::line()} its labels and its
+ * values are one string and nothing can tell them apart again.
  */
 final class Output
 {
@@ -51,6 +58,25 @@ final class Output
     private array $closed = [];
 
     /**
+     * Whether this output may colour the lines it composes.
+     *
+     * Not readonly, for the same reason the secrets are not: the streams exist
+     * before the command line has been parsed, and `--no-color` has to reach
+     * the output that is already in use ({@see self::useColour()}).
+     */
+    private ColourChoice $colour;
+
+    /**
+     * The resolved styling for each stream, once asked for.
+     *
+     * Cached because `Auto` means a syscall per stream, and a status table asks
+     * for its styling once per row; dropped whenever the choice changes.
+     */
+    private ?Style $style = null;
+
+    private ?Style $diagnosticStyle = null;
+
+    /**
      * @param resource $standard stream for ordinary output
      * @param resource $diagnostic stream for errors and warnings
      */
@@ -58,8 +84,10 @@ final class Output
         private readonly mixed $standard,
         private readonly mixed $diagnostic,
         ?Secrets $secrets = null,
+        ColourChoice $colour = ColourChoice::Auto,
     ) {
         $this->secrets = $secrets ?? Secrets::none();
+        $this->colour = $colour;
     }
 
     /**
@@ -90,6 +118,42 @@ final class Output
     public function secrets(): Secrets
     {
         return $this->secrets;
+    }
+
+    /**
+     * Decide colour explicitly, overriding what the streams would have said.
+     *
+     * Called once, by {@see Application}, for `--color` and `--no-color`. It
+     * reaches the output already in use rather than producing a second one,
+     * because the output a command was handed is also the one a failure is
+     * reported through.
+     */
+    public function useColour(ColourChoice $colour): void
+    {
+        $this->colour = $colour;
+        $this->style = null;
+        $this->diagnosticStyle = null;
+    }
+
+    /**
+     * How to style a line going to ordinary output.
+     *
+     * Asked of the stream it will be written to, not of the process: `ralph
+     * status > out.txt` writes its table to a file and its problems to a
+     * terminal, and the file must not have escape sequences in it
+     * ({@see ColourChoice}).
+     */
+    public function style(): Style
+    {
+        return $this->style ??= Style::on($this->standard, $this->colour);
+    }
+
+    /**
+     * How to style a line going to diagnostic output.
+     */
+    public function diagnosticStyle(): Style
+    {
+        return $this->diagnosticStyle ??= Style::on($this->diagnostic, $this->colour);
     }
 
     /**

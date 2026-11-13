@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Log;
 
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Style;
 
 /**
  * A worker's output on the user's terminal, as it is produced.
@@ -67,11 +68,47 @@ final class TerminalSink implements OutputSink
      * Marked with the same prefix the log uses, so that a user who has both in
      * front of them reads one convention rather than two, and so that a line
      * the package wrote cannot be mistaken for one the agent printed.
+     *
+     * On a terminal the prefix is dimmed and the note's own subject — the
+     * `commit:`, `verification:`, `workspace:` a note opens with — is picked
+     * out, because this is the output a user actually watches a run through and
+     * a hundred identically-weighted lines is the shape nobody reads. The log
+     * keeps the plain form: {@see LogFile} is written for a reader who comes
+     * back to it later, and escape sequences in a file somebody is grepping are
+     * a cost with no benefit.
      */
     public function note(string $line): void
     {
         $this->startLine();
-        $this->output->line(LogFile::NOTE_PREFIX . $line);
+
+        $style = $this->output->style();
+
+        $this->output->line($style->muted(LogFile::NOTE_PREFIX) . $this->subject($line, $style));
+    }
+
+    /**
+     * A note with its subject marked, if it has one.
+     *
+     * Three shapes, which is every shape the package's notes take: an indented
+     * continuation of the note above it, which is detail and is dimmed whole; a
+     * note that opens by naming what it is about, which is most of them; and
+     * anything else, left as it is.
+     */
+    private function subject(string $line, Style $style): string
+    {
+        if (str_starts_with($line, '  ')) {
+            return $style->muted($line);
+        }
+
+        // One or two lowercase words and a colon: "commit:", "checks audit:",
+        // "check tests:". Bounded at two deliberately — a note that opens with
+        // a whole clause and a colon is a sentence, not a subject, and marking
+        // it up would pick out half of a line that reads as one thing.
+        if (preg_match('/^([a-z]+(?: [a-z]+)?:)( .*)$/', $line, $matches) === 1) {
+            return $style->identifier($matches[1]) . $matches[2];
+        }
+
+        return $line;
     }
 
     public function close(): void

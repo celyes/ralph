@@ -5,14 +5,17 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Console\Command;
 
 use Celyes\RalphPhp\Config\Defaults;
+use Celyes\RalphPhp\Console\Application;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\UsageException;
 use Celyes\RalphPhp\Init\IgnoreFileOutcome;
 use Celyes\RalphPhp\Init\IgnoreFileWriter;
 use Celyes\RalphPhp\Init\InitializationMode;
+use Celyes\RalphPhp\Init\InitializationOutcome;
 use Celyes\RalphPhp\Init\InitializationReport;
 use Celyes\RalphPhp\Init\InitializedPath;
 use Celyes\RalphPhp\Init\ProjectInitializer;
@@ -135,7 +138,7 @@ final class InitCommand implements CommandInterface
     {
         $unrecognised = array_values(array_diff(
             $input->optionNames(),
-            [...self::OPTIONS, 'h', 'help', 'v', 'verbose'],
+            [...self::OPTIONS, ...Application::GLOBAL_OPTIONS],
         ));
 
         if ($unrecognised !== []) {
@@ -165,15 +168,33 @@ final class InitCommand implements CommandInterface
      */
     private function report(InitializationReport $report, Output $output): void
     {
-        $output->line(sprintf('Initialising Ralph PHP in %s', $report->projectRoot()));
+        $style = $output->style();
+
+        $output->line(sprintf(
+            '%s %s',
+            $style->heading('Initialising Ralph PHP in'),
+            $style->identifier($report->projectRoot()),
+        ));
         $output->line();
 
         foreach ($report->paths() as $path) {
-            $output->line(sprintf('  %-8s %s', $path->outcome()->label(), $path->label()));
+            $output->line(sprintf(
+                '  %s %s',
+                $this->wroteOrKept($path->outcome()->label(), $path->outcome() === InitializationOutcome::Kept, $style),
+                $style->identifier($path->label()),
+            ));
         }
 
         $ignore = $report->ignoreFile();
-        $output->line(sprintf('  %-8s %s', $ignore->outcome()->label(), $ignore->relativePath()));
+        $output->line(sprintf(
+            '  %s %s',
+            $this->wroteOrKept(
+                $ignore->outcome()->label(),
+                !$ignore->wrote(),
+                $style,
+            ),
+            $style->identifier($ignore->relativePath()),
+        ));
         $output->line();
 
         $this->reportIgnoreFile($report, $output);
@@ -181,15 +202,35 @@ final class InitCommand implements CommandInterface
         $this->reportKept($report, $output);
         $this->reportUnreferenced($report, $output);
 
-        $output->line('Next steps:');
+        $output->line($style->heading('Next steps:'));
 
         foreach ($this->nextSteps($report) as $index => $step) {
             foreach ($step as $line => $text) {
                 $output->line($line === 0
-                    ? sprintf('  %d. %s', $index + 1, $text)
+                    ? sprintf('  %s %s', $style->identifier(($index + 1) . '.'), $text)
                     : '     ' . $text);
             }
         }
+    }
+
+    /**
+     * The outcome column of the written-paths table, in its column and colour.
+     *
+     * Two colours and not four: the question a reader has of this table is
+     * which lines were a write to their project and which were left as they
+     * found them, and `created`, `extended` and `replaced` are all the first
+     * while `kept` and `skipped` are both the second. The words still say which
+     * of the five it was.
+     */
+    private function wroteOrKept(string $label, bool $kept, Style $style): string
+    {
+        return $style->column(
+            $label,
+            8,
+            $kept
+                ? static fn (string $text): string => $style->muted($text)
+                : static fn (string $text): string => $style->pass($text),
+        );
     }
 
     /**
@@ -288,7 +329,7 @@ final class InitCommand implements CommandInterface
         ));
 
         foreach ($ignore->rules() as $rule) {
-            $output->line('  ' . $rule);
+            $output->line('  ' . $output->style()->identifier($rule));
         }
 
         $output->line(
@@ -318,7 +359,7 @@ final class InitCommand implements CommandInterface
         ));
 
         foreach ($replaced as $path) {
-            $output->line(sprintf('  %s', (string) $path->backupPath()));
+            $output->line('  ' . $output->style()->identifier((string) $path->backupPath()));
         }
 
         $output->line();
@@ -403,7 +444,7 @@ final class InitCommand implements CommandInterface
         ));
 
         foreach ($unreferenced as $path) {
-            $output->line(sprintf('  %s', $path));
+            $output->line('  ' . $output->style()->identifier($path));
         }
 
         $output->line(sprintf(

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Log;
 
+use Celyes\RalphPhp\Console\ColourChoice;
+use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Log\LogFile;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Log\TerminalSink;
@@ -62,6 +64,67 @@ final class TerminalSinkTest extends TestCase
 
         self::assertSame(
             LogFile::NOTE_PREFIX . 'scripted exited with status 0 after 1.2s' . PHP_EOL,
+            $this->terminal->standardOutput(),
+        );
+    }
+
+    /**
+     * On a terminal, a note's prefix is dimmed and its subject is picked out,
+     * so a run's own lines can be followed through the agent's output. The
+     * words are untouched, which is what keeps the log and the terminal the
+     * same account of the run.
+     */
+    #[Test]
+    public function a_note_on_a_terminal_has_its_prefix_and_its_subject_marked(): void
+    {
+        $this->terminal->output()->useColour(ColourChoice::Always);
+        $style = Style::coloured();
+
+        $this->sink->note('commit: b4e910596012 recorded against TASK-8CA4A94A');
+
+        self::assertSame(
+            $style->muted(LogFile::NOTE_PREFIX)
+                . $style->identifier('commit:')
+                . ' b4e910596012 recorded against TASK-8CA4A94A'
+                . PHP_EOL,
+            $this->terminal->standardOutput(),
+        );
+    }
+
+    /**
+     * A note's indented continuation is detail under the note above it, and is
+     * dimmed whole rather than having a subject picked out of it.
+     */
+    #[Test]
+    public function an_indented_note_is_detail_and_reads_as_detail(): void
+    {
+        $this->terminal->output()->useColour(ColourChoice::Always);
+        $style = Style::coloured();
+
+        $this->sink->note('  check: tests passed in 0.0s');
+
+        self::assertSame(
+            $style->muted(LogFile::NOTE_PREFIX) . $style->muted('  check: tests passed in 0.0s') . PHP_EOL,
+            $this->terminal->standardOutput(),
+        );
+    }
+
+    /**
+     * A note that opens with a whole clause is a sentence, not a subject, and
+     * marking part of it up would pick out half of a line that reads as one
+     * thing.
+     */
+    #[Test]
+    public function a_note_that_is_a_sentence_is_left_as_one(): void
+    {
+        $this->terminal->output()->useColour(ColourChoice::Always);
+        $style = Style::coloured();
+
+        $note = 'fixture reported a candidate implementation: it compiles.';
+        $this->sink->note($note);
+
+        self::assertSame(
+            $style->muted(LogFile::NOTE_PREFIX) . $note . PHP_EOL,
             $this->terminal->standardOutput(),
         );
     }

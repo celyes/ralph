@@ -34,6 +34,26 @@ final class Application
     private const string VERBOSE_SHORT = 'v';
     private const string VERBOSE_LONG = 'verbose';
 
+    /**
+     * The global options every command tolerates without declaring them.
+     *
+     * They are answered here rather than by the command, so a command's own
+     * option list says what the command does and nothing about how its output
+     * is decorated.
+     *
+     * @var list<string>
+     */
+    public const array GLOBAL_OPTIONS = [
+        'h',
+        'help',
+        self::VERBOSE_SHORT,
+        self::VERBOSE_LONG,
+        'color',
+        'colour',
+        'no-color',
+        'no-colour',
+    ];
+
     public function __construct(
         private readonly CommandRegistry $registry,
         private readonly HelpCommand $help,
@@ -75,6 +95,14 @@ final class Application
     {
         $tokens = array_slice($argv, 1);
         $verbose = $this->isVerbose($tokens);
+
+        // Before anything is dispatched, and before anything can fail: the
+        // output that would report a failure is the output this decides.
+        $colour = ColourChoice::requestedIn($tokens);
+
+        if ($colour !== null) {
+            $this->output->useColour($colour);
+        }
 
         $restoreErrorHandler = $this->convertErrorsToExceptions();
 
@@ -119,7 +147,7 @@ final class Application
         $input = Input::parse($tokens, $command->valueOptions());
 
         if ($input->hasOption('h', 'help')) {
-            $output->lines($command->help());
+            $output->lines($output->style()->helpText($command->help()));
 
             return ExitCode::SUCCESS;
         }
@@ -143,10 +171,7 @@ final class Application
             return $version->run($input, $output);
         }
 
-        $unrecognised = array_values(array_diff(
-            $input->optionNames(),
-            ['h', 'help', self::VERBOSE_SHORT, self::VERBOSE_LONG],
-        ));
+        $unrecognised = array_values(array_diff($input->optionNames(), self::GLOBAL_OPTIONS));
 
         if ($unrecognised !== []) {
             throw new UsageException(
@@ -167,7 +192,7 @@ final class Application
             throw $this->unknownCommand($arguments[0]);
         }
 
-        $output->lines($this->help->overview());
+        $output->lines($this->help->overview($output->style()));
 
         return ExitCode::SUCCESS;
     }
@@ -195,23 +220,29 @@ final class Application
     private function report(Throwable $exception, int $exitCode, bool $verbose): int
     {
         $output = $this->output;
+        $style = $output->diagnosticStyle();
         $recognised = $exception instanceof RalphException;
 
-        $output->diagnosticLine($recognised
+        // The whole line, not just its prefix: this is the one thing the user
+        // has to read, and it is being read off the bottom of however much
+        // output came before it.
+        $output->diagnosticLine($style->alert($recognised
             ? 'ralph: ' . $exception->getMessage()
-            : sprintf('ralph: unexpected error: %s: %s', $exception::class, $exception->getMessage()));
+            : sprintf('ralph: unexpected error: %s: %s', $exception::class, $exception->getMessage())));
 
         if ($recognised) {
             foreach ($exception->hints() as $hint) {
-                $output->diagnosticLine('  ' . $hint);
+                $output->diagnosticLine('  ' . $style->muted($hint));
             }
         } else {
-            $output->diagnosticLine('  This is a defect in Ralph PHP; please report it with the output below.');
+            $output->diagnosticLine(
+                '  ' . $style->warn('This is a defect in Ralph PHP; please report it with the output below.'),
+            );
         }
 
         if (!$verbose) {
             if (!$recognised) {
-                $output->diagnosticLine('  Re-run with --verbose for a stack trace.');
+                $output->diagnosticLine('  ' . $style->muted('Re-run with --verbose for a stack trace.'));
             }
 
             return $exitCode;
@@ -219,14 +250,14 @@ final class Application
 
         for ($current = $exception; $current !== null; $current = $current->getPrevious()) {
             $output->diagnosticLine();
-            $output->diagnosticLine(sprintf(
+            $output->diagnosticLine($style->heading(sprintf(
                 '%s%s: %s',
                 $current === $exception ? '' : 'Caused by ',
                 $current::class,
                 $current->getMessage(),
-            ));
-            $output->diagnosticLine(sprintf('  at %s:%d', $current->getFile(), $current->getLine()));
-            $output->diagnosticLine($current->getTraceAsString());
+            )));
+            $output->diagnosticLine($style->muted(sprintf('  at %s:%d', $current->getFile(), $current->getLine())));
+            $output->diagnosticLine($style->muted($current->getTraceAsString()));
         }
 
         return $exitCode;

@@ -51,8 +51,15 @@ final class VersionCommand implements CommandInterface
 
     public function run(Input $input, Output $output): int
     {
-        $output->line(sprintf('%s %s (%s)', Ralph::NAME, Ralph::VERSION, Ralph::PACKAGE));
-        $output->line(sprintf('PHP %s (%s)', PHP_VERSION, PHP_BINARY));
+        $style = $output->style();
+
+        $output->line(sprintf(
+            '%s %s %s',
+            $style->heading(Ralph::NAME),
+            $style->identifier(Ralph::VERSION),
+            $style->muted('(' . Ralph::PACKAGE . ')'),
+        ));
+        $output->line($style->muted(sprintf('PHP %s (%s)', PHP_VERSION, PHP_BINARY)));
 
         return ExitCode::SUCCESS;
     }

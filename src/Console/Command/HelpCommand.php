@@ -8,6 +8,7 @@ use Celyes\RalphPhp\Console\CommandRegistry;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Exception\UsageException;
 use Celyes\RalphPhp\Ralph;
 
@@ -59,7 +60,7 @@ final class HelpCommand implements CommandInterface
         $requested = $input->argument(0);
 
         if ($requested === null) {
-            $output->lines($this->overview());
+            $output->lines($this->overview($output->style()));
 
             return ExitCode::SUCCESS;
         }
@@ -72,7 +73,7 @@ final class HelpCommand implements CommandInterface
             );
         }
 
-        $output->lines($command->help());
+        $output->lines($output->style()->helpText($command->help()));
 
         return ExitCode::SUCCESS;
     }
@@ -80,12 +81,20 @@ final class HelpCommand implements CommandInterface
     /**
      * Help for the application as a whole.
      *
+     * The styling is a parameter rather than something read off an output,
+     * because this is also what {@see \Celyes\RalphPhp\Console\Application}
+     * prints for `ralph` with no arguments, and the two callers write to
+     * different streams. Nothing given is plain text, which is what the tests
+     * and a redirected `ralph help` get.
+     *
      * @return list<string>
      */
-    public function overview(): array
+    public function overview(?Style $style = null): array
     {
+        $style ??= Style::plain();
+
         $lines = [
-            sprintf('%s %s', Ralph::NAME, Ralph::VERSION),
+            $style->heading(sprintf('%s %s', Ralph::NAME, Ralph::VERSION)),
             'A Ralph-style development loop: reads tasks from a Markdown checklist,',
             'delegates them to a coding agent, verifies the result, and commits the work.',
             '',
@@ -104,18 +113,27 @@ final class HelpCommand implements CommandInterface
             $lines[] = sprintf('  %-' . max($width, 1) . 's  %s', $command->name(), $command->summary());
         }
 
+        // The product line above is styled on its own, so the pass is applied
+        // to everything after it: the headings, the command names, the option
+        // names and the exit statuses are all shapes it recognises.
         return [
-            ...$lines,
-            '',
-            'Global options:',
-            '  -h, --help     Display this help, or help for the given command.',
-            '  -V, --version  Display the version and runtime information.',
-            '  -v, --verbose  Include stack traces in error output.',
-            '',
-            'Exit codes:',
-            ...$this->exitCodes(),
-            '',
-            'Run "ralph help <command>" for details about one command.',
+            $lines[0],
+            ...$style->helpText([
+                ...array_slice($lines, 1),
+                '',
+                'Global options:',
+                '  -h, --help      Display this help, or help for the given command.',
+                '  -V, --version   Display the version and runtime information.',
+                '  -v, --verbose   Include stack traces in error output.',
+                '      --color     Colour the output even when it is not a terminal.',
+                '      --no-color  Never colour the output; "NO_COLOR" in the environment',
+                '                  does the same for every invocation.',
+                '',
+                'Exit codes:',
+                ...$this->exitCodes(),
+                '',
+                'Run "ralph help <command>" for details about one command.',
+            ]),
         ];
     }
 

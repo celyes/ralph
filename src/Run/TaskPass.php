@@ -12,6 +12,7 @@ use Celyes\RalphPhp\Agent\ExecutionResult;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Exception\ChecklistConflictException;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\FilesystemException;
@@ -292,6 +293,19 @@ final class TaskPass
      * from it is too generous, and refusing to attempt the task at all over a
      * reading of the clock would be the worse answer.
      */
+    /**
+     * How this pass's own lines are styled.
+     *
+     * Read off the terminal rather than kept, for the reason
+     * {@see Runner::style()} gives: the styling belongs to the stream, and a
+     * pass with no terminal at all — which is most of the test suite — gets
+     * plain text.
+     */
+    private function style(): Style
+    {
+        return $this->terminal?->style() ?? Style::plain();
+    }
+
     private function activeSeconds(): float
     {
         try {
@@ -310,11 +324,16 @@ final class TaskPass
      */
     private function announceRetry(Task $task, GenerationRecord $record, TaskResult $result): void
     {
+        $style = $this->style();
+
         $this->terminal?->line(sprintf(
-            '  %s: %s; attempt %d follows, with the failure as evidence',
-            $task->id()->value(),
-            $result->verification()?->describe() ?? 'the checks decided against the work',
-            $record->attempts() + 1,
+            '  %s: %s',
+            $style->identifier($task->id()->value()),
+            $style->warn(sprintf(
+                '%s; attempt %d follows, with the failure as evidence',
+                $result->verification()?->describe() ?? 'the checks decided against the work',
+                $record->attempts() + 1,
+            )),
         ));
     }
 
@@ -1355,11 +1374,16 @@ final class TaskPass
      */
     private function announceFinalization(Task $task, GenerationRecord $record, ChecklistUpdate $owed): void
     {
+        $style = $this->style();
+
         $this->terminal?->line(sprintf(
-            '  %s: %s; writing only the box%s',
-            $task->id()->value(),
-            $owed->state()->describe(),
-            $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
+            '  %s: %s',
+            $style->identifier($task->id()->value()),
+            $style->muted(sprintf(
+                '%s; writing only the box%s',
+                $owed->state()->describe(),
+                $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
+            )),
         ));
     }
 
@@ -1373,11 +1397,16 @@ final class TaskPass
      */
     private function announcePublication(Task $task, GenerationRecord $record): void
     {
+        $style = $this->style();
+
         $this->terminal?->line(sprintf(
-            '  %s: %s; retrying only the push%s',
-            $task->id()->value(),
-            $record->push()->describe(),
-            $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
+            '  %s: %s',
+            $style->identifier($task->id()->value()),
+            $style->muted(sprintf(
+                '%s; retrying only the push%s',
+                $record->push()->describe(),
+                $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
+            )),
         ));
     }
 
@@ -1935,7 +1964,9 @@ final class TaskPass
             // happened — the state store already has that. Losing one must not
             // turn a finished pass into a failed one.
             $this->terminal?->diagnosticLine(
-                'note: the attempt summary could not be written — ' . $failure->getMessage(),
+                ($this->terminal?->diagnosticStyle() ?? Style::plain())->warn(
+                    'note: the attempt summary could not be written — ' . $failure->getMessage(),
+                ),
             );
         }
     }

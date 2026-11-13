@@ -12,13 +12,16 @@ agent only implements. That split is what makes a run bounded, resumable and
 reviewable: every commit it produces is one you can find, read and throw away.
 
 One task through the loop, abridged — lines beginning `---` are Ralph PHP's own
-notes, everything else is the agent's or your test suite's:
+notes, everything else is the agent's or your test suite's (on a terminal this
+is in colour — see [Colour](#colour)):
 
 ```
 $ ralph run
 run-20261111-222204-dcc43e: codex (adapter "codex", selected by the project configuration), processing pending tasks
 base HEAD (4f2a1c90b3d7)
 checks: tests (frozen aebd852638df)
+
+[1/1] TASK-19E0214A Add a --dry-run option to the import command
 --- workspace TASK-19E0214A in .ralph/runtime/worktrees/TASK-19E0214A, from HEAD (4f2a1c90b3d7) (created by this run)
 --- codex: TASK-19E0214A, attempt 1, agent codex: Add a --dry-run option to the import command (first of 3 attempts, up to 1800 seconds; context 1480 chars, 0 notes)
     … the agent's output, streamed as it arrives and copied to the task's log …
@@ -32,6 +35,7 @@ checks: tests (frozen aebd852638df)
 --- completed: verified and committed
 ---   checklist: .ralph/tasks.md line 3, now checked
 TASK-19E0214A completed: verified and committed (9c3b7e1a on ralph/TASK-19E0214A-add-a-dry-run-option)
+
 run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — every pending task was completed (1 task)
   next: Review the task branches, then add the next work to .ralph/tasks.md and run `ralph run`.
 ```
@@ -52,6 +56,7 @@ run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — e
 - [Limits](#limits)
 - [Recovery](#recovery)
 - [Logs and diagnostics](#logs-and-diagnostics)
+- [Colour](#colour)
 - [Exit codes](#exit-codes)
 - [Limitations](#limitations)
 - [Development](#development)
@@ -108,7 +113,11 @@ something nobody got round to:
   console framework would replace them with its own conventions and its own
   error messages; `ralph` prefers to say `Unknown option "--jason" for "ralph
   status".` and name the command to run next, which is a difference you see on
-  every mistake.
+  every mistake. The same goes for the colour of the output
+  ([Colour](#colour)): the implementation is a handful of SGR codes and one
+  per-stream decision, and `symfony/console` would earn its place as a *command
+  framework* rather than as a replacement for that — which means taking its
+  argument parsing and its help layout with it.
 - **State** is SQLite through PDO, which is the maintained database layer PHP
   ships. There is no schema a query builder or an ORM would help with: eight
   tables, written by one process holding a lock.
@@ -215,8 +224,9 @@ and those branches would be made here.
 
 Every command takes `-h`/`--help` for its own usage and `-v`/`--verbose` to
 include stack traces in error output; `ralph help COMMAND` prints the same
-detail as `--help`. `-V`/`--version` belongs to the application itself, so it is
-`ralph --version` rather than `ralph run --version`.
+detail as `--help`. `--color` and `--no-color` decide the colour of what is
+printed ([Colour](#colour)). `-V`/`--version` belongs to the application
+itself, so it is `ralph --version` rather than `ralph run --version`.
 
 ### `ralph init [--force]`
 
@@ -785,6 +795,41 @@ pager quit on the first screen, closes the thing the command was writing to.
 The remaining output is dropped — the logs and the event stream are unaffected,
 because they are files — and the run carries on to its last task and exits on
 its own terms.
+
+## Colour
+
+Ralph PHP colours the lines it writes itself: the heading over each task a run
+takes on, the outcome of a task and of the run, the verdict of each preflight
+check, the state column of `ralph status`, and the subject of each `--- ` note
+in a run's progress output. Labels are dimmed so values stand out, and a run's
+tasks are separated by a blank line so an agent's last line of output and the
+loop's next step do not read as one block of text.
+
+A coloured line is the same line with sequences around its fields: removing
+them gives the plain output byte for byte, so nothing is said in colour alone.
+
+**It is decided per stream, and per invocation.** Standard output and standard
+error are asked separately, so `ralph status > status.txt` writes a plain file
+while the problems it reports stay marked on the terminal, and
+`ralph status --json` is never coloured at all. In order:
+
+| Setting | Effect |
+| --- | --- |
+| `--no-color` | Never colour this invocation. `--no-colour` also works. |
+| `--color` | Colour this invocation even when it is a pipe or a file — for `less -R`, `tee`, or a CI log viewer that renders sequences. |
+| `NO_COLOR` set to anything but the empty string | Never colour, for every invocation ([no-color.org](https://no-color.org/)). Wins over `FORCE_COLOR`. |
+| `FORCE_COLOR` set to anything but `0` | Colour even through a pipe. |
+| `TERM=dumb` | Never colour. |
+| nothing of the above | Colour when the stream is a terminal. |
+
+`--color` and `--no-color` together is a usage error rather than a precedence
+rule: there is no reading of it more likely than a typo.
+
+**The files stay plain.** Attempt logs, the event stream, the state store, the
+preserved diffs and the completion records are written without any of this, so
+`grep` and `jq` see what they always saw and `ralph logs` prints a verbatim copy
+of what the agent wrote. Colour is added where a line is put on a terminal and
+nowhere nearer the work.
 
 ## Exit codes
 

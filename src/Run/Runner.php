@@ -14,6 +14,7 @@ use Celyes\RalphPhp\Config\VerificationDrift;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Event\EventStream;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\InterruptionException;
@@ -768,6 +769,8 @@ final class Runner
                 'iteration:' . $run->iterations(),
             );
 
+            $this->announceTask($task, count($results) + 1, count($selected));
+
             $result = $pass->execute($task, $snapshot);
             $results[] = $result;
 
@@ -845,7 +848,13 @@ final class Runner
             'verification_drift' => $drift->toArray(),
         ]);
 
-        $this->terminal?->lines([$report->describe(), '  next: ' . $stopped->nextAction()]);
+        $style = $this->style();
+
+        $this->terminal?->lines([
+            '',
+            $style->stop($stopped->kind(), $report->describe()),
+            '  ' . $style->label('next: ') . $stopped->nextAction(),
+        ]);
 
         return $report;
     }
@@ -1181,10 +1190,17 @@ final class Runner
         ?RunRecord $previous,
         EventStream $events,
     ): void {
+        $style = $this->style();
+
         $lines = [
-            sprintf('%s: %s, %s', $run->runId(), $agent->describe(), $intent->describe()),
-            sprintf('base %s', $base->describe()),
-            sprintf('checks: %s', $checks->describe()),
+            sprintf(
+                '%s: %s, %s',
+                $style->heading($run->runId()),
+                $agent->describe(),
+                $intent->describe(),
+            ),
+            $style->muted(sprintf('base %s', $base->describe())),
+            $style->muted(sprintf('checks: %s', $checks->describe())),
         ];
 
         // What a continuation inherits, said at the start rather than left to
@@ -1205,10 +1221,10 @@ final class Runner
         // checklist, and a user who inherited the setting from the project file
         // rather than typing it is owed the difference beforehand.
         if ($intent->bails($this->configuration->limits())) {
-            $lines[] = sprintf(
+            $lines[] = $style->warn(sprintf(
                 'bailing: %s, so the first task that does not pass ends the run',
                 $intent->requestedBail() === true ? '--bail was given' : 'limits.bail_on_failure is on',
-            );
+            ));
         }
 
         // Said once, at the start, and only when it is not true: a user who may
@@ -1217,8 +1233,10 @@ final class Runner
         // up. The run itself is unaffected, and `ralph resume` reconciles what
         // such a stop leaves behind.
         if (!$listening) {
-            $lines[] = 'note: ext-pcntl is not loaded, so Ctrl+C cannot be handled — it will stop '
-                . 'this process without stopping the agent or recording the interruption';
+            $lines[] = $style->warn(
+                'note: ext-pcntl is not loaded, so Ctrl+C cannot be handled — it will stop '
+                . 'this process without stopping the agent or recording the interruption',
+            );
         }
 
         // Said here, not left to be discovered by whatever was going to read
@@ -1226,11 +1244,11 @@ final class Runner
         // before the run is under way that there will be nothing to watch. The
         // run itself is unaffected (section I, item 3; {@see EventStream}).
         if ($events->hasFailed()) {
-            $lines[] = sprintf(
+            $lines[] = $style->warn(sprintf(
                 'note: the event stream %s cannot be written — %s',
                 $events->path(),
                 (string) $events->failure(),
-            );
+            ));
         }
 
         $this->terminal?->lines($lines);
@@ -1241,13 +1259,56 @@ final class Runner
      */
     private function report(TaskResult $result): void
     {
-        $this->terminal?->line($result->describe());
+        $style = $this->style();
+
+        $this->terminal?->line($style->state($result->state(), $result->describe()));
 
         $blocker = $result->blocker();
 
         if ($blocker !== null) {
-            $this->terminal?->line('  next: ' . $blocker->nextAction());
+            $this->terminal?->line('  ' . $style->label('next: ') . $blocker->nextAction());
         }
+    }
+
+    /**
+     * Say which task is being taken on, before anything is printed about it.
+     *
+     * The one line a user watching a run most needs and the loop did not say:
+     * everything between here and the result line is the workspace being
+     * prepared, an agent's own output and the checks running, and with no
+     * heading over it a reader has to work out which task's hour they are
+     * looking at from the notes. The blank line above it is the same decision —
+     * an agent's last line of output and the loop's next step should not look
+     * like one block of text.
+     *
+     * The position is the run's own, not the checklist's: this is the second of
+     * the tasks *this run took on*, which is the number the limits are measured
+     * in and the number the result lines can be counted against.
+     */
+    private function announceTask(Task $task, int $position, int $taken): void
+    {
+        $style = $this->style();
+
+        $this->terminal?->line();
+        $this->terminal?->line(sprintf(
+            '%s %s %s',
+            $style->muted(sprintf('[%d/%d]', $position, $taken)),
+            $style->identifier($task->id()->value()),
+            $style->heading($task->description()),
+        ));
+    }
+
+    /**
+     * How this run's own lines are styled.
+     *
+     * Read off the terminal each time rather than kept, because the styling
+     * belongs to the stream and the stream is the caller's: a run has no
+     * terminal at all in much of the test suite, and plain styling is what a
+     * run with nowhere to print gets.
+     */
+    private function style(): Style
+    {
+        return $this->terminal?->style() ?? Style::plain();
     }
 
     /**

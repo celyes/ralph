@@ -5,13 +5,14 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Console\Command;
 
 use Celyes\RalphPhp\Config\ConfigurationLoader;
+use Celyes\RalphPhp\Console\Application;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\UsageException;
 use Celyes\RalphPhp\Preflight\CheckOutcome;
-use Celyes\RalphPhp\Preflight\CheckResult;
 use Celyes\RalphPhp\Preflight\Preflight;
 use Celyes\RalphPhp\Preflight\PreflightReport;
 use Celyes\RalphPhp\Support\Secrets;
@@ -38,7 +39,7 @@ final class PreflightCommand implements CommandInterface
      *
      * @var list<string>
      */
-    private const array OPTIONS = ['agent', 'verbose', 'v'];
+    private const array OPTIONS = ['agent'];
 
     public function __construct(
         private readonly Preflight $preflight = new Preflight(),
@@ -66,15 +67,15 @@ final class PreflightCommand implements CommandInterface
             '',
             'Checks, against the current directory and its configuration:',
             '',
-            '  php           the PHP version running ralph',
-            '  extensions    the PHP extensions the package requires',
-            '  git           that git is installed and new enough',
-            '  repository    that this directory is the root of a non-bare working tree',
-            '  base          that "git.base" names a commit task branches can start from',
-            '  identity      that git can determine a commit author and committer',
-            '  agent         that the selected agent\'s executable and credentials are present',
-            '  agent-version that the installed agent CLI is new enough for its adapter',
-            '  checks        that every configured verification command could run',
+            '  php            the PHP version running ralph',
+            '  extensions     the PHP extensions the package requires',
+            '  git            that git is installed and new enough',
+            '  repository     that this directory is the root of a non-bare working tree',
+            '  base           that "git.base" names a commit task branches can start from',
+            '  identity       that git can determine a commit author and committer',
+            '  agent          that the selected agent\'s executable and credentials are present',
+            '  agent-version  that the installed agent CLI is new enough for its adapter',
+            '  checks         that every configured verification command could run',
             '',
             'Options:',
             '  --agent NAME  Check the named agent instead of the project\'s default.',
@@ -133,7 +134,10 @@ final class PreflightCommand implements CommandInterface
      */
     private function rejectUnsupportedInput(Input $input): void
     {
-        $unrecognised = array_values(array_diff($input->optionNames(), [...self::OPTIONS, 'h', 'help']));
+        $unrecognised = array_values(array_diff(
+            $input->optionNames(),
+            [...self::OPTIONS, ...Application::GLOBAL_OPTIONS],
+        ));
 
         if ($unrecognised !== []) {
             throw new UsageException(
@@ -162,12 +166,19 @@ final class PreflightCommand implements CommandInterface
      */
     private function report(PreflightReport $report, Output $output): void
     {
-        $output->line(sprintf('Preflight checks for %s', $report->projectRoot()));
+        $style = $output->style();
+
         $output->line(sprintf(
-            '  configuration  %s',
+            '%s %s',
+            $style->heading('Preflight checks for'),
+            $style->identifier($report->projectRoot()),
+        ));
+        $output->line(sprintf(
+            '  %s  %s',
+            $style->label('configuration'),
             $report->configurationSource() ?? 'defaults (no configuration file)',
         ));
-        $output->line(sprintf('  agent          %s', $report->agent()->describe()));
+        $output->line(sprintf('  %s  %s', $style->label('agent        '), $report->agent()->describe()));
         $output->line();
 
         $width = 0;
@@ -177,9 +188,9 @@ final class PreflightCommand implements CommandInterface
 
         foreach ($report->results() as $result) {
             $output->line(sprintf(
-                '  %-4s  %-' . max($width, 1) . 's  %s',
-                $result->outcome()->label(),
-                $result->id()->label(),
+                '  %s  %s  %s',
+                $this->verdict($result->outcome(), $style),
+                $style->column($result->id()->label(), max($width, 1), $style->label(...)),
                 $result->summary(),
             ));
         }
@@ -208,13 +219,26 @@ final class PreflightCommand implements CommandInterface
                 $failed ? $output->diagnosticLine($line) : $output->line($line);
             };
 
+            // The stream decides the styling, because the two halves of this
+            // loop go to different ones: a failure is a reason the command
+            // could not do what it was asked, and `ralph preflight 2>/dev/null`
+            // is a user asking for only the warnings.
+            $style = $failed ? $output->diagnosticStyle() : $output->style();
+
             $write(sprintf(
-                '%s: %s',
-                $result->outcome() === CheckOutcome::Failed ? 'Failed' : 'Warning',
+                '%s %s',
+                $failed ? $style->alert('Failed:') : $style->warn('Warning:'),
                 $result->summary(),
             ));
 
-            foreach ($this->evidence($result) as $line) {
+            // Details dimmed and hints not: the details are what the check
+            // observed, which a reader may already know, and the hints are the
+            // thing they have to go and do about it.
+            foreach ($result->details() as $line) {
+                $write('  ' . $style->muted($line));
+            }
+
+            foreach ($result->hints() as $line) {
                 $write('  ' . $line);
             }
 
@@ -223,13 +247,21 @@ final class PreflightCommand implements CommandInterface
     }
 
     /**
-     * A problem's details and hints, in reading order.
+     * A check's verdict, in its column and its colour.
      *
-     * @return list<string>
+     * The four words are four columns wide by construction
+     * ({@see CheckOutcome}), so the width is the words' own rather than a
+     * measurement; `skip` is dimmed because a skipped check is not a verdict
+     * about anything — whatever it depended on has already failed above it.
      */
-    private function evidence(CheckResult $result): array
+    private function verdict(CheckOutcome $outcome, Style $style): string
     {
-        return [...$result->details(), ...$result->hints()];
+        return $style->column($outcome->label(), 4, match ($outcome) {
+            CheckOutcome::Passed => $style->pass(...),
+            CheckOutcome::Warning => $style->warn(...),
+            CheckOutcome::Failed => $style->fail(...),
+            CheckOutcome::Skipped => $style->muted(...),
+        });
     }
 
     private function reportVerdict(PreflightReport $report, Output $output): void
@@ -238,23 +270,24 @@ final class PreflightCommand implements CommandInterface
 
         if ($failures === 0) {
             $warnings = count($report->warnings());
+            $style = $output->style();
 
             $output->line($warnings === 0
-                ? 'Everything the loop needs is in place. Run "ralph run" to start.'
-                : sprintf(
+                ? $style->pass('Everything the loop needs is in place. Run "ralph run" to start.')
+                : $style->warn(sprintf(
                     'A run can start: %d %s, nothing blocking. Run "ralph run" to start.',
                     $warnings,
                     $warnings === 1 ? 'warning' : 'warnings',
-                ));
+                )));
 
             return;
         }
 
-        $output->diagnosticLine(sprintf(
+        $output->diagnosticLine($output->diagnosticStyle()->alert(sprintf(
             '%d %s failed, so a run cannot start. Fix %s and run "ralph preflight" again.',
             $failures,
             $failures === 1 ? 'check' : 'checks',
             $failures === 1 ? 'it' : 'them',
-        ));
+        )));
     }
 }

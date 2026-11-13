@@ -9,6 +9,7 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\Log\LogDirectory;
 use Celyes\RalphPhp\Run\Journal;
@@ -16,6 +17,7 @@ use Celyes\RalphPhp\State\AttemptRecord;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\Support\Secrets;
+use Celyes\RalphPhp\Verification\CheckOutcome;
 use Celyes\RalphPhp\Verification\CheckRun;
 
 /**
@@ -206,26 +208,28 @@ final class LogsCommand extends ProjectCommand
         LogDirectory $logs,
         Output $output,
     ): void {
-        $output->line($record->describe());
-        $output->line(sprintf(
+        $style = $output->style();
+
+        $output->line($style->state($record->state(), $record->describe()));
+        $output->line($style->muted(sprintf(
             '  base %s, %s',
             substr($record->baseSha(), 0, 12),
             $record->hasCommit()
                 ? 'commit ' . substr((string) $record->commitSha(), 0, 12)
                 : ($record->isNoChange() ? 'verified with no change needed' : 'no commit'),
-        ));
+        )));
 
         $blocker = $record->blocker();
 
         if ($blocker !== null) {
-            $output->line('  waiting: ' . $blocker->reason());
-            $output->line('  next: ' . $blocker->nextAction());
+            $output->line('  ' . $style->warn('waiting: ') . $blocker->reason());
+            $output->line('  ' . $style->label('next: ') . $blocker->nextAction());
         }
 
         $attempts = $journal->attempts()->forGeneration($record);
 
         if ($attempts === []) {
-            $output->line('  no attempt was started.');
+            $output->line('  ' . $style->muted('no attempt was started.'));
 
             return;
         }
@@ -246,14 +250,22 @@ final class LogsCommand extends ProjectCommand
         LogDirectory $logs,
         Output $output,
     ): void {
-        $output->line(sprintf('  %s — %s', $record->slug(), $attempt->describe()));
+        $style = $output->style();
+
+        $output->line(sprintf(
+            '  %s — %s',
+            $style->identifier($record->slug()),
+            $style->state($attempt->state(), $attempt->describe()),
+        ));
 
         $summary = $attempt->summary();
 
         if ($summary !== null) {
             // The agent's own words, and labelled as the agent's: nothing here
-            // has been verified by running anything.
-            $output->line('    the agent said (unverified): ' . $summary->text());
+            // has been verified by running anything. The label is marked and
+            // the words are not, which is the whole point of the line — the
+            // reader has to see whose claim it is before they read it.
+            $output->line('    ' . $style->warn('the agent said (unverified):') . ' ' . $summary->text());
         }
 
         $this->reportWorkerOutput($attempt, $output);
@@ -268,14 +280,16 @@ final class LogsCommand extends ProjectCommand
     {
         $path = $attempt->logPath();
 
+        $style = $output->style();
+
         if ($path === null) {
-            $output->line('    no worker log was opened for this attempt.');
+            $output->line('    ' . $style->muted('no worker log was opened for this attempt.'));
 
             return;
         }
 
         if (!is_file($path)) {
-            $output->line(sprintf('    worker log %s is no longer there.', $path));
+            $output->line('    ' . $style->warn(sprintf('worker log %s is no longer there.', $path)));
 
             return;
         }
@@ -283,12 +297,12 @@ final class LogsCommand extends ProjectCommand
         $contents = @file_get_contents($path);
 
         if ($contents === false) {
-            $output->line(sprintf('    worker log %s could not be read.', $path));
+            $output->line('    ' . $style->warn(sprintf('worker log %s could not be read.', $path)));
 
             return;
         }
 
-        $output->line(sprintf('    worker log %s (%d bytes):', $path, strlen($contents)));
+        $output->line('    ' . $style->label(sprintf('worker log %s (%d bytes):', $path, strlen($contents))));
 
         // As bytes, with nothing added: see the class note. A log that does not
         // end in a newline gets one, so the next line of this report starts
@@ -307,21 +321,39 @@ final class LogsCommand extends ProjectCommand
     {
         $runs = $journal->verifications()->forAttempt($attempt);
 
+        $style = $output->style();
+
         if ($runs === []) {
-            $output->line('    no verification command ran against this attempt.');
+            $output->line('    ' . $style->muted('no verification command ran against this attempt.'));
 
             return;
         }
 
-        $output->line('    checks:');
+        $output->line('    ' . $style->label('checks:'));
 
         foreach ($runs as $run) {
-            $output->line('      ' . $run->describe());
+            $output->line('      ' . $this->verdict($run, $style));
 
             foreach ($this->outputOf($run) as $line) {
-                $output->line('        ' . $line);
+                $output->line('        ' . $style->muted($line));
             }
         }
+    }
+
+    /**
+     * One check's line, in the colour of what it decided.
+     *
+     * A check that did not run is dimmed rather than coloured: it decided
+     * nothing, and showing it in red would read as a failing check when the
+     * verdict a reader is looking for is on another line.
+     */
+    private function verdict(CheckRun $run, Style $style): string
+    {
+        return match ($run->outcome()) {
+            CheckOutcome::Passed => $style->pass($run->describe()),
+            CheckOutcome::Failed, CheckOutcome::TimedOut => $style->fail($run->describe()),
+            CheckOutcome::NotRun => $style->muted($run->describe()),
+        };
     }
 
     /**
@@ -360,9 +392,15 @@ final class LogsCommand extends ProjectCommand
             'completion evidence' => $logs->completionRecord($record->generation(), $attempt->number()),
         ];
 
+        $style = $output->style();
+
         foreach ($candidates as $label => $path) {
             if (is_file($path)) {
-                $output->line(sprintf('    %s: %s', $label, $path));
+                $output->line(sprintf(
+                    '    %s %s',
+                    $style->label($label . ':'),
+                    $style->identifier($path),
+                ));
             }
         }
     }
