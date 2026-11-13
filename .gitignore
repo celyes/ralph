@@ -5,3 +5,12 @@ composer.lock
 .phpunit.cache/
 .php-cs-fixer.cache
 .phpstan.cache/
+
+# Ralph PHP: generated runtime data, and the local task checklist.
+# To track one of these yourself, negate its rule with "!" — a negated rule is
+# left alone, whereas a line simply deleted is added again by "ralph init".
+/.ralph/runtime/
+/.ralph/tasks.md
+/.ralph/config.json.bak*
+/.ralph/tasks.md.bak*
+/.ralph/CONTEXT.md.bak*
