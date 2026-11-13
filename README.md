@@ -543,6 +543,22 @@ duration and the cost. `--print --output-format text` prints the final message
 and nothing before it, which for an attempt that takes several minutes is a
 terminal you cannot tell apart from a hung one.
 
+A rendered session is weighted, so an hour of it stays readable
+([Colour](#colour)): the agent's reasoning in grey, because it is worth seeing
+and not worth reading; what the agent actually said in white, because it is what
+you were waiting for; tool calls and their one-line results between them as the
+bookkeeping they are. A fenced code block in the agent's message is printed as
+a framed block rather than as three backticks mid-paragraph —
+
+```
+  ╭─ bash
+  │ composer test
+  ╰─
+```
+
+— which is also how it appears in the attempt's log, the frame being text rather
+than colour.
+
 Two consequences worth knowing. The attempt's log now holds the whole session
 rather than just its last message — but the **result block is still read from
 the final message only**, so a report printed in the middle of a session is
@@ -910,7 +926,8 @@ everything else is the agent's.
 **One exception, for Claude Code.** That CLI's session arrives as a machine
 format, so what reaches your terminal and the log is Ralph PHP's rendering of
 its events rather than the bytes it printed — the glyph lines (`⏺`, `  ⎿`, `✻`,
-`✓ done`) are composed by this package out of what each event said. The agent's
+`✓ done`) and the frame around a code block (`  ╭─`, `  │`, `  ╰─`) are composed
+by this package out of what each event said. The agent's
 own words inside them are the agent's, verbatim and unredacted as above, and a
 line the CLI printed as plain text is passed through untouched, which is how a
 usage limit reached before the session started stays visible. The underlying
@@ -933,6 +950,24 @@ loop's next step do not read as one block of text.
 
 A coloured line is the same line with sequences around its fields: removing
 them gives the plain output byte for byte, so nothing is said in colour alone.
+
+**An agent's session is weighted too, where the package rendered it.** Claude
+Code's event feed is turned into readable lines by this package
+([Claude Code](#claude-code)), so it knows which of them are which, and it says
+so: the agent's reasoning is grey, its own words and the code it writes are
+white, a tool call is picked out and its command reads as code, a tool's result
+and a session's closing counts recede, and an API error being retried or a
+session that failed is marked. The weighting is a property of the *rendering*
+and not of the bytes — it is resolved where a chunk meets a terminal, which is
+why the same session is plain in the log. A worker whose output the package only
+forwards, Codex included, is passed through exactly as it came: escapes and all,
+repainted by nobody.
+
+The two weights an agent's output adds are the only ones that assume anything
+about your terminal: grey and white read as "quieter than the text around it"
+and "brighter than it" on a terminal darker than its text, which is the common
+case and the one `--no-color` exists for when it is not yours. Everything the
+package says in colour it also says in words.
 
 **It is decided per stream, and per invocation.** Standard output and standard
 error are asked separately, so `ralph status > status.txt` writes a plain file

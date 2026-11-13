@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Log;
 
+use Celyes\RalphPhp\Log\Emphasis;
 use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Log\OutputStream;
 
@@ -19,7 +20,7 @@ use Celyes\RalphPhp\Log\OutputStream;
 final class RecordingSink implements OutputSink
 {
     /**
-     * @var list<array{stream: OutputStream, chunk: string}>
+     * @var list<array{stream: OutputStream, chunk: string, emphasis: Emphasis}>
      */
     public array $writes = [];
 
@@ -38,13 +39,13 @@ final class RecordingSink implements OutputSink
     {
     }
 
-    public function write(OutputStream $stream, string $chunk): void
+    public function write(OutputStream $stream, string $chunk, Emphasis $emphasis = Emphasis::Plain): void
     {
         if ($this->delayMicroseconds > 0) {
             usleep($this->delayMicroseconds);
         }
 
-        $this->writes[] = ['stream' => $stream, 'chunk' => $chunk];
+        $this->writes[] = ['stream' => $stream, 'chunk' => $chunk, 'emphasis' => $emphasis];
     }
 
     public function note(string $line): void
@@ -66,6 +67,27 @@ final class RecordingSink implements OutputSink
 
         foreach ($this->writes as $write) {
             if ($write['stream'] === $stream) {
+                $chunks[] = $write['chunk'];
+            }
+        }
+
+        return implode('', $chunks);
+    }
+
+    /**
+     * Everything written to one stream with one weight, joined.
+     *
+     * For asserting what a rendering said a piece of output *was*: the agent's
+     * reasoning, its answer, the code it wrote. A renderer that colours the
+     * wrong half of a session is the failure this makes visible, and it cannot
+     * be seen in the text alone.
+     */
+    public function textWith(OutputStream $stream, Emphasis $emphasis): string
+    {
+        $chunks = [];
+
+        foreach ($this->writes as $write) {
+            if ($write['stream'] === $stream && $write['emphasis'] === $emphasis) {
                 $chunks[] = $write['chunk'];
             }
         }

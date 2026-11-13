@@ -21,6 +21,10 @@ namespace Celyes\RalphPhp\Log;
  * the pipe and may end mid-line, a filter must not throw, and what it writes
  * reaches both of an attempt's destinations — so a filter writes plain text
  * rather than escape sequences, the log file being a file somebody will grep.
+ * What it *does* get to say is what each piece is ({@see Emphasis}): a filter
+ * is the only thing in the chain that knows the difference between the agent
+ * thinking out loud and the agent answering, and the terminal at the far end is
+ * the only thing that may act on it.
  *
  * **It does not own what it writes to.** An attempt's log spans more than one
  * command and is closed by whoever opened it ({@see OutputSink}), while a

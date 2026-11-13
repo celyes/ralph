@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Tests\Log;
 
 use Celyes\RalphPhp\Console\ColourChoice;
 use Celyes\RalphPhp\Console\Style;
+use Celyes\RalphPhp\Log\Emphasis;
 use Celyes\RalphPhp\Log\LogFile;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Log\TerminalSink;
@@ -55,6 +56,62 @@ final class TerminalSinkTest extends TestCase
 
         self::assertSame('ordinary', $this->terminal->standardOutput());
         self::assertSame('a complaint', $this->terminal->errorOutput());
+    }
+
+    /**
+     * A chunk a renderer weighted is coloured here, and only here: the same
+     * bytes are on their way to a log file that must stay greppable, so the
+     * weight travels as a tag and the sequences are added where the text meets
+     * a terminal.
+     */
+    #[Test]
+    public function a_weighted_chunk_is_coloured_on_a_terminal(): void
+    {
+        $this->terminal->output()->useColour(ColourChoice::Always);
+        $style = Style::coloured();
+
+        $this->sink->write(OutputStream::Standard, '✻ thinking which file owns this', Emphasis::Thinking);
+        $this->sink->write(OutputStream::Standard, "I added the option.\n", Emphasis::Result);
+
+        self::assertSame(
+            $style->reasoning('✻ thinking which file owns this')
+                // The line ending stays outside the sequence: a reset at the
+                // start of the next line is invisible until somebody copies
+                // that line out of their scrollback.
+                . $style->result('I added the option.') . "\n",
+            $this->terminal->standardOutput(),
+        );
+    }
+
+    /**
+     * A worker's own bytes are a copy of what another program printed, escapes
+     * and all. The package has no business repainting them, so the default
+     * weight is the identity even with colour forced on.
+     */
+    #[Test]
+    public function an_unweighted_chunk_is_never_coloured(): void
+    {
+        $this->terminal->output()->useColour(ColourChoice::Always);
+
+        $this->sink->write(OutputStream::Standard, "\033[1mthe worker's own bold\033[0m\n");
+
+        self::assertSame("\033[1mthe worker's own bold\033[0m\n", $this->terminal->standardOutput());
+    }
+
+    /**
+     * With colour off — a pipe, a file, `NO_COLOR` — a weighted chunk is the
+     * bytes it always was, which is what keeps a redirected run identical to
+     * the log beside it.
+     */
+    #[Test]
+    public function a_weighted_chunk_is_plain_when_colour_is_off(): void
+    {
+        $this->terminal->output()->useColour(ColourChoice::Never);
+
+        $this->sink->write(OutputStream::Standard, '  │ ', Emphasis::Frame);
+        $this->sink->write(OutputStream::Standard, "composer test\n", Emphasis::Code);
+
+        self::assertSame("  │ composer test\n", $this->terminal->standardOutput());
     }
 
     #[Test]

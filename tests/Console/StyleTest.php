@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Tests\Console;
 
 use Celyes\RalphPhp\Console\ColourChoice;
 use Celyes\RalphPhp\Console\Style;
+use Celyes\RalphPhp\Log\Emphasis;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\StopKind;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -40,6 +41,9 @@ final class StyleTest extends TestCase
             'label' => ['label'],
             'muted' => ['muted'],
             'identifier' => ['identifier'],
+            'reasoning' => ['reasoning'],
+            'result' => ['result'],
+            'code' => ['code'],
             'pass' => ['pass'],
             'warn' => ['warn'],
             'fail' => ['fail'],
@@ -128,6 +132,41 @@ final class StyleTest extends TestCase
         // The four readings a user acts on differently are four different
         // colours, which is the only reason to colour them at all.
         self::assertCount(4, array_unique([$completed, $failed, $blocked, $pending]));
+    }
+
+    /**
+     * The weights an agent's session is read in.
+     *
+     * What matters is the hierarchy rather than the particular codes: the
+     * agent's answer has to be the heaviest thing on the screen, its reasoning
+     * the lightest thing that is still text, and the two must not be the same
+     * colour — an hour of a session scrolls past, and the half-sentence that
+     * says what was decided has to be findable in it.
+     */
+    #[Test]
+    public function an_agents_reasoning_and_an_agents_answer_do_not_read_alike(): void
+    {
+        $style = Style::coloured();
+
+        self::assertSame($style->reasoning('x'), $style->emphasis(Emphasis::Thinking, 'x'));
+        self::assertSame($style->result('x'), $style->emphasis(Emphasis::Result, 'x'));
+        self::assertSame($style->code('x'), $style->emphasis(Emphasis::Code, 'x'));
+        self::assertSame($style->muted('x'), $style->emphasis(Emphasis::Frame, 'x'));
+        self::assertSame($style->identifier('x'), $style->emphasis(Emphasis::Activity, 'x'));
+        self::assertSame($style->pass('x'), $style->emphasis(Emphasis::Success, 'x'));
+        self::assertSame($style->warn('x'), $style->emphasis(Emphasis::Warning, 'x'));
+        self::assertSame($style->fail('x'), $style->emphasis(Emphasis::Failure, 'x'));
+
+        self::assertNotSame(
+            $style->emphasis(Emphasis::Thinking, 'x'),
+            $style->emphasis(Emphasis::Result, 'x'),
+        );
+
+        // A worker's own bytes are a copy of what another program printed,
+        // escapes and all, and are not this package's to repaint — so the one
+        // weight that means "not ours" is the identity even with colour on.
+        self::assertSame('x', $style->emphasis(Emphasis::Plain, 'x'));
+        self::assertSame("\033[1malready bold\033[0m", $style->emphasis(Emphasis::Plain, "\033[1malready bold\033[0m"));
     }
 
     /**

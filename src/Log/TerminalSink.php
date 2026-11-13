@@ -23,6 +23,17 @@ use Celyes\RalphPhp\Console\Style;
  * output is marked up ({@see LogFile}) — on a terminal it should look like the
  * agent was run directly.
  *
+ * **Except in weight, when the renderer asked for it.** A chunk that arrives
+ * tagged ({@see Emphasis}) is wrapped in that tag's colour on the way out, and
+ * nothing else about it changes: the agent's reasoning recedes into grey, its
+ * answer comes out in white, and the tool calls between them read as the
+ * bookkeeping they are. Only a sink that rendered the bytes itself tags them
+ * ({@see \Celyes\RalphPhp\Agent\ClaudeStream}); a worker's own output is
+ * {@see Emphasis::Plain} and is passed through as before, escapes and all. With
+ * colour off, or on a stream that is not a terminal, every tag resolves to the
+ * identity and the output is the same bytes it always was
+ * ({@see \Celyes\RalphPhp\Console\ColourChoice}).
+ *
  * **Each stream keeps its destination.** The worker's standard output goes to
  * ours and its error output to ours, so that redirecting a run's output
  * separates the two exactly as running the agent by hand would.
@@ -47,19 +58,45 @@ final class TerminalSink implements OutputSink
     {
     }
 
-    public function write(OutputStream $stream, string $chunk): void
+    public function write(OutputStream $stream, string $chunk, Emphasis $emphasis = Emphasis::Plain): void
     {
         if ($chunk === '') {
             return;
         }
 
         if ($stream->isError()) {
-            $this->output->diagnosticText($chunk);
+            $this->output->diagnosticText($this->weighted($chunk, $emphasis, $this->output->diagnosticStyle()));
         } else {
-            $this->output->text($chunk);
+            $this->output->text($this->weighted($chunk, $emphasis, $this->output->style()));
         }
 
         $this->atLineStart = str_ends_with($chunk, "\n");
+    }
+
+    /**
+     * A chunk as it should read on this stream.
+     *
+     * The one place an agent's output is coloured, and the reason the tag
+     * travels with the chunk rather than the sequences: the same bytes are on
+     * their way to a log file that must stay greppable ({@see Emphasis}).
+     * {@see Emphasis::Plain} and a stream that is not a terminal both come back
+     * byte for byte, which keeps a redirected run identical to the file beside
+     * it.
+     *
+     * The line ending is left outside the sequence. A chunk ends wherever the
+     * renderer finished, and a reset *after* the newline is an escape sequence
+     * at the start of the next line — invisible, until the line it opens is the
+     * one somebody copies out of the scrollback.
+     */
+    private function weighted(string $chunk, Emphasis $emphasis, Style $style): string
+    {
+        if ($emphasis === Emphasis::Plain) {
+            return $chunk;
+        }
+
+        $text = rtrim($chunk, "\n");
+
+        return $style->emphasis($emphasis, $text) . substr($chunk, strlen($text));
     }
 
     /**

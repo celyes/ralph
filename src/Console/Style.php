@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Console;
 
+use Celyes\RalphPhp\Log\Emphasis;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\StopKind;
 
@@ -48,6 +49,20 @@ final class Style
     private const string GREEN = '32';
     private const string YELLOW = '33';
     private const string CYAN = '36';
+
+    /**
+     * The brightened pair, for the two weights an agent's output needs.
+     *
+     * `90` is the colour a theme draws as grey — light on a dark terminal, dark
+     * on a light one — and is the only way to say "fainter than the text around
+     * it, but still text", {@see self::DIM} being a weight a few terminals
+     * ignore outright. `97` is the one thing brighter than ordinary output,
+     * which is what an answer has to be when it arrives after a thousand lines
+     * of working.
+     */
+    private const string GREY = '90';
+
+    private const string WHITE = '97';
 
     private function __construct(private readonly bool $enabled)
     {
@@ -121,6 +136,45 @@ final class Style
     public function muted(string $text): string
     {
         return $this->wrap(self::DIM, $text);
+    }
+
+    /**
+     * An agent's reasoning, while it is reasoning.
+     *
+     * Grey, and the lightest thing this palette prints: it is worth seeing —
+     * minutes of silence and minutes of a hung process look identical — and it
+     * is not worth reading, so it has to recede from the lines around it
+     * without disappearing from a scrollback somebody is searching.
+     */
+    public function reasoning(string $text): string
+    {
+        return $this->wrap(self::GREY, $text);
+    }
+
+    /**
+     * What the agent actually said: its conclusions, its report, its answer.
+     *
+     * The brightest thing in the palette, and the only use of white. Everything
+     * else a run prints is context for this, and after an hour of a session it
+     * is the part a person scrolls back to find.
+     */
+    public function result(string $text): string
+    {
+        return $this->wrap(self::WHITE, $text);
+    }
+
+    /**
+     * Code: a line of a fenced block the agent wrote, a command it ran.
+     *
+     * The same weight as {@see self::result()} and deliberately a second name
+     * for it — code is an answer, not an aside. What sets a block apart from the
+     * prose around it is its frame ({@see self::muted()} over the gutter and the
+     * language tag), not its colour, because a syntax-aware palette is a
+     * highlighter and this is a terminal watching a process.
+     */
+    public function code(string $text): string
+    {
+        return $this->wrap(self::WHITE, $text);
     }
 
     /**
@@ -202,6 +256,35 @@ final class Style
             LifecycleState::Blocked, LifecycleState::Interrupted => $this->warn($text),
             LifecycleState::Running => $this->identifier($text),
             LifecycleState::Pending, LifecycleState::Skipped => $this->muted($text),
+        };
+    }
+
+    /**
+     * How a chunk of an agent's session should read.
+     *
+     * The third of the mappings that live with the palette rather than at the
+     * call site ({@see self::state()}, {@see self::stop()}), and the one that is
+     * applied furthest from where its text was composed: a renderer tags what it
+     * writes ({@see Emphasis}) and the terminal resolves the tag here, because
+     * the same bytes also go to a log file that must stay plain.
+     *
+     * {@see Emphasis::Plain} returns the text untouched even when colour is on.
+     * It is how a worker's own output is marked, escapes and all, and the
+     * package has no business repainting another program's choices.
+     */
+    public function emphasis(Emphasis $emphasis, string $text): string
+    {
+        return match ($emphasis) {
+            Emphasis::Plain => $text,
+            Emphasis::Thinking => $this->reasoning($text),
+            Emphasis::Result => $this->result($text),
+            Emphasis::Code => $this->code($text),
+            Emphasis::Frame => $this->muted($text),
+            Emphasis::Activity => $this->identifier($text),
+            Emphasis::Detail => $this->muted($text),
+            Emphasis::Success => $this->pass($text),
+            Emphasis::Warning => $this->warn($text),
+            Emphasis::Failure => $this->fail($text),
         };
     }
 

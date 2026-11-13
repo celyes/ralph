@@ -198,7 +198,16 @@ final class LogFile implements OutputSink
         return $this->failure !== null;
     }
 
-    public function write(OutputStream $stream, string $chunk): void
+    /**
+     * Take a chunk, whatever a terminal would have made of it.
+     *
+     * The emphasis a renderer tagged the chunk with is read and discarded here,
+     * and that is the point of it being a tag rather than a sequence: this file
+     * is a copy somebody will `grep`, `tail -f` and paste into an issue, and
+     * nine bytes of colour around every line of it would cost all three
+     * ({@see Emphasis}).
+     */
+    public function write(OutputStream $stream, string $chunk, Emphasis $emphasis = Emphasis::Plain): void
     {
         if ($chunk === '') {
             return;

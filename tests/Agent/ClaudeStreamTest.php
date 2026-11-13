@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Agent;
 
 use Celyes\RalphPhp\Agent\ClaudeStream;
+use Celyes\RalphPhp\Log\Emphasis;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Tests\Log\RecordingSink;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -268,6 +269,203 @@ final class ClaudeStreamTest extends TestCase
     }
 
     /**
+     * The weights, which are the point of rendering this feed at all: an hour
+     * of somebody else's session goes past, and the half-sentence that says
+     * what was decided has to be findable in it.
+     *
+     * Asserted as what each piece was *said to be* rather than as colour. The
+     * sequences are added at the terminal and nowhere nearer the work
+     * ({@see \Celyes\RalphPhp\Log\TerminalSink}), because the same bytes are on
+     * their way to a log file somebody will grep.
+     */
+    #[Test]
+    public function the_agents_reasoning_and_the_agents_answer_are_weighted_apart(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_start', 'content_block' => ['type' => 'thinking']],
+        ]) . self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'thinking_delta', 'thinking' => 'Which file owns this?']],
+        ]) . self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_stop'],
+        ]) . self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => "I added the option.\n"]],
+        ]));
+
+        self::assertSame('✻ thinking Which file owns this?', $sink->textWith(OutputStream::Standard, Emphasis::Thinking));
+        self::assertSame("I added the option.\n", $sink->textWith(OutputStream::Standard, Emphasis::Result));
+    }
+
+    /**
+     * A tool call is bookkeeping with something important inside it: the command
+     * a `Bash` call ran is the work, and reads as code rather than as part of
+     * the envelope around it. The text is exactly what it always was.
+     */
+    #[Test]
+    public function a_tool_call_reads_as_activity_and_its_subject_as_code(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'assistant',
+            'message' => ['content' => [['type' => 'tool_use', 'name' => 'Bash', 'input' => ['command' => 'composer test']]]],
+        ]) . self::line([
+            'type' => 'user',
+            'message' => ['content' => [['type' => 'tool_result', 'content' => 'OK (1 test)']]],
+        ]));
+
+        self::assertSame("⏺ Bash(composer test)\n  ⎿ OK (1 test)\n", $sink->textOf(OutputStream::Standard));
+        self::assertSame('⏺ Bash', $sink->textWith(OutputStream::Standard, Emphasis::Activity));
+        self::assertSame('composer test', $sink->textWith(OutputStream::Standard, Emphasis::Code));
+        self::assertSame("OK (1 test)\n", $sink->textWith(OutputStream::Standard, Emphasis::Detail));
+    }
+
+    /**
+     * A fenced code block becomes a frame.
+     *
+     * The fences themselves are markdown's answer to a problem a terminal does
+     * not have, so they are not printed: the language goes where a reader looks
+     * for it, the code gets a gutter, and the block stays findable in a
+     * scrollback and in the log — which is the one thing three backticks in the
+     * middle of a paragraph do not do.
+     *
+     * The fence arrives split across deltas on purpose. It is why the message is
+     * rendered a line at a time: a renderer that wrote each fragment as it came
+     * would have put the gutter in the middle of a word.
+     */
+    #[Test]
+    public function a_fenced_code_block_is_framed_with_its_language_and_a_gutter(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        foreach (["Run it with:\n\n```ba", "sh\ncomposer test\nvendor/bin/phpstan\n``", "`\n\nThat is all.\n"] as $fragment) {
+            $stream->write(OutputStream::Standard, self::line([
+                'type' => 'stream_event',
+                'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => $fragment]],
+            ]));
+        }
+
+        self::assertSame(
+            "Run it with:\n"
+            . "\n"
+            . "  ╭─ bash\n"
+            . "  │ composer test\n"
+            . "  │ vendor/bin/phpstan\n"
+            . "  ╰─\n"
+            . "\n"
+            . "That is all.\n",
+            $sink->textOf(OutputStream::Standard),
+        );
+
+        // The code is the answer and is weighted as one; the frame around it is
+        // the package's own scaffolding and recedes.
+        self::assertSame("composer test\nvendor/bin/phpstan\n", $sink->textWith(OutputStream::Standard, Emphasis::Code));
+        self::assertSame(
+            "  ╭─ bash\n" . '  │ ' . '  │ ' . "  ╰─\n",
+            $sink->textWith(OutputStream::Standard, Emphasis::Frame),
+        );
+    }
+
+    /**
+     * A block the agent never closed is closed for it when the message ends.
+     *
+     * Otherwise the gutter would run on into the next paragraph — and, for a
+     * session cut short mid-block, to the end of the log.
+     */
+    #[Test]
+    public function a_code_block_left_open_is_closed_when_the_message_ends(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => "```json\n{\"outcome\": \"candidate\"}"]],
+        ]) . self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_stop'],
+        ]) . self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => "Done.\n"]],
+        ]));
+
+        self::assertSame(
+            "  ╭─ json\n"
+            . "  │ {\"outcome\": \"candidate\"}\n"
+            . "  ╰─\n"
+            . "Done.\n",
+            $sink->textOf(OutputStream::Standard),
+        );
+    }
+
+    /**
+     * A fence *with* a language inside a block does not close it: that is
+     * markdown being quoted in markdown, which an agent writing about a README
+     * does, and closing on it would put the rest of the block's code in the
+     * prose.
+     */
+    #[Test]
+    public function a_quoted_fence_inside_a_block_is_code_rather_than_its_end(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => "~~~markdown\n```bash\nralph run\n```\n~~~\nthe README now says that.\n"]],
+        ]));
+
+        self::assertSame(
+            "  ╭─ markdown\n"
+            . "  │ ```bash\n"
+            . "  │ ralph run\n"
+            . "  │ ```\n"
+            . "  ╰─\n"
+            . "the README now says that.\n",
+            $sink->textOf(OutputStream::Standard),
+        );
+    }
+
+    /**
+     * The line held for a fence is written out when the session ends, and the
+     * rest of it is not framed twice when it was flushed mid-line.
+     */
+    #[Test]
+    public function the_half_line_a_session_ended_on_is_written_out(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => "```php\n\$config = [" ]],
+        ]));
+        $stream->note('claude was stopped after 1800 seconds');
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => "];\n"]],
+        ]));
+        $stream->flush();
+
+        self::assertSame(
+            "  ╭─ php\n"
+            . "  │ \$config = [\n"
+            . "];\n",
+            $sink->textOf(OutputStream::Standard),
+        );
+        self::assertSame(['claude was stopped after 1800 seconds'], $sink->notes);
+    }
+
+    /**
      * A retried 429 or an overloaded API is minutes of an attempt's budget
      * spent waiting. Without the line the session looks idle for no reason,
      * which is also how a usage limit reached mid-attempt first becomes visible.
@@ -362,6 +560,37 @@ final class ClaudeStreamTest extends TestCase
         $stream->write(OutputStream::Standard, str_repeat('x', 9 * 1024 * 1024));
 
         self::assertSame(9 * 1024 * 1024, $sink->byteCountOf(OutputStream::Standard));
+    }
+
+    /**
+     * A message with no line ending in it for longer than any line could be is
+     * written out as it is, and the rest of that line follows it.
+     *
+     * The same side this class errs on everywhere else: holding output back to
+     * finish a rendering is a renderer that swallowed what a watcher was waiting
+     * for, and the gutter is worth less than the bytes.
+     */
+    #[Test]
+    public function a_message_line_too_long_to_hold_is_written_through(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $written = str_repeat('x', 64 * 1024 + 1);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => $written]],
+        ]));
+
+        self::assertSame($written, $sink->textOf(OutputStream::Standard));
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => "y\n"]],
+        ]));
+
+        self::assertSame($written . "y\n", $sink->textOf(OutputStream::Standard));
     }
 
     /**

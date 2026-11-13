@@ -111,9 +111,9 @@ final class AttemptLog implements OutputSink
         return $this->failure() !== null;
     }
 
-    public function write(OutputStream $stream, string $chunk): void
+    public function write(OutputStream $stream, string $chunk, Emphasis $emphasis = Emphasis::Plain): void
     {
-        $this->sinks->write($stream, $chunk);
+        $this->sinks->write($stream, $chunk, $emphasis);
     }
 
     public function note(string $line): void

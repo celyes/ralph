@@ -16,6 +16,11 @@ use Throwable;
  * one sink; whether that reaches a terminal, a file, both, or nothing is
  * decided where the attempt is set up.
  *
+ * The fan-out is what makes one rendering serve both destinations: a chunk and
+ * what it is ({@see Emphasis}) go to every sink, and each decides what to do
+ * with the tag — the terminal colours by it, the log file ignores it. So the
+ * weighting a reader sees costs nothing in the file they grep.
+ *
  * {@see self::none()} is the null case, and it is a real sink rather than a
  * null the runner has to test for: a `ralph status` that runs a Git command
  * wants no streaming at all, and that should be the same code path as an
@@ -100,10 +105,10 @@ final class Sinks implements OutputSink
         return count($this->sinks);
     }
 
-    public function write(OutputStream $stream, string $chunk): void
+    public function write(OutputStream $stream, string $chunk, Emphasis $emphasis = Emphasis::Plain): void
     {
-        $this->each(static function (OutputSink $sink) use ($stream, $chunk): void {
-            $sink->write($stream, $chunk);
+        $this->each(static function (OutputSink $sink) use ($stream, $chunk, $emphasis): void {
+            $sink->write($stream, $chunk, $emphasis);
         });
     }
 

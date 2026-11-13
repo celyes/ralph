@@ -14,6 +14,13 @@ namespace Celyes\RalphPhp\Log;
  * thing and does not know how many destinations are behind it
  * ({@see Sinks}), or whether there are any at all.
  *
+ * **A chunk may say what it is.** Bytes forwarded off a pipe are
+ * {@see Emphasis::Plain} — a copy of another program's output, repainted by
+ * nobody — while a filter that rendered a machine format into readable lines
+ * knows which of them are the agent thinking and which are its answer, and says
+ * so ({@see Emphasis}). A terminal weights them; a log file ignores the tag and
+ * keeps the bytes.
+ *
  * **Chunks, not lines.** A sink is handed whatever came off the pipe, which is
  * a read of up to a few kilobytes that begins and ends wherever the worker
  * happened to be. A sink that needs whole lines buffers them itself
@@ -44,8 +51,13 @@ interface OutputSink
      * @param OutputStream $stream which descriptor it came off
      * @param string $chunk raw bytes, possibly ending mid-line and possibly
      *        not valid UTF-8 — a worker may print anything
+     * @param Emphasis $emphasis what the chunk is, for a sink that can weight
+     *        it ({@see TerminalSink}). Defaults to {@see Emphasis::Plain},
+     *        which is the honest answer for bytes forwarded off a pipe: only a
+     *        sink that rendered them itself ({@see StreamFilter}) knows any
+     *        better, and a sink that writes to a file ignores it either way
      */
-    public function write(OutputStream $stream, string $chunk): void;
+    public function write(OutputStream $stream, string $chunk, Emphasis $emphasis = Emphasis::Plain): void;
 
     /**
      * Record a line Ralph PHP itself is saying.

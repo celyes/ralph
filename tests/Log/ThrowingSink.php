@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Log;
 
+use Celyes\RalphPhp\Log\Emphasis;
 use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Log\OutputStream;
 use RuntimeException;
@@ -27,7 +28,7 @@ final class ThrowingSink implements OutputSink
     {
     }
 
-    public function write(OutputStream $stream, string $chunk): void
+    public function write(OutputStream $stream, string $chunk, Emphasis $emphasis = Emphasis::Plain): void
     {
         $this->attempts++;
 

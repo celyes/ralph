@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Agent;
 
+use Celyes\RalphPhp\Log\Emphasis;
 use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Log\StreamFilter;
@@ -40,10 +41,24 @@ use JsonException;
  * but both are this format's, and keeping them in one class is what stops the
  * two from drifting into disagreeing about it.
  *
- * **Plain text, no colour.** What a filter writes reaches both of an attempt's
- * destinations ({@see StreamFilter}), and one of them is a log file somebody
- * will grep. The glyphs are `loop.sh`'s so that a reader of both sees one
- * convention; the escape sequences are not.
+ * **Plain text, with a weight on it.** What a filter writes reaches both of an
+ * attempt's destinations ({@see StreamFilter}), and one of them is a log file
+ * somebody will grep — so the bytes carry no escape sequences. What each piece
+ * *is* goes alongside it instead ({@see Emphasis}), and only a terminal acts on
+ * that: the agent's reasoning recedes into grey, its own words come out in
+ * white, a tool call reads as the bookkeeping it is, and a code block is set
+ * apart by a gutter the log keeps too. This class is the only thing in the chain
+ * that can make those distinctions — downstream they are all just bytes — which
+ * is why they are made here and resolved as late as possible
+ * ({@see \Celyes\RalphPhp\Console\Style::emphasis()}).
+ *
+ * **One line of prose at a time, and fragments of everything else.** Thinking
+ * goes through as it arrives, fragment by fragment, because that is the output
+ * that answers "is this thing alive"; the message itself is held to the end of
+ * each line, because a fence is a line and a code block that is recognised a
+ * fragment late is a code block rendered with its gutter in the wrong place. The
+ * cost is at most one unfinished line held back, which {@see self::flush()}
+ * writes out when the session ends and a note writes out before it prints.
  *
  * **Anything that is not an event is passed through.** A line the CLI printed
  * as plain text is not noise to be hidden: a usage limit reached before the
@@ -74,6 +89,35 @@ final class ClaudeStream implements StreamFilter
      * instead of showing it.
      */
     private const int LINE_LIMIT = 8 * 1024 * 1024;
+
+    /**
+     * How much of the message may be held waiting for the end of a line.
+     *
+     * The message is rendered a line at a time so that a code fence is seen
+     * before the line it opens is printed, and a model writing prose produces a
+     * newline every sentence or two. Past this a "line" is not a line: the bytes
+     * are written out as they are, and the rest of that line follows them, which
+     * costs a gutter in the wrong place on pathological output and never costs
+     * output a watcher does not see.
+     */
+    private const int PROSE_LIMIT = 64 * 1024;
+
+    /**
+     * The frame around a fenced code block the agent wrote.
+     *
+     * A block of code in the middle of prose is the part a reader wants to find
+     * again, and the fence markers it arrives wrapped in are markdown's answer
+     * to a problem a terminal does not have. So the fences become a frame: the
+     * language where the opening fence named one, a gutter down the left of the
+     * code, and a corner to close it. The gutter is what makes the block
+     * skimmable in a scrollback and findable in the log, which keeps it for the
+     * same reason it keeps the glyphs above.
+     */
+    private const string CODE_TOP = '  ╭─';
+
+    private const string CODE_GUTTER = '  │ ';
+
+    private const string CODE_END = '  ╰─';
 
     /**
      * How much of a tool call's subject is shown.
@@ -129,6 +173,35 @@ final class ClaudeStream implements StreamFilter
      */
     private bool $atLineStart = true;
 
+    /**
+     * The message's current line, so far, with no newline after it yet.
+     *
+     * Held rather than written because a line that turns out to be a code fence
+     * is not shown at all and the lines after it are shown with a gutter: see
+     * {@see self::PROSE_LIMIT}.
+     */
+    private string $prose = '';
+
+    /**
+     * The run of characters the message's open code fence was opened with, or
+     * an empty string when the message is not inside one.
+     *
+     * The marker itself rather than a flag, so that a fence quoted inside a
+     * block does not end it ({@see self::closes()}). Per content block, and
+     * reset with it: a message that ends mid-fence has its block closed on the
+     * way out rather than leaving the next message's prose in a gutter.
+     */
+    private string $fence = '';
+
+    /**
+     * Whether part of the message's current line has already been written.
+     *
+     * The flag that keeps a line that was flushed early — by a note, by the
+     * limit above — from being given a second gutter when the rest of it
+     * arrives.
+     */
+    private bool $lineOpen = false;
+
     private function __construct(private readonly OutputSink $sink)
     {
     }
@@ -149,14 +222,14 @@ final class ClaudeStream implements StreamFilter
      * so it goes through untouched, on its own stream, exactly as any other
      * worker's would.
      */
-    public function write(OutputStream $stream, string $chunk): void
+    public function write(OutputStream $stream, string $chunk, Emphasis $emphasis = Emphasis::Plain): void
     {
         if ($chunk === '') {
             return;
         }
 
         if ($stream->isError()) {
-            $this->sink->write($stream, $chunk);
+            $this->sink->write($stream, $chunk, $emphasis);
 
             return;
         }
@@ -173,7 +246,7 @@ final class ClaudeStream implements StreamFilter
         // A line longer than anything this format produces. Written through
         // rather than held: see the constant.
         if (strlen($this->pending) > self::LINE_LIMIT) {
-            $this->writeOut($this->pending);
+            $this->writeOut($this->pending, Emphasis::Plain);
             $this->pending = '';
         }
     }
@@ -206,6 +279,7 @@ final class ClaudeStream implements StreamFilter
             $this->renderLine($line);
         }
 
+        $this->flushProse();
         $this->endLine();
     }
 
@@ -309,7 +383,9 @@ final class ClaudeStream implements StreamFilter
         if ($event === null) {
             // Blank lines between events are the format's, not the CLI's.
             if (trim($line) !== '') {
-                $this->writeLine($line);
+                // Plain: a line the CLI printed as text is another program's
+                // output, and this reading has no idea what it is.
+                $this->writeLine($line, Emphasis::Plain);
             }
 
             return;
@@ -350,11 +426,17 @@ final class ClaudeStream implements StreamFilter
         if ($type === 'assistant') {
             foreach (self::blocksOf($event) as $block) {
                 if (self::typeOf($block) === 'tool_use') {
-                    $this->writeLine(sprintf(
-                        '⏺ %s(%s)',
-                        self::textOf($block, 'name') ?? 'tool',
-                        self::subject($block),
-                    ));
+                    // The call reads as activity and its subject as what it is:
+                    // a `Bash(composer test)` is a command, a `Read(src/…)` is
+                    // the file the answer came out of, and both are worth more
+                    // of a reader's attention than the brackets around them.
+                    $this->writeParts([
+                        ['⏺ ', Emphasis::Activity],
+                        [self::textOf($block, 'name') ?? 'tool', Emphasis::Activity],
+                        ['(', Emphasis::Frame],
+                        [self::subject($block), Emphasis::Code],
+                        [')', Emphasis::Frame],
+                    ]);
                 }
             }
 
@@ -364,7 +446,10 @@ final class ClaudeStream implements StreamFilter
         if ($type === 'user') {
             foreach (self::blocksOf($event) as $block) {
                 if (self::typeOf($block) === 'tool_result') {
-                    $this->writeLine('  ⎿ ' . Excerpt::of(self::flatten(self::resultOf($block)), self::RESULT_WIDTH));
+                    $this->writeParts([
+                        ['  ⎿ ', Emphasis::Frame],
+                        [Excerpt::of(self::flatten(self::resultOf($block)), self::RESULT_WIDTH), Emphasis::Detail],
+                    ]);
                 }
             }
 
@@ -393,11 +478,12 @@ final class ClaudeStream implements StreamFilter
         if ($subtype === 'init') {
             $session = self::textOf($event, 'session_id') ?? '';
 
-            $this->writeLine(sprintf(
-                'claude %s · session %s',
-                self::textOf($event, 'model') ?? '?',
-                $session === '' ? '?' : substr($session, 0, 8),
-            ));
+            $this->writeParts([
+                ['claude ', Emphasis::Detail],
+                [self::textOf($event, 'model') ?? '?', Emphasis::Activity],
+                [' · session ', Emphasis::Detail],
+                [$session === '' ? '?' : substr($session, 0, 8), Emphasis::Activity],
+            ]);
 
             return;
         }
@@ -409,24 +495,31 @@ final class ClaudeStream implements StreamFilter
         $retry = self::numberOf($event, 'retryAttempt');
         $after = self::numberOf($event, 'retryInMs');
 
-        $this->writeLine(sprintf(
-            '⚠ api error: %s%s%s',
-            Excerpt::of(self::flatten(self::problemOf($event)), self::RESULT_WIDTH),
-            $retry === null
-                ? ''
-                : sprintf(' · retry %d/%d', (int) $retry, (int) (self::numberOf($event, 'maxRetries') ?? 0)),
-            $after === null ? '' : sprintf(' in %ds', (int) round($after / 1000)),
-        ));
+        $this->writeParts([
+            ['⚠ api error: ', Emphasis::Warning],
+            [Excerpt::of(self::flatten(self::problemOf($event)), self::RESULT_WIDTH), Emphasis::Warning],
+            [
+                $retry === null
+                    ? ''
+                    : sprintf(' · retry %d/%d', (int) $retry, (int) (self::numberOf($event, 'maxRetries') ?? 0)),
+                Emphasis::Detail,
+            ],
+            [$after === null ? '' : sprintf(' in %ds', (int) round($after / 1000)), Emphasis::Detail],
+        ]);
     }
 
     /**
      * The message as it is being written: the half that makes this a stream.
      *
-     * Text goes through as it arrives, fragment by fragment, so that output
-     * appears at the speed the agent produces it rather than a message behind.
-     * Thinking is marked once and then shown the same way — or, when the model
-     * does not expose the words, as a tick per fragment, because "something is
-     * happening" is the whole question a watcher is asking.
+     * Thinking goes through as it arrives, fragment by fragment, so that a
+     * watcher can see the session is alive at the speed the agent is working;
+     * it is marked once and then shown in grey — or, when the model does not
+     * expose the words, as a tick per fragment, because "something is
+     * happening" is the whole question being asked.
+     *
+     * The message itself is gathered into lines ({@see self::renderProse()}),
+     * which is what lets a fenced code block be recognised and framed rather
+     * than printed as three backticks in the middle of a sentence.
      *
      * @param array<string, mixed> $event
      */
@@ -435,16 +528,19 @@ final class ClaudeStream implements StreamFilter
         $type = self::typeOf($event);
 
         if ($type === 'content_block_start') {
+            // A new block starts a new line, and starts it outside whatever
+            // fence the last one was in the middle of.
+            $this->closeProse();
+
             if (self::typeOf(self::objectOf($event, 'content_block')) === 'thinking') {
-                $this->endLine();
-                $this->writeOut('✻ thinking ');
+                $this->writeOut('✻ thinking ', Emphasis::Thinking);
             }
 
             return;
         }
 
         if ($type === 'content_block_stop') {
-            $this->endLine();
+            $this->closeProse();
 
             return;
         }
@@ -454,14 +550,219 @@ final class ClaudeStream implements StreamFilter
         if (self::typeOf($delta) === 'thinking_delta') {
             $thinking = self::textOf($delta, 'thinking') ?? '';
 
-            $this->writeOut($thinking === '' ? '·' : $thinking);
+            $this->writeOut($thinking === '' ? '·' : $thinking, Emphasis::Thinking);
 
             return;
         }
 
         if (self::typeOf($delta) === 'text_delta') {
-            $this->writeOut(self::textOf($delta, 'text') ?? '');
+            $this->renderProse(self::textOf($delta, 'text') ?? '');
         }
+    }
+
+    /**
+     * A fragment of the message, shown a line at a time.
+     *
+     * Deltas arrive in pieces of whatever size the API produced, so the lines
+     * are assembled here. A line is only shown once it is whole because the
+     * next thing it might turn out to be is a code fence, and a fence is only a
+     * fence as a line: three backticks mid-sentence are three backticks.
+     */
+    private function renderProse(string $text): void
+    {
+        if ($text === '') {
+            return;
+        }
+
+        $this->prose .= $text;
+
+        while (($break = strpos($this->prose, "\n")) !== false) {
+            $line = substr($this->prose, 0, $break);
+            $this->prose = substr($this->prose, $break + 1);
+
+            $this->renderProseLine(rtrim($line, "\r"));
+        }
+
+        // Prose with no line ending in it for this long is not a line a fence
+        // could still be hiding in. Written through rather than held: see the
+        // constant.
+        if (strlen($this->prose) > self::PROSE_LIMIT) {
+            $this->flushProse();
+        }
+    }
+
+    /**
+     * One whole line of the message: prose, code, or a fence around code.
+     *
+     * The fences themselves are never printed. An opening one becomes the top
+     * of a frame, with the language it named where a reader will look for it; a
+     * closing one becomes the bottom; the lines between get a gutter, so that a
+     * block of code in the middle of a paragraph can be found again in a
+     * scrollback and in the log.
+     */
+    private function renderProseLine(string $line): void
+    {
+        // The rest of a line that was already written out in part: it has had
+        // whatever frame it is getting, and is not a fence.
+        if ($this->lineOpen) {
+            $this->writeOut($line . "\n", $this->weight());
+            $this->lineOpen = false;
+
+            return;
+        }
+
+        $fence = self::fenceOf($line);
+
+        if ($this->fence !== '') {
+            if ($fence !== null && self::closes($this->fence, $fence)) {
+                $this->fence = '';
+                $this->writeLine(self::CODE_END, Emphasis::Frame);
+
+                return;
+            }
+
+            // A blank line inside a block is the gutter and nothing else: a
+            // trailing space would be whitespace this package invented, in a
+            // file somebody diffs.
+            if ($line === '') {
+                $this->writeLine(rtrim(self::CODE_GUTTER), Emphasis::Frame);
+
+                return;
+            }
+
+            $this->writeParts([
+                [self::CODE_GUTTER, Emphasis::Frame],
+                [$line, Emphasis::Code],
+            ]);
+
+            return;
+        }
+
+        if ($fence !== null) {
+            [$marker, $language] = $fence;
+            $this->fence = $marker;
+
+            $this->writeLine(
+                $language === '' ? self::CODE_TOP : self::CODE_TOP . ' ' . $language,
+                Emphasis::Frame,
+            );
+
+            return;
+        }
+
+        $this->writeLine($line, Emphasis::Result);
+    }
+
+    /**
+     * Write part of the message's current line, opening the line if needed.
+     *
+     * The gutter belongs to the line rather than to the fragment that happened
+     * to start it, which is what this exists to keep straight: a code line
+     * flushed early by a note and then continued must not be given a second
+     * one.
+     */
+    private function continueProse(string $text): void
+    {
+        if ($this->fence !== '' && !$this->lineOpen) {
+            $this->endLine();
+            $this->writeOut(self::CODE_GUTTER, Emphasis::Frame);
+            $this->lineOpen = true;
+        }
+
+        if ($text === '') {
+            return;
+        }
+
+        $this->writeOut($text, $this->weight());
+        $this->lineOpen = true;
+    }
+
+    /**
+     * What the message's current line is: code, or the agent's own prose.
+     */
+    private function weight(): Emphasis
+    {
+        return $this->fence === '' ? Emphasis::Result : Emphasis::Code;
+    }
+
+    /**
+     * Write out the part of a line the message has produced so far.
+     *
+     * For a session that ended mid-sentence, and for a note that has to print
+     * without landing inside one.
+     */
+    private function flushProse(): void
+    {
+        if ($this->prose === '') {
+            return;
+        }
+
+        $text = $this->prose;
+        $this->prose = '';
+
+        $this->continueProse($text);
+    }
+
+    /**
+     * Finish the message's line and close the block it was in.
+     *
+     * A content block that ended inside a fence is closed here rather than left
+     * open: the agent's next paragraph is not code, and a log in which the
+     * gutter never ends is harder to read than one with a frame that was closed
+     * on the agent's behalf.
+     */
+    private function closeProse(): void
+    {
+        $this->flushProse();
+        $this->endLine();
+        $this->lineOpen = false;
+
+        if ($this->fence !== '') {
+            $this->fence = '';
+            $this->writeLine(self::CODE_END, Emphasis::Frame);
+        }
+    }
+
+    /**
+     * A line read as a code fence: the run of characters it is made of and the
+     * language it named, or null when the line is not a fence at all.
+     *
+     * Both of markdown's fences, because an agent writing about markdown writes
+     * the other one inside the first. The run is kept rather than reduced to a
+     * flag so that {@see self::closes()} can tell a block's own end from a fence
+     * quoted inside it.
+     *
+     * @return array{string, string}|null
+     */
+    private static function fenceOf(string $line): ?array
+    {
+        if (preg_match('/^\s{0,3}(`{3,}|~{3,})\s*([\w+#.-]*)\s*$/', $line, $matches) !== 1) {
+            return null;
+        }
+
+        return [$matches[1], $matches[2]];
+    }
+
+    /**
+     * Whether this fence ends the block that fence opened.
+     *
+     * Markdown's own rule, and it is the rule that matters here rather than a
+     * simpler one: a block closes on a bare fence of the same character, at
+     * least as long as the one that opened it. An agent documenting this package
+     * writes a `~~~markdown` block with ```` ``` ```` blocks inside it, and a
+     * reading that closed on the first fence it saw would put the rest of that
+     * block's code in the prose — half a frame, and a paragraph in a gutter.
+     *
+     * @param string $open the run of characters the block was opened with
+     * @param array{string, string} $fence the fence being considered
+     */
+    private static function closes(string $open, array $fence): bool
+    {
+        [$marker, $language] = $fence;
+
+        return $language === ''
+            && $marker[0] === $open[0]
+            && strlen($marker) >= strlen($open);
     }
 
     /**
@@ -481,27 +782,79 @@ final class ClaudeStream implements StreamFilter
         $failed = ($event['is_error'] ?? false) === true;
         $cost = self::numberOf($event, 'total_cost_usd');
 
-        $this->writeLine(sprintf(
-            '%s%s · %d turns · %.1fs%s',
-            $failed ? '✗ failed' : '✓ done',
-            $subtype === 'success' ? '' : sprintf(' (%s)', $subtype),
-            (int) (self::numberOf($event, 'num_turns') ?? 0),
-            (self::numberOf($event, 'duration_ms') ?? 0.0) / 1000,
-            $cost === null ? '' : sprintf(' · $%.4f', $cost),
-        ));
+        $this->writeParts([
+            [
+                sprintf(
+                    '%s%s',
+                    $failed ? '✗ failed' : '✓ done',
+                    $subtype === 'success' ? '' : sprintf(' (%s)', $subtype),
+                ),
+                $failed ? Emphasis::Failure : Emphasis::Success,
+            ],
+            [
+                sprintf(
+                    ' · %d turns · %.1fs%s',
+                    (int) (self::numberOf($event, 'num_turns') ?? 0),
+                    (self::numberOf($event, 'duration_ms') ?? 0.0) / 1000,
+                    $cost === null ? '' : sprintf(' · $%.4f', $cost),
+                ),
+                Emphasis::Detail,
+            ],
+        ]);
 
         foreach (self::errorsOf($event) as $error) {
-            $this->writeLine('  ' . Excerpt::of(self::flatten($error), self::RESULT_WIDTH));
+            $this->writeParts([
+                ['  ', Emphasis::Frame],
+                [Excerpt::of(self::flatten($error), self::RESULT_WIDTH), Emphasis::Failure],
+            ]);
         }
     }
 
     /**
      * One line of the package's rendering, on a line of its own.
      */
-    private function writeLine(string $line): void
+    private function writeLine(string $line, Emphasis $emphasis): void
     {
         $this->endLine();
-        $this->writeOut($line . "\n");
+        $this->writeOut($line . "\n", $emphasis);
+    }
+
+    /**
+     * One line of the package's rendering, in pieces of differing weight.
+     *
+     * A rendered line is rarely one thing — `⏺ Bash(composer test)` is a call,
+     * a command and the brackets between them — and the weighting is per write
+     * ({@see Emphasis}), so a line that reads as one sentence is written as the
+     * parts it is made of. The text is exactly what joining the parts gives,
+     * which is what keeps the log a line-for-line copy of the terminal.
+     *
+     * The line ending goes to the last part that has any text, so that it is
+     * carried by the same weight as the text it ends rather than arriving as a
+     * piece of its own.
+     *
+     * @param list<array{string, Emphasis}> $parts
+     */
+    private function writeParts(array $parts): void
+    {
+        $this->endLine();
+
+        $written = array_values(array_filter(
+            $parts,
+            static fn (array $part): bool => $part[0] !== '',
+        ));
+
+        if ($written === []) {
+            $this->writeOut("\n", Emphasis::Plain);
+
+            return;
+        }
+
+        $last = count($written) - 1;
+        $written[$last][0] .= "\n";
+
+        foreach ($written as [$text, $emphasis]) {
+            $this->writeOut($text, $emphasis);
+        }
     }
 
     /**
@@ -510,17 +863,24 @@ final class ClaudeStream implements StreamFilter
     private function endLine(): void
     {
         if (!$this->atLineStart) {
-            $this->writeOut("\n");
+            $this->writeOut("\n", Emphasis::Plain);
         }
     }
 
-    private function writeOut(string $text): void
+    /**
+     * Bytes out, and what they are.
+     *
+     * The weight is a tag on the write rather than a sequence in the text: the
+     * sink underneath fans out to a terminal and to a file, and only one of
+     * those wants the colour ({@see Emphasis}).
+     */
+    private function writeOut(string $text, Emphasis $emphasis): void
     {
         if ($text === '') {
             return;
         }
 
-        $this->sink->write(OutputStream::Standard, $text);
+        $this->sink->write(OutputStream::Standard, $text, $emphasis);
         $this->atLineStart = str_ends_with($text, "\n");
     }
 
