@@ -48,6 +48,12 @@ use Celyes\RalphPhp\Support\SystemClock;
  * raises {@see VerificationException}, which the runner records as a refusal
  * rather than as evidence against work nobody examined.
  *
+ * **No checks is a report, not a failure.** `checks` is empty by default, so
+ * the commonest reason there is nothing to run is a project that has not said
+ * how it is verified. That gets {@see VerificationReport::none()} — nothing
+ * ran, nothing is claimed — and the workspace is not even inspected, because
+ * there is nothing to inspect it for.
+ *
  * **The excerpt is redacted; the streamed copy is not.** A check runs with the
  * environment the user started `ralph` in, so a suite that prints what it was
  * configured with can print a credential — and the excerpt this class keeps is
@@ -77,8 +83,8 @@ final class CommandVerifier implements Verifier
      *
      * @param list<VerificationCommand> $checks
      *
-     * @throws VerificationException when there is nothing to verify with, the
-     *         workspace cannot be entered, or a command could not be started
+     * @throws VerificationException when the workspace cannot be entered, or a
+     *         command could not be started
      */
     public function verify(
         array $checks,
@@ -89,15 +95,14 @@ final class CommandVerifier implements Verifier
         $secrets ??= Secrets::none();
 
         if ($checks === []) {
-            // Configuration validation rejects an empty `checks` list long
-            // before a run starts, so this is a caller that built its own list.
-            // Still refused rather than reported as a vacuous pass: a report
-            // standing behind nothing would commit on the strength of no
-            // evidence at all.
-            throw new VerificationException(
-                'There are no verification commands to run, so nothing about this work can be established.',
-                ['Configure at least one command under "checks".'],
-            );
+            // A project that configures no checks (the default: only the
+            // project knows how it is verified) reaches this on every pass. It
+            // is not a refusal and not a vacuous claim — it is the report that
+            // says nothing was verified, which the run announced before it
+            // started and which the task's completion record repeats.
+            $sink?->note('verification: no checks are configured, so nothing was verified');
+
+            return VerificationReport::none();
         }
 
         $workspace = $this->requireWorkspace($directory);

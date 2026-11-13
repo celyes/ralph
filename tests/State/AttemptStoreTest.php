@@ -47,6 +47,11 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(AttemptRecord::class)]
 final class AttemptStoreTest extends TestCase
 {
+    /**
+     * The frozen check set of an ordinary run, as its row holds it.
+     */
+    private const string FROZEN_CHECK = '[{"name":"tests","command":["composer","test"],"timeout":600}]';
+
     private Database $database;
 
     private FrozenClock $clock;
@@ -58,6 +63,11 @@ final class AttemptStoreTest extends TestCase
     private AttemptStore $attempts;
 
     private int $runId;
+
+    /**
+     * How many run rows this test has inserted, so each gets its own `run_id`.
+     */
+    private int $runs = 0;
 
     protected function setUp(): void
     {
@@ -287,6 +297,40 @@ final class AttemptStoreTest extends TestCase
      * PROJECT.md section 4: a zero exit code is not sufficient. This is that
      * sentence as a refusal.
      */
+    /**
+     * The one attempt that may complete with no verification behind it: one
+     * whose run froze no checks. `checks` is empty by default — only a project
+     * knows how it is verified — and such a run has to be able to finish a
+     * task, on the agent's result and the commit, which is what it told the
+     * user it would do before it started.
+     */
+    #[Test]
+    public function an_attempt_may_be_completed_when_its_run_froze_no_checks(): void
+    {
+        $runId = $this->insertRun('[]');
+        $attempt = $this->attempts->begin($this->running('Add a flag'), $runId);
+
+        self::assertTrue($this->attempts->verificationSupports($attempt));
+
+        $finished = $this->attempts->finish($attempt, AttemptOutcome::Candidate, LifecycleState::Completed);
+
+        self::assertSame(LifecycleState::Completed, $finished->state());
+    }
+
+    /**
+     * And it is the run's own frozen set that decides, not the file as it
+     * stands now: a run that froze a check can never complete an attempt whose
+     * rows are missing, however `.ralph/config.json` has since been edited.
+     */
+    #[Test]
+    public function an_unreadable_frozen_set_does_not_excuse_missing_verification(): void
+    {
+        $runId = $this->insertRun('not json at all');
+        $attempt = $this->attempts->begin($this->running('Add a flag'), $runId);
+
+        self::assertFalse($this->attempts->verificationSupports($attempt));
+    }
+
     #[Test]
     public function an_attempt_cannot_be_completed_with_nothing_verifying_it(): void
     {
@@ -654,7 +698,12 @@ final class AttemptStoreTest extends TestCase
         );
     }
 
-    private function insertRun(): int
+    /**
+     * A run row. `$checks` is the set it froze, and it matters here: a run that
+     * froze no checks is the one run whose attempts may complete with no
+     * verification rows behind them.
+     */
+    private function insertRun(string $checks = self::FROZEN_CHECK): int
     {
         $agent = AgentRecord::ofDefinition(AgentDefinition::builtIn('codex'))->toColumns();
 
@@ -664,20 +713,22 @@ final class AttemptStoreTest extends TestCase
                   checks, tasks_path, base_reference, started_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
-                'RUN-0001',
+                sprintf('RUN-%04d', $this->runs + 1),
                 'running',
                 $agent['agent'],
                 $agent['adapter'],
                 'project_default',
                 $agent['settings'],
                 '{}',
-                '[]',
+                $checks,
                 '.ralph/tasks.md',
                 'main',
                 '2026-11-01T09:30:00+00:00',
                 '2026-11-01T09:30:00+00:00',
             ],
         );
+
+        ++$this->runs;
 
         return $this->database->lastInsertId();
     }

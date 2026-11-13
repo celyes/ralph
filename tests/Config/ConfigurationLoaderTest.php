@@ -72,15 +72,41 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(Defaults::RUN_TIMEOUT_SECONDS, $config->limits()->runTimeout());
         self::assertFalse($config->limits()->bailsOnFailure());
 
-        self::assertCount(1, $config->checks());
-        self::assertSame(['composer', 'test'], $config->checks()[0]->command());
+        // Nothing is assumed about how this project is verified or about what
+        // a fresh worktree of it needs: a package that guessed `composer test`
+        // and `composer install` refused to start on every project that has
+        // neither, and spent minutes per task on every project that has both.
+        self::assertSame([], $config->checks());
 
         $workspace = $config->workspace();
-        self::assertCount(1, $workspace->prepare());
-        self::assertSame(['composer', 'install', '--no-interaction'], $workspace->prepare()[0]->command());
-        self::assertSame(Defaults::PREPARE_TIMEOUT_SECONDS, $workspace->prepare()[0]->timeout());
+        self::assertSame([], $workspace->prepare());
         self::assertSame([], $workspace->copy());
-        self::assertFalse($workspace->isEmpty());
+        self::assertTrue($workspace->isEmpty());
+    }
+
+    /**
+     * The two settings a project is expected to fill in, read back as given.
+     * They are empty by default and they are not special: whatever is listed
+     * is what runs.
+     */
+    #[Test]
+    public function checks_and_preparation_are_whatever_the_project_lists(): void
+    {
+        $this->project->writeConfigArray([
+            'checks' => [['name' => 'suite', 'command' => ['vendor/bin/phpunit', '--colors=never']]],
+            'workspace' => ['prepare' => [['name' => 'deps', 'command' => ['composer', 'install']]]],
+        ]);
+
+        $config = (new ConfigurationLoader())->load($this->project->root());
+
+        self::assertCount(1, $config->checks());
+        self::assertSame(['vendor/bin/phpunit', '--colors=never'], $config->checks()[0]->command());
+        self::assertSame(Defaults::CHECK_TIMEOUT_SECONDS, $config->checks()[0]->timeout());
+
+        self::assertCount(1, $config->workspace()->prepare());
+        self::assertSame(['composer', 'install'], $config->workspace()->prepare()[0]->command());
+        self::assertSame(Defaults::PREPARE_TIMEOUT_SECONDS, $config->workspace()->prepare()[0]->timeout());
+        self::assertFalse($config->workspace()->isEmpty());
     }
 
     #[Test]

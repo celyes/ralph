@@ -263,10 +263,14 @@ final class InitCommand implements CommandInterface
             )],
             [
                 sprintf(
-                    'Check the "checks", "git" and "agent" settings in %s: a task is',
+                    'Add the command this project is verified with under "checks" in %s,',
                     $report->configuration()->label(),
                 ),
-                'completed only once its verification commands pass.',
+                // "checks" starts empty, so this is the one generated setting a
+                // new project really has to decide about: without it a task is
+                // completed on the agent's own result and the commit alone.
+                'and check its "git" and "agent" settings. With no checks, a task is',
+                'completed on the agent\'s reported result and its commit alone.',
             ],
         ];
 

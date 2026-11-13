@@ -163,10 +163,16 @@ cd your-php-project          # a Git repository with a clean working tree
 ralph init                   # writes .ralph/ and appends ignore rules
 $EDITOR .ralph/CONTEXT.md    # describe the project for the agent
 $EDITOR .ralph/tasks.md      # write one task
+$EDITOR .ralph/config.json   # add the command your project is verified with
 git commit -am "Ignore Ralph PHP runtime data"   # init edited .gitignore
 ralph preflight              # check this machine can do the work
 ralph run
 ```
+
+The `config.json` step is optional and worth doing. `checks` starts empty —
+Ralph PHP does not assume how your project is verified — and a run with no
+checks completes a task on the agent's own result and the commit it produced.
+See [Verification](#verification).
 
 `ralph init` creates:
 
@@ -379,13 +385,9 @@ any work starts.
     "codex":  {"adapter": "codex",  "executable": "codex",  "model": null, "arguments": [], "environment": []},
     "claude": {"adapter": "claude", "executable": "claude", "model": null, "arguments": [], "environment": []}
   },
-  "checks": [
-    {"name": "tests", "command": ["composer", "test"], "timeout": 600}
-  ],
+  "checks": [],
   "workspace": {
-    "prepare": [
-      {"name": "dependencies", "command": ["composer", "install", "--no-interaction"], "timeout": 900}
-    ],
+    "prepare": [],
     "copy": []
   },
   "git": {
@@ -413,9 +415,9 @@ any work starts.
 | `agents.NAME.model` | `null` | model passed to the CLI, when it takes one |
 | `agents.NAME.arguments` | `[]` | extra arguments, appended after the adapter's own |
 | `agents.NAME.environment` | `[]` | **names** of environment variables the agent authenticates with |
-| `checks[]` | `composer test` | verification commands, run in order, as argument arrays |
+| `checks[]` | `[]` | verification commands, run in order, as argument arrays |
 | `checks[].timeout` | `600` | seconds one check may run |
-| `workspace.prepare[]` | `composer install --no-interaction` | commands that make a fresh worktree usable |
+| `workspace.prepare[]` | `[]` | commands that make a fresh worktree usable |
 | `workspace.copy[]` | `[]` | files copied in from your checkout, such as a local `.env` |
 | `git.base` | `HEAD` | commit task branches start from |
 | `git.branch_prefix` | `ralph/` | prefix for generated branch names |
@@ -590,8 +592,11 @@ checkbox of a task that passed.
 `.ralph/runtime/worktrees/TASK-ID/`, created from the commit `git.base`
 resolved to at run start — recorded as a SHA, so every task in a run starts from
 the same place. A fresh worktree has your tracked files and nothing else, which
-is why `workspace.prepare` exists (`composer install` by default) and why
-`workspace.copy` can bring in local files no commit carries, such as an `.env`.
+is why `workspace.prepare` exists — list `composer install` there if your checks
+need `vendor/` — and why `workspace.copy` can bring in local files no commit
+carries, such as an `.env`. Both are empty by default: a project that works from
+its tracked files alone needs neither, and nothing is run that you did not ask
+for.
 A copied file is never staged, so a credential listed there reaches the agent
 without reaching the branch.
 
@@ -673,6 +678,21 @@ agent. Each command's output, exit code and duration are captured and recorded.
 A zero exit from the agent is not enough to complete a task. The checks must
 pass, a commit must be recorded or a no-change result justified with evidence,
 and any required push must succeed. Only then is the box ticked.
+
+**`checks` is empty by default, and an empty `checks` is allowed.** Only your
+project knows how it is verified — `composer test`, `vendor/bin/phpunit`, `make
+check`, several commands in order — so Ralph PHP asks instead of assuming, and
+you do not have to invent a command to get your first run started. What you give
+up is stated rather than hidden, in three places you will actually see it:
+`ralph preflight` warns, `ralph run` says so before the first task, and each
+completed task's record names it. A run with no checks decides a task on the
+agent's reported result and the commit it produced, so **review those commits
+before merging them**. Adding one command under `checks` is what turns the tick
+back into evidence:
+
+```json
+{"checks": [{"name": "tests", "command": ["composer", "test"]}]}
+```
 
 - **The check configuration is snapshotted at run start**, so an agent that
   edits `.ralph/config.json` mid-run cannot replace the checks it will be

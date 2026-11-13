@@ -48,9 +48,13 @@ use Celyes\RalphPhp\Process\ProcessRunner;
  *
  * Commands run on every preparation, including in an adopted workspace, and so
  * must be safe to run twice — which `composer install` is, and which the
- * documentation states as the contract. The alternative is worse: a workspace
- * an interrupted run created but never finished installing into would be
- * handed to an agent as though it were ready.
+ * documentation states as the contract for whatever a project lists. The
+ * alternative is worse: a workspace an interrupted run created but never
+ * finished installing into would be handed to an agent as though it were ready.
+ *
+ * Both settings are empty by default, so the commonest preparation is none at
+ * all: a project that needs nothing beyond its tracked files gets its workspace
+ * as Git leaves it, with no command run and nothing copied.
  */
 final class WorkspacePreparer
 {

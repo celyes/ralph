@@ -315,11 +315,18 @@ final class CompletionEvidence
     {
         $unmet = [];
 
-        // Nothing here asks whether any check ran at all. A report with no
-        // checks in it cannot be built — VerificationReport::of() refuses the
-        // empty set, because `passed()` would be vacuously true for it — and a
-        // report is required to get this far, so "the checks passed" cannot
-        // mean "no check ran".
+        // "The checks passed" can mean "no check ran", and only in one case: a
+        // run whose project configured no checks at all, which is the default
+        // because only a project knows how it is verified. That is not
+        // something to refuse here — the run announced it before it started,
+        // and refusing would make such a project unable to finish any task —
+        // so what this evidence does instead is never call it verification.
+        // The condition it is listed under, the record's own checks section and
+        // the summary line all say that nothing was verified.
+        //
+        // The accidental empty report remains impossible: VerificationReport::of()
+        // refuses the empty sequence, and only the explicit none() constructor
+        // produces one.
         if (!$this->verification->passed()) {
             $unmet[] = sprintf(
                 'the configured checks did not pass (%s)',
@@ -616,8 +623,13 @@ final class CompletionEvidence
     private function conditions(): array
     {
         return [
-            sprintf('Verification passed — %s', $this->verification->describe())
-                => $this->verification->passed(),
+            sprintf(
+                '%s — %s',
+                $this->verification->verifiedNothing()
+                    ? 'No configured check decided against the work'
+                    : 'Verification passed',
+                $this->verification->describe(),
+            ) => $this->verification->passed(),
             sprintf(
                 'An implementation is recorded — %s',
                 $this->isNoChange()
@@ -632,6 +644,24 @@ final class CompletionEvidence
 
     private function checksSection(): string
     {
+        if ($this->verification->verifiedNothing()) {
+            // The one completion no check stands behind, written out as such.
+            // A reader of this record has to be able to tell it from one a
+            // suite passed, because what it rests on is different: the agent
+            // reported a candidate implementation, and the commit below is
+            // what that implementation was.
+            return implode("\n", [
+                '## The checks',
+                '',
+                'None. This run froze an empty `checks` set, so no verification command was run and '
+                    . 'nothing here was established by one. What the tick rests on is the agent\'s own '
+                    . 'result and the recorded commit — review the diff before merging it.',
+                '',
+                'Listing a command under `checks` in `.ralph/config.json` is what makes a later run '
+                    . 'decide this question for itself.',
+            ]);
+        }
+
         $lines = [
             '## The checks',
             '',

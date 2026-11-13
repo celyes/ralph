@@ -106,6 +106,63 @@ final class RunCommandTest extends TestCase
     }
 
     /**
+     * The same loop under a project that configured no `checks` and no
+     * `workspace.prepare` — which is every setting at its default, and so the
+     * state a project is in the moment `ralph init` has run.
+     *
+     * The point of the case is that such a run *works*: it is not refused by
+     * configuration validation, not refused by preflight, and not left with a
+     * task it can never tick. What it owes in exchange is honesty, so the
+     * warning is asserted on the way past, and the completion is asserted to be
+     * recorded as the runner's own rather than quietly reported as verified.
+     */
+    #[Test]
+    public function a_project_that_configures_no_checks_still_completes_its_tasks(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK])
+            ->withoutChecks();
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+
+        // Said before the first task, where a user who did not mean to start
+        // such a run can still see it.
+        self::assertStringContainsString(
+            'no checks are configured, so tasks are completed on the agent\'s result and the commit alone',
+            $result->standardOutput,
+            $result->describe(),
+        );
+        self::assertStringContainsString(
+            'no checks are configured, so nothing was verified',
+            $result->standardOutput,
+            $result->describe(),
+        );
+
+        // And the task still finished: box ticked, branch committed, row
+        // recorded as the runner's own completion.
+        self::assertStringContainsString('1 of 1 tasks completed', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('- [x] ' . self::TASK, $this->project->checklist());
+
+        $branches = $this->project->taskBranches();
+        self::assertCount(1, $branches);
+        self::assertNotSame([], $this->project->commitsOn($branches[0]));
+        self::assertSame(1, $this->project->journal()->tasks()->verified()->count());
+
+        // The run's row holds the empty set it froze, so `ralph status` reports
+        // what this run actually had to go on rather than an absence.
+        $run = $this->project->journal()->runs()->latest();
+        self::assertNotNull($run);
+        self::assertSame(LifecycleState::Completed, $run->state());
+        self::assertSame([], $run->checkNames());
+
+        $status = $this->project->ralph(['status']);
+        self::assertStringContainsString('checks       none configured', $status->standardOutput, $status->describe());
+    }
+
+    /**
      * PROJECT.md section I, item 6, through the binary: after a real run whose
      * agent printed its own credential, the only place in the runtime directory
      * that still holds the value is the worker's own log.

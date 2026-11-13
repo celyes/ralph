@@ -388,6 +388,30 @@ final class LoopProject
     }
 
     /**
+     * Write a configuration with no verification commands at all — the default
+     * a freshly initialised project has.
+     *
+     * Its own method because the overrides are merged with
+     * `array_replace_recursive`, for which an empty array overrides nothing:
+     * `withConfiguration(['checks' => []])` would silently keep the runnable
+     * check every other case here relies on, and a case about having none would
+     * pass for the wrong reason.
+     *
+     * @param array<string, mixed> $overrides merged in as
+     *        {@see withConfiguration()} merges them, before the checks are
+     *        emptied
+     */
+    public function withoutChecks(array $overrides = []): self
+    {
+        $settings = $this->settings($overrides);
+        $settings['checks'] = [];
+
+        $this->project->writeConfigArray($settings);
+
+        return $this->committing();
+    }
+
+    /**
      * Rewrite the configuration between two runs, as the user would.
      *
      * Left uncommitted, for the same reason {@see editChecklist()} is:

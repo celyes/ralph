@@ -20,10 +20,11 @@ namespace Celyes\RalphPhp\Config;
  *
  * Two settings, because the absent things divide cleanly in two:
  *
- *  - **`prepare`** — commands run inside the new workspace, in order.
- *    `composer install` is the default and the whole point: dependencies are
- *    reproducible from committed files, so they are installed rather than
- *    copied.
+ *  - **`prepare`** — commands run inside the new workspace, in order. For what
+ *    is reproducible from committed files: `composer install` is the usual
+ *    entry in a PHP project, installed rather than copied. Nothing is assumed,
+ *    though — the setting is empty until a project lists what its workspaces
+ *    need, since only the project knows.
  *  - **`copy`** — files copied in from the controlling checkout. For what is
  *    *not* reproducible: a local configuration file or a credential that exists
  *    on this machine and in no commit.

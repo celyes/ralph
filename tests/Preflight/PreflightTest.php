@@ -797,6 +797,35 @@ final class PreflightTest extends TestCase
     }
 
     #[Test]
+    public function a_project_with_no_checks_warns_rather_than_refusing_to_start(): void
+    {
+        $this->givenARepository();
+        Git::commit($this->project->root());
+
+        // The default: `checks` is empty until a project says how it is
+        // verified, so this is what a freshly initialised project reaches.
+        $report = $this->report(['checks' => []]);
+
+        self::assertSame(CheckOutcome::Warning, $this->outcome($report, CheckId::Checks));
+        self::assertStringContainsString(
+            'no verification commands are configured',
+            $this->summary($report, CheckId::Checks),
+        );
+
+        // What the run will do instead is said before it starts, not after.
+        $details = implode("\n", $this->details($report, CheckId::Checks));
+        self::assertStringContainsString('"checks" is empty', $details);
+        self::assertStringContainsString('the agent\'s reported result and its commit alone', $details);
+        self::assertStringContainsString(
+            'Add the command this project is verified with under "checks"',
+            implode("\n", $this->hints($report, CheckId::Checks)),
+        );
+
+        // A warning is not a refusal: this project may start a run.
+        self::assertTrue($report->isUsable(), $this->describe($report));
+    }
+
+    #[Test]
     public function a_preparation_command_whose_program_is_missing_fails(): void
     {
         $this->givenARepository();

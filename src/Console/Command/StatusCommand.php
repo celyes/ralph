@@ -479,7 +479,16 @@ final class StatusCommand extends ProjectCommand
                 ? $style->muted('no commit recorded')
                 : $style->identifier(substr($run->baseSha(), 0, 12)),
         ));
-        $output->line(sprintf('  %s  %s', $style->label('checks     '), implode(', ', $run->checkNames())));
+        $output->line(sprintf(
+            '  %s  %s',
+            $style->label('checks     '),
+            // A run may freeze none: `checks` is empty until a project says how
+            // it is verified. Said in words rather than left as a blank value,
+            // because a blank one reads as "status could not find out".
+            $run->checkNames() === []
+                ? $style->muted('none configured — tasks were decided on the agent\'s result and the commit')
+                : implode(', ', $run->checkNames()),
+        ));
         $output->line(sprintf(
             '  %s  %d%s',
             $style->label('iterations '),

@@ -110,11 +110,10 @@ final class CompletionEvidenceTest extends TestCase
     }
 
     /**
-     * A box ticked on the strength of no check having run is the one reading of
-     * section G, item 7 that would make it meaningless — `passed()` is
-     * vacuously true for an empty set. That is why the conditions never test
-     * for an empty report: one cannot be built, so the case is closed a layer
-     * earlier than here rather than caught by a reading that could be dropped.
+     * An empty *sequence* of checks is a defect — `passed()` would be vacuously
+     * true for it — so it cannot be built at all, and the conditions never have
+     * to test for one. The deliberate "this project configured none" report is
+     * a different constructor and is the case below.
      */
     #[Test]
     public function a_report_with_no_checks_in_it_cannot_be_built_at_all(): void
@@ -123,6 +122,37 @@ final class CompletionEvidenceTest extends TestCase
         $this->expectExceptionMessage('must contain at least one check');
 
         VerificationReport::of();
+    }
+
+    /**
+     * The completion a project with no `checks` reaches. It is earned — there
+     * is nothing for it to fail, and refusing would leave such a project unable
+     * to finish any task — but the record must never call it verification, so
+     * that a reader can tell it from a tick a suite stood behind.
+     */
+    #[Test]
+    public function a_completion_under_no_configured_checks_is_earned_without_claiming_verification(): void
+    {
+        $evidence = $this->evidence(verification: VerificationReport::none());
+
+        self::assertTrue($evidence->isEarned());
+        self::assertSame([], $evidence->unmet());
+
+        $markdown = $evidence
+            ->ticked(CheckboxEdit::applied('- [x] do it', TaskId::fromString('TASK-1A2B3C4D'), 12, true))
+            ->toMarkdown();
+
+        // The condition is not worded as a pass, because nothing passed.
+        self::assertStringContainsString('- [x] **No configured check decided against the work', $markdown);
+        self::assertStringNotContainsString('**Verification passed', $markdown);
+
+        // And the checks section says what the tick actually rests on.
+        self::assertStringContainsString('None. This run froze an empty `checks` set', $markdown);
+        self::assertStringContainsString('the agent\'s own result and the recorded commit', $markdown);
+        self::assertStringContainsString('review the diff before merging it', $markdown);
+
+        // The commit is still named: it is half of what the tick rests on.
+        self::assertStringContainsString(self::COMMIT, $markdown);
     }
 
     /**

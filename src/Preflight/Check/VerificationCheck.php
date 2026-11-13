@@ -22,6 +22,13 @@ use Celyes\RalphPhp\Process\ExecutableFinder;
  * array; what is left is whether the machine has the program it names, and
  * whether a `composer` invocation names a script the project defines.
  *
+ * **A project with no checks warns rather than fails.** `checks` is empty by
+ * default, because the package does not know how a project is verified and
+ * assuming `composer test` made it refuse to start on every project that
+ * defines no such script. Such a run does work — it just decides a task on the
+ * agent's result and the commit alone, which is what the warning says, where a
+ * person reads it before the run rather than after it.
+ *
  * The commands are resolved, never executed. Running the suite here would
  * double the cost of every run and, worse, would report a project's existing
  * test failures as a Ralph PHP problem. The checks run per attempt, in the
@@ -50,6 +57,29 @@ final class VerificationCheck implements PreflightCheck
         $details = [];
         $unusable = [];
         $hints = [];
+
+        if ($checks === []) {
+            // Not a failure: `checks` is empty by default, because only a
+            // project knows how it is verified, and a project is entitled to
+            // run without any. A warning, though, and not a pass — what the run
+            // will do is check tasks off on the agent's own result and the
+            // commit it produced, which is a weaker thing than this package
+            // otherwise promises and is worth reading before a run rather than
+            // after one.
+            return CheckResult::warning(
+                $this->id(),
+                'no verification commands are configured',
+                [
+                    '"checks" is empty, so nothing will be run against a task\'s workspace.',
+                    'A task will be checked off on the agent\'s reported result and its commit alone.',
+                ],
+                [
+                    'Add the command this project is verified with under "checks", for example '
+                        . '{"name": "tests", "command": ["composer", "test"]}.',
+                    'Review the commits a run like this produces before merging them.',
+                ],
+            );
+        }
 
         foreach ($checks as $check) {
             $resolved = $this->executables->find($check->command()[0], $root);

@@ -30,6 +30,12 @@ use Celyes\RalphPhp\Exception\ConfigurationException;
  * The checks keep their configured order, because the order is behaviour: the
  * first failure stops the sequence, so a reordering changes which failure a
  * person is shown first.
+ *
+ * **A run may freeze no checks at all.** `checks` defaults to the empty list
+ * ({@see Defaults::checks()}), because only the project knows how it is
+ * verified. Such a run decides a task on the agent's result and the commit
+ * alone, and says so where a person will see it; what it must not do is
+ * pretend, so the empty set is recorded and reported as the empty set.
  */
 final class VerificationSnapshot
 {
@@ -67,6 +73,13 @@ final class VerificationSnapshot
     /**
      * Freeze a set of checks that has already been read.
      *
+     * The empty set is a set. A project that configures no checks freezes none,
+     * and freezing none is still worth doing: it is what makes "this run had
+     * nothing to verify with" a durable fact on the run's row rather than
+     * something deduced later from an absence of rows — and it is what stops a
+     * `checks` entry added mid-run from being applied to work already under way
+     * ({@see VerificationDrift}).
+     *
      * @param list<VerificationCommand> $commands
      *
      * @throws ConfigurationException when the set cannot be the one a run is
@@ -74,16 +87,6 @@ final class VerificationSnapshot
      */
     public static function ofCommands(array $commands, string $source): self
     {
-        if ($commands === []) {
-            throw new ConfigurationException(
-                sprintf('%s: a run must freeze at least one verification command.', $source),
-                [
-                    'A task is checked off only after its checks pass, so a run with no checks '
-                        . 'could never verify anything.',
-                ],
-            );
-        }
-
         $seen = [];
 
         foreach ($commands as $command) {
@@ -216,6 +219,22 @@ final class VerificationSnapshot
      */
     public function describe(): string
     {
+        if ($this->commands === []) {
+            return 'none configured';
+        }
+
         return sprintf('%s (frozen %s)', implode(', ', $this->names()), $this->digest());
+    }
+
+    /**
+     * Whether this run has anything to verify work with.
+     *
+     * Asked by everything that has to say so out loud — preflight, the run's
+     * opening lines, a completion record — so that the condition is written
+     * once and read the same way in all three.
+     */
+    public function isEmpty(): bool
+    {
+        return $this->commands === [];
     }
 }

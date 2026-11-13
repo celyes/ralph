@@ -356,6 +356,17 @@ final class AttemptStore
      * stops at the first failure, so `not_run` rows sit behind a failure that
      * is already refusing this.
      *
+     * **One attempt is allowed no rows at all: one whose run froze no checks.**
+     * `checks` is empty by default, because only a project knows how it is
+     * verified, and a run that has nothing to verify with still has to be able
+     * to finish a task — on the agent's result and the commit, which is what it
+     * told the user it would do before it started. The question is asked of the
+     * run's own frozen set rather than of today's configuration, so a `checks`
+     * entry added while a run was under way cannot retrospectively invalidate
+     * the work, and — the direction that matters — a run that *did* freeze
+     * checks can never complete an attempt whose checks are missing, however
+     * the file has since been edited.
+     *
      * @throws StateException when the rows cannot be read
      */
     public function verificationSupports(AttemptRecord $attempt): bool
@@ -381,7 +392,39 @@ final class AttemptStore
             }
         }
 
-        return $passed > 0;
+        if ($passed > 0) {
+            return true;
+        }
+
+        return $rows === [] && $this->runFrozeNoChecks($attempt);
+    }
+
+    /**
+     * Whether the run this attempt belongs to froze an empty check set.
+     *
+     * Read from the run's row, which is where the set was frozen (section G,
+     * item 3). A row that cannot be read, or whose column does not hold a JSON
+     * array, answers no: an unreadable frozen set is not permission to complete
+     * work nothing examined.
+     *
+     * @throws StateException when the row cannot be read
+     */
+    private function runFrozeNoChecks(AttemptRecord $attempt): bool
+    {
+        $rows = $this->database->query(
+            'SELECT checks FROM runs WHERE id = ?',
+            [$attempt->runId()],
+        );
+
+        $checks = $rows[0]['checks'] ?? null;
+
+        if (!is_string($checks)) {
+            return false;
+        }
+
+        $decoded = json_decode($checks, true);
+
+        return is_array($decoded) && $decoded === [];
     }
 
     /**

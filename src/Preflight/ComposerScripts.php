@@ -10,11 +10,11 @@ use Celyes\RalphPhp\Config\Path;
  * Reads a project's Composer scripts, so that a verification command naming one
  * can be checked against it.
  *
- * The default verification command is `composer test`, which resolves
- * perfectly well — Composer is installed — and then fails in every run of a
- * project that defines no `test` script. The executable existing is not the
- * whole of "a usable verification command", and this is the part of the gap
- * that can be closed without running anything.
+ * `composer test` is the commonest thing a PHP project puts under `checks`,
+ * and it resolves perfectly well — Composer is installed — and then fails in
+ * every run of a project that defines no `test` script. The executable existing
+ * is not the whole of "a usable verification command", and this is the part of
+ * the gap that can be closed without running anything.
  *
  * Deliberately conservative: it answers only for an invocation it is sure
  * about, and says "no opinion" for everything else. Being wrong here would

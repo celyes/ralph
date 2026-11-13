@@ -323,13 +323,36 @@ final class CommandVerifierTest extends TestCase
         self::assertSame('OK (1 test)', $report->runs()[0]->output());
     }
 
+    /**
+     * A project that configures no checks — the default, since only a project
+     * knows how it is verified — reaches this on every pass. Nothing ran, so
+     * nothing failed and nothing is claimed; the report says exactly that, and
+     * the run said it before it started.
+     */
     #[Test]
-    public function it_refuses_when_there_are_no_checks_to_run(): void
+    public function no_checks_configured_verifies_nothing_rather_than_refusing(): void
     {
-        $this->expectException(VerificationException::class);
-        $this->expectExceptionMessage('no verification commands');
+        $report = $this->verifier->verify([], $this->workspace);
 
-        $this->verifier->verify([], $this->workspace);
+        self::assertTrue($report->verifiedNothing());
+        self::assertTrue($report->passed());
+        self::assertSame(0, $report->count());
+        self::assertSame([], $report->runs());
+        self::assertSame([], $report->details());
+        self::assertSame('no checks are configured, so nothing was verified', $report->describe());
+        self::assertTrue($report->evidence()->isEmpty());
+    }
+
+    /**
+     * And it does not need a workspace to say so: there is nothing to run
+     * there, so a missing directory is not a problem yet.
+     */
+    #[Test]
+    public function no_checks_configured_does_not_require_a_workspace(): void
+    {
+        $report = $this->verifier->verify([], $this->workspace . '/never-created');
+
+        self::assertTrue($report->verifiedNothing());
     }
 
     #[Test]

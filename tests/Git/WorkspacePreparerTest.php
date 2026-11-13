@@ -99,11 +99,28 @@ final class WorkspacePreparerTest extends TestCase
         $this->project->remove();
     }
 
+    /**
+     * The default is to do nothing, which is what makes the package usable on
+     * a project that is not a Composer package — and what stops it running a
+     * minutes-long install per task on one that is but does not need it.
+     */
     #[Test]
-    public function the_default_preparation_installs_what_a_new_worktree_does_not_have(): void
+    public function the_default_preparation_does_nothing(): void
+    {
+        $workspace = $this->givenAWorkspace();
+
+        $preparation = WorkspacePreparer::forProject($this->configuration())->prepare($workspace);
+
+        self::assertSame([], $preparation->steps());
+        self::assertSame([], $preparation->copied());
+        self::assertFileDoesNotExist($workspace->path() . '/vendor');
+    }
+
+    #[Test]
+    public function a_configured_install_fills_in_what_a_new_worktree_does_not_have(): void
     {
         if (Composer::binary() === null) {
-            self::markTestSkipped('Composer is not installed, and this is about the default "composer install".');
+            self::markTestSkipped('Composer is not installed, and this is about a configured "composer install".');
         }
 
         // A package with no dependencies: the install is real, and it needs no
@@ -126,7 +143,9 @@ final class WorkspacePreparerTest extends TestCase
         self::assertFileExists($workspace->path() . '/composer.json');
         self::assertFileDoesNotExist($workspace->path() . '/vendor/autoload.php');
 
-        $preparation = WorkspacePreparer::forProject($this->configuration())->prepare($workspace);
+        $preparation = $this->preparer([
+            'prepare' => [['name' => 'dependencies', 'command' => ['composer', 'install', '--no-interaction']]],
+        ])->prepare($workspace);
 
         self::assertFileExists($workspace->path() . '/vendor/autoload.php');
         self::assertCount(1, $preparation->steps());

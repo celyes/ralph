@@ -113,16 +113,44 @@ final class VerificationSnapshotTest extends TestCase
     }
 
     /**
-     * A run with nothing to verify against could tick a box for anything, so
-     * there is no such run.
+     * A project configures its own checks and may configure none, so the empty
+     * set is a set a run can be held to. Freezing it is what makes "this run
+     * had nothing to verify with" a fact on the run's row rather than an
+     * absence someone has to interpret later.
      */
     #[Test]
-    public function an_empty_set_cannot_be_frozen(): void
+    public function an_empty_set_is_frozen_as_the_empty_set(): void
     {
-        $this->expectException(ConfigurationException::class);
-        $this->expectExceptionMessage('at least one verification command');
+        $snapshot = VerificationSnapshot::ofCommands([], 'the test');
 
-        VerificationSnapshot::ofCommands([], 'the test');
+        self::assertTrue($snapshot->isEmpty());
+        self::assertSame(0, $snapshot->count());
+        self::assertSame([], $snapshot->names());
+        self::assertSame([], $snapshot->toStorage());
+        self::assertSame('none configured', $snapshot->describe());
+        self::assertSame([], VerificationSnapshot::fromStorage([])->toStorage());
+        self::assertTrue(VerificationSnapshot::fromStorage([])->isEmpty());
+    }
+
+    /**
+     * And the empty set is not the same set as one with a check in it, which is
+     * what makes adding a check mid-run visible as drift rather than silently
+     * applied to work already under way.
+     */
+    #[Test]
+    public function adding_a_check_to_an_empty_set_is_drift(): void
+    {
+        $frozen = VerificationSnapshot::ofCommands([], 'the test');
+        $current = VerificationSnapshot::ofCommands(
+            [new VerificationCommand('tests', ['vendor/bin/phpunit'])],
+            'the test',
+        );
+
+        $drift = $frozen->compareTo($current);
+
+        self::assertTrue($drift->hasChanged());
+        self::assertSame(['tests'], $drift->added());
+        self::assertFalse($frozen->compareTo($frozen)->hasChanged());
     }
 
     #[Test]

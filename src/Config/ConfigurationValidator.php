@@ -14,9 +14,8 @@ use Celyes\RalphPhp\Exception\ConfigurationException;
  * That still admits settings that are well-formed and unusable — a zero
  * iteration limit, an empty command array, a checklist outside the repository.
  * Those are rejected here, up front, because the alternative is discovering
- * them halfway through a task: after a worktree exists, after an agent has been
- * paid for its tokens, or — worst — not at all, as with an empty `checks` list
- * that would let every change through unverified.
+ * them halfway through a task: after a worktree exists, or after an agent has
+ * been paid for its tokens.
  *
  * Every failure names the setting the user has to edit, in the file's own
  * dotted notation (`limits.iterations`, `agents.codex.executable`,
@@ -207,25 +206,25 @@ final class ConfigurationValidator
     /**
      * The verification commands.
      *
-     * At least one is required. A run with no checks would mark tasks complete
-     * on the agent's own exit code, which the product explicitly does not
-     * accept as evidence that the work is done.
+     * An empty list is allowed, and is the default. A project is the only thing
+     * that knows how it is verified, so the package asks rather than assumes —
+     * and a user who has nothing to put here should not have to invent a
+     * command to get a run started.
+     *
+     * What an empty list means is not hidden: a run that freezes no checks has
+     * only the agent's own result and the commit it produced to decide a task
+     * on, which preflight warns about ({@see
+     * \Celyes\RalphPhp\Preflight\Check\VerificationCheck}), `ralph run`
+     * says in its opening lines, and the completion record names. It is a
+     * weaker run, stated as one; it is not a configuration mistake.
+     *
+     * Every command that *is* listed is held to the same rules as before: a
+     * non-empty argument array, a usable name, a name no other check shares,
+     * and a positive timeout.
      */
     private function validateChecks(string $source, Configuration $configuration): void
     {
         $checks = $configuration->checks();
-
-        if ($checks === []) {
-            throw new ConfigurationException(
-                sprintf('%s: "checks" must list at least one verification command.', $source),
-                [
-                    'A task is checked off only after its verification commands pass, so a run without '
-                        . 'checks could never verify anything.',
-                    sprintf('Remove the setting to use the default: %s.', self::describeDefaultCheck()),
-                ],
-            );
-        }
-
         $seen = [];
 
         foreach ($checks as $index => $check) {
@@ -281,9 +280,11 @@ final class ConfigurationValidator
      * The `workspace` section: the commands that prepare a new task worktree,
      * and the files copied into it.
      *
-     * Unlike `checks`, an empty `prepare` is allowed: a project whose checkout
-     * works as Git leaves it has nothing to prepare, and saying so explicitly
-     * is how it opts out of the default `composer install`.
+     * An empty `prepare` is allowed, and is the default: a project whose
+     * checkout works as Git leaves it has nothing to prepare. A project that
+     * does need something — a PHP project whose checks need `vendor/`, most
+     * often — lists it here, because what a worktree is missing is a fact about
+     * the project rather than one this package can assume.
      *
      * A copied path is held to the rule the task checklist is held to — it must
      * name a file inside the project — and to two more that only apply to a
@@ -591,20 +592,4 @@ final class ConfigurationValidator
         return substr($variable, 0, $assignment) . '=...';
     }
 
-    /**
-     * The default checks as the hint shows them, built through the same reader
-     * the loader uses so the hint cannot drift from what removing the setting
-     * would actually produce.
-     */
-    private static function describeDefaultCheck(): string
-    {
-        $described = array_map(
-            static fn (array $check): string => VerificationCommand::fromRaw(
-                RawConfiguration::fromArray($check, 'the built-in defaults'),
-            )->describe(),
-            Defaults::checks(),
-        );
-
-        return implode(', ', $described);
-    }
 }

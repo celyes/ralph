@@ -15,11 +15,22 @@ use InvalidArgumentException;
  * the checks behind it were never reached.
  *
  * **Passing means every check passed.** Not "none failed": a report in which
- * one check passed and three were never reached is not a pass, and a report
- * with no checks in it cannot be constructed at all. That is the same rule
- * {@see \Celyes\RalphPhp\State\AttemptStore::verificationSupports()} applies to
- * the stored rows, stated once more here so a caller holding the report does
- * not have to go back to the database to find out whether it may commit.
+ * one check passed and three were never reached is not a pass. That is the same
+ * rule {@see \Celyes\RalphPhp\State\AttemptStore::verificationSupports()}
+ * applies to the stored rows, stated once more here so a caller holding the
+ * report does not have to go back to the database to find out whether it may
+ * commit.
+ *
+ * **There are two reports with no checks in them, and they are not the same
+ * thing.** {@see self::of()} still refuses the empty set: a *sequence* of
+ * checks that came back with nothing in it is a bug, and a report standing
+ * behind an accident would pass every emptiness test a boolean could offer.
+ * {@see self::none()} is the other one — the run configured no checks, so
+ * there was never a sequence — and it is a separate named constructor
+ * precisely so that "nothing was configured" cannot be reached by mistake from
+ * code meaning "nothing came back". Such a report passes, describes itself as
+ * having verified nothing, and is what every line a person reads about the run
+ * then says.
  */
 final class VerificationReport
 {
@@ -48,6 +59,33 @@ final class VerificationReport
         }
 
         return new self(array_values($runs));
+    }
+
+    /**
+     * The report of a run that has no checks to verify with.
+     *
+     * `checks` defaults to the empty list, because only a project knows how it
+     * is verified ({@see \Celyes\RalphPhp\Config\Defaults::checks()}). A
+     * pass under such a run reaches this: nothing ran, nothing failed, and the
+     * work is judged on the agent's result and the commit alone.
+     *
+     * It passes, which is the honest answer to "did any configured check decide
+     * against this work" and the only one available. What keeps it from being
+     * mistaken for evidence is that it never claims any: {@see self::count()}
+     * is zero, {@see self::describe()} says so in words, and the run said so
+     * before it started.
+     */
+    public static function none(): self
+    {
+        return new self([]);
+    }
+
+    /**
+     * Whether any check ran — false for {@see self::none()} and true otherwise.
+     */
+    public function verifiedNothing(): bool
+    {
+        return $this->runs === [];
     }
 
     /**
@@ -170,6 +208,10 @@ final class VerificationReport
      */
     public function describe(): string
     {
+        if ($this->runs === []) {
+            return 'no checks are configured, so nothing was verified';
+        }
+
         if ($this->passed()) {
             return sprintf(
                 '%d of %d checks passed in %.1fs',

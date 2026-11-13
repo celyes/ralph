@@ -195,46 +195,48 @@ final class Defaults
     }
 
     /**
-     * Verification commands assumed for a PHP package.
+     * Verification commands assumed for a project: none.
      *
-     * `composer test` is the convention this package follows itself. Preflight
-     * reports it if the project has no such script, which is a clearer failure
-     * than a run that verifies nothing.
+     * Empty, and deliberately. The package used to assume `composer test`,
+     * which made a project that does not define that script unusable until its
+     * owner either wrote one or edited the configuration — a requirement
+     * Ralph PHP invented rather than one its job needs. Only the project knows
+     * how it is verified: it may be `composer test`, `vendor/bin/phpunit`,
+     * `make check`, a script with a flag, or several commands in order.
+     *
+     * What the empty default costs is stated wherever it is reached rather than
+     * only here, because it is a real cost: a run with no checks has nothing to
+     * decide a task on but the agent's own result and the commit it produced,
+     * so {@see \Celyes\RalphPhp\Preflight\Check\VerificationCheck} warns
+     * about it, `ralph run` says so in its opening lines, and a task's
+     * completion record names it. Adding one check under `checks` is what turns
+     * that back into evidence.
      *
      * @return list<array<string, mixed>>
      */
     public static function checks(): array
     {
-        return [
-            [
-                'name' => 'tests',
-                'command' => ['composer', 'test'],
-                'timeout' => self::CHECK_TIMEOUT_SECONDS,
-            ],
-        ];
+        return [];
     }
 
     /**
-     * Commands assumed to prepare a new task worktree.
+     * Commands assumed to prepare a new task worktree: none.
      *
-     * `composer install` for the same reason `composer test` is the default
-     * check: it is what a PHP package needs, and a linked worktree never has a
-     * `vendor/` of its own. `--no-interaction` because nothing the package runs
-     * has a terminal to answer a prompt on. Preflight reports a project with no
-     * `composer.json`, which is a clearer failure than a first task whose
-     * workspace silently cannot run its tests.
+     * Empty, for the reason {@see self::checks()} is. A linked worktree holds
+     * the repository's tracked files and nothing else, so a PHP project whose
+     * checks need `vendor/` does want `composer install` here — but that is a
+     * fact about the project, not about Ralph PHP, and assuming it made the
+     * package refuse to start anywhere there was no `composer.json` and run a
+     * minutes-long install per task everywhere there was.
+     *
+     * A project says what its worktrees need by listing it; a project whose
+     * checkout is usable as Git leaves it says nothing and nothing is run.
      *
      * @return list<array<string, mixed>>
      */
     public static function prepare(): array
     {
-        return [
-            [
-                'name' => 'dependencies',
-                'command' => ['composer', 'install', '--no-interaction'],
-                'timeout' => self::PREPARE_TIMEOUT_SECONDS,
-            ],
-        ];
+        return [];
     }
 
     /**

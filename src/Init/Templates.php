@@ -54,8 +54,9 @@ final class Templates
 
         Add the work you want done as top-level Markdown checklist items. {$name} reads
         this file from top to bottom, starts the first unchecked item, and checks it off
-        only after the configured verification commands pass and the change is
-        committed.
+        only after the verification commands configured under `checks` pass and the
+        change is committed. `checks` starts empty, so until you add one a task is
+        checked off on the agent's own reported result and its commit alone.
 
         Indented bullets under an item are passed to the agent as implementation details
         or acceptance criteria:
@@ -133,9 +134,10 @@ final class Templates
         Each task is implemented in its own linked worktree, which Git creates with the
         project's tracked files and nothing else — no `vendor/`, and none of the local
         files no commit carries. `workspace.prepare` in `{$config}` lists the
-        commands that close that gap, `composer install` by default, and
+        commands that close that gap, such as `composer install`, and
         `workspace.copy` lists the files taken from your own checkout, such as a local
-        `.env`. Mention here anything a person would still have to do by hand.
+        `.env`. Both start empty, so add to them only what your project actually needs;
+        mention here anything a person would still have to do by hand.
 
         A `workspace.copy` file is also kept out of the task's commit, because the
         setting's own definition is a file that exists on this machine and in no commit:

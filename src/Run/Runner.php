@@ -1216,6 +1216,20 @@ final class Runner
             );
         }
 
+        // Said before the first task, every time, because it changes what a
+        // tick in the checklist means: with no checks frozen, a task is
+        // completed on the agent's reported result and the commit it produced,
+        // and nothing this run writes down was established by running anything
+        // (section G, item 2). `checks` is empty by default — only a project
+        // knows how it is verified — so this is a run a user can easily have
+        // started without meaning to.
+        if ($checks->isEmpty()) {
+            $lines[] = $style->warn(
+                'no checks are configured, so tasks are completed on the agent\'s result and the '
+                . 'commit alone — add a command under "checks" to have this run decide for itself',
+            );
+        }
+
         // Said when it is on, whichever source turned it on: once a bailed run
         // has stopped it looks much like a run that worked through a short
         // checklist, and a user who inherited the setting from the project file

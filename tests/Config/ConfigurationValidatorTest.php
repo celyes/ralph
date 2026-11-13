@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Tests\Config;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\ConfigurationValidator;
 use Celyes\RalphPhp\Config\Defaults;
+use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Exception\ConfigurationException;
 use Celyes\RalphPhp\Tests\Support\TemporaryProject;
@@ -55,8 +56,14 @@ final class ConfigurationValidatorTest extends TestCase
         $written = $loader->fromArray(Defaults::toArray(), $this->project->root());
 
         self::assertSame($defaults->toArray(), $written->toArray());
-        self::assertNotSame([], $defaults->checks());
-        self::assertNotSame([], $defaults->workspace()->prepare());
+
+        // And both are empty where the package has no business guessing: only
+        // a project knows how it is verified and what a fresh worktree of it
+        // needs, so neither `checks` nor `workspace.prepare` is assumed.
+        self::assertSame([], $defaults->checks());
+        self::assertSame([], $defaults->workspace()->prepare());
+        self::assertSame([], $written->checks());
+        self::assertSame([], $written->workspace()->prepare());
     }
 
     #[Test]
@@ -195,16 +202,20 @@ final class ConfigurationValidatorTest extends TestCase
         self::assertContains(sprintf('Remove "limits.%s" to use the default.', $setting), $exception->hints());
     }
 
+    /**
+     * The package does not know how a project is verified, so an empty
+     * `checks` list is a project saying so rather than a mistake. What such a
+     * run gives up is said by preflight, by the run's opening lines and by the
+     * completion record — not by a refusal to start.
+     */
     #[Test]
-    public function a_configured_but_empty_check_list_is_rejected(): void
+    public function an_empty_check_list_is_accepted_and_verifies_nothing(): void
     {
-        $exception = $this->failure(['checks' => []]);
+        $configuration = (new ConfigurationLoader())->fromArray(['checks' => []], $this->project->root());
 
-        self::assertStringContainsString(
-            '"checks" must list at least one verification command.',
-            $exception->getMessage(),
-        );
-        self::assertContains('Remove the setting to use the default: composer test.', $exception->hints());
+        self::assertSame([], $configuration->checks());
+        self::assertTrue(VerificationSnapshot::of($configuration)->isEmpty());
+        self::assertSame('none configured', VerificationSnapshot::of($configuration)->describe());
     }
 
     #[Test]
