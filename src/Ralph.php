@@ -32,7 +32,7 @@ final class Ralph
      * `-dev` suffix. 0.1.0 was tagged while this still read `0.1.0-dev`, and
      * so every copy of that release reported a version nobody had released.
      */
-    public const string VERSION = '0.1.1';
+    public const string VERSION = '0.1.4';
 
     /**
      * Oldest PHP version the package supports.
