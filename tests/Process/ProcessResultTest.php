@@ -88,6 +88,37 @@ final class ProcessResultTest extends TestCase
         self::assertStringContainsString('(empty)', $this->outcomeOf(0)->describe());
     }
 
+    /**
+     * A killed worker, or a check whose test runner looped, can leave hundreds
+     * of megabytes of output in a result. A description of it is read by a
+     * person and quoted into assertion messages and log lines, and `sprintf()`
+     * answers a string it cannot size with a fatal error rather than an
+     * exception — so the one thing a description must not do with output that
+     * long is render all of it.
+     */
+    #[Test]
+    public function a_description_shows_the_ends_of_output_too_long_to_read(): void
+    {
+        $output = str_repeat('o', 200_000) . 'LAST';
+        $errors = str_repeat('e', 200_000) . 'END';
+
+        $described = $this->outcomeOf(1, standardOutput: $output, errorOutput: $errors)->describe();
+
+        self::assertLessThan(200_000, strlen($described));
+        self::assertStringContainsString('bytes left out of 200004', $described);
+        self::assertStringContainsString('bytes left out of 200003', $described);
+
+        // Both ends of both streams: the head says what the command set out to
+        // do, the tail what it was saying when it stopped.
+        self::assertStringContainsString("stdout:\noooo", $described);
+        self::assertStringContainsString('LAST', $described);
+        self::assertStringContainsString("stderr:\neeee", $described);
+        self::assertStringContainsString('END', $described);
+
+        // Output short enough to read is still shown whole.
+        self::assertStringContainsString('out', $this->outcomeOf(1, standardOutput: 'out')->describe());
+    }
+
     #[Test]
     public function it_keeps_the_command_it_was_given(): void
     {

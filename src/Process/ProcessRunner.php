@@ -231,6 +231,16 @@ final class ProcessRunner
      * finishes has had everything it printed collected by the time this
      * returns, including the part written between the last two turns.
      *
+     * That drain is also the one thing the deadline below cannot interrupt: it
+     * reads a pipe for as long as a full chunk is waiting in it, so a command
+     * that writes faster than its output can be read and never pauses is never
+     * handed back for the check — it is read until it stops of its own accord,
+     * and what it printed accumulates in memory meanwhile. Every command this
+     * package runs pauses: a coding agent waits on a model, a check waits on a
+     * test. A deliberate flood is out of reach of this timeout, and the place
+     * to notice that is here rather than in a run that has already exhausted
+     * the machine's memory.
+     *
      * @param StartedCommand $managed the same command as {@see Terminator}
      *        needs it, built while it is certainly running: the library stops
      *        reporting a process id once the process has gone, and the children

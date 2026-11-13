@@ -388,13 +388,24 @@ final class ProcessRunnerTest extends TestCase
      * when the deadline arrives. The assertion is then that the sink saw
      * everything the result did — a drain that only collects makes the result
      * longer than what was streamed.
+     *
+     * The worker pauses between blocks, and stops writing before it would have
+     * printed more than this test needs. A worker that writes flat out instead
+     * is a memory bomb and not a sharper test: the pipe drain inside the
+     * process library reads for as long as a full chunk is waiting, so a
+     * producer that can keep ahead of the reader is never left for the
+     * deadline check in {@see ProcessRunner::wait()} to notice, and the
+     * collected output grows until the suite is killed. What is under test is
+     * the tail that the timeout path drains, which a pipe kept full delivers
+     * either way.
      */
     #[Test]
     public function the_tail_left_in_the_pipes_at_a_timeout_is_streamed_as_well_as_kept(): void
     {
         $sink = new RecordingSink(delayMicroseconds: 5000);
-        $script = '$block = str_repeat("x", 4096);'
-            . 'while (true) { fwrite(STDOUT, $block); }';
+        $script = '$block = str_repeat("x", 65536);'
+            . 'for ($i = 0; $i < 2000; $i++) { fwrite(STDOUT, $block); usleep(1000); }'
+            . 'sleep(30);';
 
         $result = $this->runner->run([PHP_BINARY, '-r', $script], $this->directory, 1, [], null, $sink);
 

@@ -29,6 +29,19 @@ use Celyes\RalphPhp\Support\Secrets;
 final class ProcessResult
 {
     /**
+     * Bytes of each stream {@see self::describe()} renders.
+     *
+     * A command's output is as long as the command made it: a worker killed
+     * mid-run, or a check whose test runner looped, can leave hundreds of
+     * megabytes here. Rendering all of it helps nobody — and is big enough to
+     * end the process doing the rendering, because `sprintf()` refuses a
+     * result it cannot size and does it as a fatal error rather than an
+     * exception. So a description shows the head and the tail of a stream that
+     * long and says how much it left out.
+     */
+    private const int DESCRIBED_BYTES = 64 * 1024;
+
+    /**
      * @param list<string> $command the argument array that was executed
      * @param int|null $exitCode the process's status, or null when it was
      *        killed for exceeding its timeout and so never reported one
@@ -210,6 +223,10 @@ final class ProcessResult
 
     /**
      * A readable rendering of the whole invocation, for diagnostics.
+     *
+     * Readable rather than complete: each stream is shown up to
+     * {@see self::DESCRIBED_BYTES}. The result itself still carries every byte
+     * that was captured, for a caller that wants it.
      */
     public function describe(): string
     {
@@ -221,8 +238,8 @@ final class ProcessResult
                 $this->timedOut => 'timed out',
                 default => (string) ($this->exitCode ?? -1),
             },
-            $this->standardOutput === '' ? '  (empty)' : $this->standardOutput,
-            $this->errorOutput === '' ? '  (empty)' : $this->errorOutput,
+            self::describedStream($this->standardOutput),
+            self::describedStream($this->errorOutput),
         );
     }
 
@@ -244,6 +261,40 @@ final class ProcessResult
         }
 
         return trim(explode("\n", str_replace("\r\n", "\n", $text))[0]);
+    }
+
+    /**
+     * One stream as a description shows it.
+     *
+     * The head and the tail, because both are read for: a failure explains
+     * itself at the start, and a command that was killed was in the middle of
+     * saying something at the end. Cut on character boundaries — `mb_strcut()`
+     * measures in bytes, so the budget stays a byte budget and nothing scans
+     * the whole stream to apply it.
+     */
+    private static function describedStream(string $stream): string
+    {
+        if ($stream === '') {
+            return '  (empty)';
+        }
+
+        $length = strlen($stream);
+
+        if ($length <= self::DESCRIBED_BYTES) {
+            return $stream;
+        }
+
+        $half = intdiv(self::DESCRIBED_BYTES, 2);
+        $head = mb_strcut($stream, 0, $half);
+        $tail = mb_strcut($stream, $length - $half);
+
+        return sprintf(
+            "%s\n  (%d bytes left out of %d)\n%s",
+            $head,
+            $length - strlen($head) - strlen($tail),
+            $length,
+            $tail,
+        );
     }
 
     /**
