@@ -23,9 +23,16 @@ final class Ralph
     public const string NAME = 'Ralph PHP';
 
     /**
-     * Package version. Updated when a release is tagged.
+     * Package version, as a plain three-part number.
+     *
+     * Composer and Packagist read a release's version from its Git tag and not
+     * from here, so this is only what the package says about itself: what
+     * `ralph --version` prints and what a bug report quotes. Tagging a release
+     * means setting this to the tag's number first, which is why it carries no
+     * `-dev` suffix. 0.1.0 was tagged while this still read `0.1.0-dev`, and
+     * so every copy of that release reported a version nobody had released.
      */
-    public const string VERSION = '0.1.0-dev';
+    public const string VERSION = '0.1.1';
 
     /**
      * Oldest PHP version the package supports.

@@ -86,6 +86,22 @@ final class DeclaredRequirementsTest extends TestCase
         self::assertMatchesRegularExpression('/^\d+\.\d+\.\d+$/', Ralph::MINIMUM_GIT_VERSION);
     }
 
+    #[Test]
+    public function the_version_is_a_released_version_number(): void
+    {
+        // A release is tagged `v` + this constant, so the two can only agree if
+        // it is the same shape as a tag: three numbers and no `-dev` suffix.
+        // Leaving a suffix here is not a cosmetic slip — it is the version the
+        // CLI prints and a bug report quotes, so it has to name a release that
+        // exists. 0.1.0 shipped reporting `0.1.0-dev`; this is the check that
+        // was missing.
+        self::assertMatchesRegularExpression(
+            '/^\d+\.\d+\.\d+$/',
+            Ralph::VERSION,
+            'Ralph::VERSION is not a released version number; tag a release by setting it to the tag.',
+        );
+    }
+
     /**
      * The package's own `require` section, as names mapped to constraints.
      *

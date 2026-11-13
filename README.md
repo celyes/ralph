@@ -10,7 +10,7 @@
   <a href="https://packagist.org/packages/celyes/ralph-php"><img src="https://img.shields.io/packagist/v/celyes/ralph-php?label=packagist&color=blue" alt="Latest version on Packagist"></a>
   <a href="https://packagist.org/packages/celyes/ralph-php/stats"><img src="https://img.shields.io/packagist/dt/celyes/ralph-php?label=installs&color=blue" alt="Installs"></a>
   <a href="https://github.com/celyes/ralph/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/celyes/ralph/ci.yml?branch=main&label=CI" alt="CI status"></a>
-  <img src="https://img.shields.io/badge/tests-2854%20passing-brightgreen" alt="2854 tests">
+  <img src="https://img.shields.io/badge/tests-2859%20passing-brightgreen" alt="2859 tests">
   <img src="https://img.shields.io/packagist/dependency-v/celyes/ralph-php/php?color=777bb4" alt="Required PHP version">
   <a href="LICENSE"><img src="https://img.shields.io/packagist/l/celyes/ralph-php?color=green" alt="MIT licensed"></a>
 </p>

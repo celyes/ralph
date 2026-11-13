@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Process;
 
+use Celyes\RalphPhp\Support\Elapsed;
+
 /**
  * Stops a worker and its children, and says whether it worked.
  *
@@ -171,7 +173,7 @@ final class Terminator
      */
     private function waitFor(array $pids, ManagedProcess $process, float $seconds, bool $rootHasExited): ?array
     {
-        $deadline = microtime(true) + max(0.0, $seconds);
+        $deadline = Elapsed::reading() + max(0.0, $seconds);
         $remaining = $pids;
 
         while (true) {
@@ -189,7 +191,7 @@ final class Terminator
                 }
             }
 
-            if ($still === [] || microtime(true) >= $deadline) {
+            if ($still === [] || Elapsed::reading() >= $deadline) {
                 return $still;
             }
 

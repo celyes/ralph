@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Process;
 use Celyes\RalphPhp\Exception\ProcessException;
 use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Log\OutputStream;
+use Celyes\RalphPhp\Support\Elapsed;
 use InvalidArgumentException;
 use Symfony\Component\Process\Exception\ExceptionInterface as ProcessLibraryException;
 use Symfony\Component\Process\Process;
@@ -181,7 +182,7 @@ final class ProcessRunner
             timeout: null,
         );
 
-        $started = microtime(true);
+        $started = Elapsed::reading();
 
         try {
             $process->start(function (string $stream, string $chunk) use (&$standardOutput, &$errorOutput, &$sink): void {
@@ -215,7 +216,7 @@ final class ProcessRunner
             $standardOutput,
             $errorOutput,
             $timedOut,
-            microtime(true) - $started,
+            Elapsed::since($started),
             $cancelledBy,
             $termination,
         );
@@ -241,7 +242,7 @@ final class ProcessRunner
      */
     private function wait(Process $process, StartedCommand $managed, int $timeout): array
     {
-        $started = microtime(true);
+        $started = Elapsed::reading();
         $deadline = $started + $timeout;
 
         while ($process->isRunning()) {
@@ -251,7 +252,7 @@ final class ProcessRunner
                 return [false, $cancelledBy, $this->terminate($managed, ownership: true)];
             }
 
-            $now = microtime(true);
+            $now = Elapsed::reading();
 
             if ($now >= $deadline) {
                 return [true, null, $this->terminate($managed, ownership: false)];
