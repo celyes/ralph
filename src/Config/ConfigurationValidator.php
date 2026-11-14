@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Config;
 
 use Celyes\RalphPhp\Exception\ConfigurationException;
+use Celyes\RalphPhp\Git\BranchName;
 
 /**
  * Checks that a loaded configuration's values can actually be used, before a
@@ -466,6 +467,79 @@ final class ConfigurationValidator
                 sprintf('Task branches are named "<prefix><task>", such as "%s".', Defaults::BRANCH_PREFIX . '3f2a1b'),
             );
         }
+
+        $this->validateStrategy($source, $git);
+    }
+
+    /**
+     * The execution strategy and the branch a shared-branch run commits to.
+     *
+     * Both are checked whatever mode the project is in. A name Git would refuse
+     * is a name that stops a run at the moment it has work to commit, so it is
+     * worth reporting while the file is being read even by a project that has
+     * not switched to shared mode yet.
+     *
+     * Only a *configured* branch is checked, because the derived one cannot be
+     * wrong once the prefix is: the derivation appends one ordinary segment to
+     * the prefix, and every whole-name rule the prefix rules do not already
+     * cover is about how a name ends — a trailing `/`, a trailing `.`, a
+     * `.lock` segment, the bare word `HEAD`. Appending `shared` rules all of
+     * them out. {@see \Celyes\RalphPhp\Git\BranchNamer} checks the name it
+     * assembles regardless, which is where a setting built in code rather than
+     * loaded from a file is caught.
+     */
+    private function validateStrategy(string $source, GitSettings $git): void
+    {
+        $configured = $git->configuredStrategy();
+
+        $this->requireText($source, 'git.strategy', $configured, 'a Git execution strategy');
+
+        if (BranchStrategy::parse($configured) === null) {
+            $this->reject(
+                $source,
+                'git.strategy',
+                sprintf('must be one of %s, "%s" given.', $this->quotedList(BranchStrategy::names()), $configured),
+                sprintf('"%s" gives every task its own branch.', BranchStrategy::PerTask->value),
+                sprintf('"%s" commits every task of a run to "git.shared_branch".', BranchStrategy::Shared->value),
+            );
+        }
+
+        $branch = $git->configuredSharedBranch();
+
+        if ($branch === null) {
+            return;
+        }
+
+        $this->requireText($source, 'git.shared_branch', $branch, 'the branch a shared-branch run commits to');
+
+        $problem = BranchName::problemWith(trim($branch));
+
+        if ($problem !== null) {
+            $this->reject(
+                $source,
+                'git.shared_branch',
+                sprintf('is not a usable branch name: it %s.', $problem),
+                sprintf('Remove "git.shared_branch" to use "<prefix>%s".', Defaults::SHARED_BRANCH_SEGMENT),
+            );
+        }
+    }
+
+    /**
+     * Accepted values, quoted and joined for a rejection message.
+     *
+     * @param list<string> $values
+     */
+    private function quotedList(array $values): string
+    {
+        $quoted = array_map(static fn (string $value): string => sprintf('"%s"', $value), $values);
+
+        if (count($quoted) < 2) {
+            return implode('', $quoted);
+        }
+
+        $last = array_pop($quoted);
+
+        return implode(', ', $quoted) . ' or ' . $last;
     }
 
     /**

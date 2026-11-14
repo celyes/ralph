@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Git;
 
+use Celyes\RalphPhp\Config\BranchStrategy;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Exception\ConfigurationException;
@@ -28,6 +29,7 @@ use PHPUnit\Framework\TestCase;
  * branch holding its commit.
  */
 #[CoversClass(BranchNamer::class)]
+#[CoversClass(BranchStrategy::class)]
 #[CoversClass(TaskBranch::class)]
 final class BranchNamerTest extends TestCase
 {
@@ -332,16 +334,113 @@ final class BranchNamerTest extends TestCase
         }
     }
 
+    #[Test]
+    public function a_shared_branch_run_names_every_pass_after_one_branch(): void
+    {
+        $namer = BranchNamer::forProject($this->configuration('ralph/', 'shared'));
+
+        self::assertSame(BranchStrategy::Shared, $namer->strategy());
+
+        $first = TaskGeneration::first(TaskId::fromDescription(self::DESCRIPTION));
+        $second = TaskGeneration::first(TaskId::fromDescription('An unrelated task'));
+
+        // Neither the task nor its description reaches the name: the commit
+        // carries which task it was, and the branch is the run's.
+        self::assertSame('ralph/shared', $namer->nameFor($first, self::DESCRIPTION)->value());
+        self::assertSame('ralph/shared', $namer->nameFor($second, 'An unrelated task')->value());
+        self::assertSame('ralph/shared', $namer->resolve($first, self::DESCRIPTION)->value());
+    }
+
+    #[Test]
+    public function a_shared_branch_follows_the_prefix_until_the_project_names_one(): void
+    {
+        self::assertSame(
+            'feature/ralph-shared',
+            BranchNamer::forProject($this->configuration('feature/ralph-', 'shared'))
+                ->nameFor($this->generation())
+                ->value(),
+        );
+
+        self::assertSame(
+            'release/october',
+            BranchNamer::forProject($this->configuration('ralph/', 'shared', 'release/october'))
+                ->nameFor($this->generation())
+                ->value(),
+        );
+    }
+
+    #[Test]
+    public function a_shared_branch_recorded_for_a_pass_is_still_retained(): void
+    {
+        $generation = $this->generation();
+        $namer = BranchNamer::forProject($this->configuration('ralph/', 'shared'));
+
+        // The pass was started per task and interrupted; the project has since
+        // switched modes. Its commit is on the branch it recorded, so that is
+        // the branch it finishes on.
+        $branch = $namer->resolve($generation, self::DESCRIPTION, 'ralph/' . $generation->slug());
+
+        self::assertTrue($branch->wasRetained());
+        self::assertSame('ralph/' . $generation->slug(), $branch->value());
+    }
+
+    #[Test]
+    public function a_configured_shared_branch_git_would_refuse_is_reported_against_the_setting(): void
+    {
+        $namer = new BranchNamer('ralph/', BranchStrategy::Shared, 'release/..');
+
+        try {
+            $namer->nameFor($this->generation());
+            self::fail('A shared branch Git would refuse should not be used.');
+        } catch (ConfigurationException $failure) {
+            self::assertStringContainsString('git.strategy is "shared"', $failure->getMessage());
+            self::assertStringContainsString('the branch "release/.."', $failure->getMessage());
+            self::assertStringContainsString('contains ".."', $failure->getMessage());
+            self::assertStringContainsString(
+                'Correct git.shared_branch in .ralph/config.json',
+                implode("\n", $failure->hints()),
+            );
+        }
+    }
+
+    #[Test]
+    public function a_derived_shared_branch_git_would_refuse_is_reported_against_the_prefix(): void
+    {
+        $namer = new BranchNamer('-ralph/', BranchStrategy::Shared, '-ralph/shared');
+
+        try {
+            $namer->nameFor($this->generation());
+            self::fail('A shared branch Git would refuse should not be used.');
+        } catch (ConfigurationException $failure) {
+            self::assertStringContainsString('the branch "-ralph/shared"', $failure->getMessage());
+            self::assertStringContainsString('starts with "-"', $failure->getMessage());
+            self::assertStringContainsString(
+                'Correct git.branch_prefix in .ralph/config.json',
+                implode("\n", $failure->hints()),
+            );
+        }
+    }
+
     private function generation(): TaskGeneration
     {
         return TaskGeneration::first(TaskId::fromDescription(self::DESCRIPTION));
     }
 
-    private function configuration(string $prefix): Configuration
-    {
-        return (new ConfigurationLoader())->fromArray(
-            ['git' => ['branch_prefix' => $prefix]],
-            sys_get_temp_dir(),
-        );
+    private function configuration(
+        string $prefix,
+        ?string $strategy = null,
+        ?string $shared = null,
+    ): Configuration {
+        $git = ['branch_prefix' => $prefix];
+
+        if ($strategy !== null) {
+            $git['strategy'] = $strategy;
+        }
+
+        if ($shared !== null) {
+            $git['shared_branch'] = $shared;
+        }
+
+        return (new ConfigurationLoader())->fromArray(['git' => $git], sys_get_temp_dir());
     }
 }

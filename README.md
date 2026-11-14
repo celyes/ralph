@@ -461,6 +461,8 @@ any work starts.
   "git": {
     "base": "HEAD",
     "branch_prefix": "ralph/",
+    "strategy": "per-task",
+    "shared_branch": null,
     "push": {"enabled": false, "remote": "origin"}
   },
   "limits": {
@@ -489,6 +491,8 @@ any work starts.
 | `workspace.copy[]` | `[]` | files copied in from your checkout, such as a local `.env` |
 | `git.base` | `HEAD` | commit task branches start from |
 | `git.branch_prefix` | `ralph/` | prefix for generated branch names |
+| `git.strategy` | `per-task` | `per-task` gives every task its own branch; `shared` commits every task of a run to one branch |
+| `git.shared_branch` | `null` | the branch `shared` commits to; `null` derives `<branch_prefix>shared` |
 | `git.push.enabled` | `false` | whether to push task branches |
 | `git.push.remote` | `origin` | remote to push to |
 | `limits.*` | see above | see [Limits](#limits) |
@@ -1012,6 +1016,14 @@ Worth knowing before you rely on it.
   anything.
 - **One task at a time.** No parallel execution. Tasks are assumed independent:
   this release does not build one task on top of another's unmerged branch.
+- **`git.strategy: "shared"` is not finished.** The setting is accepted,
+  validated and recorded with the run, and every pass under it is named after
+  the one branch, but the runner still prepares each task from the run's base
+  commit. The first task of a shared-branch run commits to the branch; the
+  second stops, because the branch is recorded as another pass's and Ralph PHP
+  will not move a branch holding a commit it did not put there. Leave the
+  setting at `per-task` until creating the shared branch once per run, and
+  carrying each task's commit forward onto it, is implemented.
 - **No merges, deployments or pull requests**, and no generating a task list from
   a product idea.
 - **Agent CLIs move.** The invocations were exercised against Codex 0.4x and

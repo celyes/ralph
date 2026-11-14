@@ -106,6 +106,40 @@ final class Defaults
     public const string BRANCH_PREFIX = 'ralph/';
 
     /**
+     * How a run distributes its task commits across branches.
+     *
+     * Per task, which is the behaviour every release before shared-branch mode
+     * existed had, and the conservative one: a pass that owns its own branch
+     * cannot put a commit on history another task is building on, and a task
+     * that fails leaves nothing behind for the next one to read.
+     *
+     * @see BranchStrategy for what the two modes are for
+     */
+    public const string BRANCH_STRATEGY = BranchStrategy::PerTask->value;
+
+    /**
+     * Branch a shared-branch run commits to: derived, not fixed.
+     *
+     * Null means {@see GitSettings::sharedBranch()} appends
+     * {@see self::SHARED_BRANCH_SEGMENT} to the configured branch prefix, which
+     * keeps the shared branch inside the namespace this package already owns
+     * and makes it follow a project that renames its prefix. A project naming
+     * the branch itself writes the name here and the prefix stops applying.
+     */
+    public const ?string SHARED_BRANCH = null;
+
+    /**
+     * What the derived shared branch name ends in, after the branch prefix.
+     *
+     * `ralph/shared` under the default prefix. It says what the branch is for
+     * rather than which run made it: a name carrying a run identifier would
+     * start a new branch every run, which is the opposite of what a project
+     * asking for one branch wants, and the run that owns the branch at any
+     * moment is recorded rather than spelled.
+     */
+    public const string SHARED_BRANCH_SEGMENT = 'shared';
+
+    /**
      * Pushing is opt-in: a loop that publishes by default would put unreviewed
      * work on a shared remote.
      */
@@ -273,6 +307,8 @@ final class Defaults
             'git' => [
                 'base' => self::BASE_REFERENCE,
                 'branch_prefix' => self::BRANCH_PREFIX,
+                'strategy' => self::BRANCH_STRATEGY,
+                'shared_branch' => self::SHARED_BRANCH,
                 'push' => [
                     'enabled' => self::PUSH_ENABLED,
                     'remote' => self::PUSH_REMOTE,

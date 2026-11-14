@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\State;
 
 use Celyes\RalphPhp\Agent\AgentSource;
+use Celyes\RalphPhp\Config\BranchStrategy;
+use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Exception\ConfigurationException;
 use InvalidArgumentException;
@@ -206,6 +208,61 @@ final class RunRecord
     public function configuration(): array
     {
         return $this->configuration;
+    }
+
+    /**
+     * The branch strategy the run was started under.
+     *
+     * Read out of the frozen settings rather than out of the live
+     * configuration, for the reason the whole snapshot exists: a project that
+     * switches modes while a run is interrupted must not move the pass that is
+     * halfway through onto a different branch, and `resume` has to be able to
+     * see the mode the commit it is finishing was going to land under.
+     *
+     * A run recorded before the setting existed has no `git.strategy` in its
+     * snapshot and reads as {@see BranchStrategy::PerTask}, which is what it
+     * was: the mode is derived from what the run stored, never from what the
+     * file says today.
+     */
+    public function branchStrategy(): BranchStrategy
+    {
+        $git = $this->configuration['git'] ?? null;
+        $value = is_array($git) ? ($git['strategy'] ?? null) : null;
+
+        if (!is_string($value)) {
+            return BranchStrategy::PerTask;
+        }
+
+        return BranchStrategy::parse($value) ?? BranchStrategy::PerTask;
+    }
+
+    /**
+     * The branch a shared-branch run commits to, as the run recorded it.
+     *
+     * Null in per-task mode, and null for a run whose snapshot predates the
+     * setting: in both cases there is no one branch to name, and a derived one
+     * would be this build's answer rather than the run's.
+     */
+    public function sharedBranch(): ?string
+    {
+        if (!$this->branchStrategy()->isShared()) {
+            return null;
+        }
+
+        $git = $this->configuration['git'] ?? null;
+        $configured = is_array($git) ? ($git['shared_branch'] ?? null) : null;
+
+        if (is_string($configured) && trim($configured) !== '') {
+            return trim($configured);
+        }
+
+        $prefix = is_array($git) ? ($git['branch_prefix'] ?? null) : null;
+
+        if (!is_string($prefix)) {
+            return null;
+        }
+
+        return trim($prefix) . Defaults::SHARED_BRANCH_SEGMENT;
     }
 
     /**
@@ -473,6 +530,8 @@ final class RunRecord
             'agent' => $this->agent->name(),
             'adapter' => $this->agent->adapter(),
             'agent_source' => $this->agentSource->value,
+            'branch_strategy' => $this->branchStrategy()->value,
+            'shared_branch' => $this->sharedBranch(),
             'checks' => $this->checkNames(),
             'base_reference' => $this->baseReference,
             'base_sha' => $this->baseSha,

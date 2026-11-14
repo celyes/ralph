@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Config;
 
 use Celyes\RalphPhp\Config\AgentDefinition;
+use Celyes\RalphPhp\Config\BranchStrategy;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Defaults;
@@ -64,6 +65,11 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(['codex', 'claude'], $config->agentNames());
         self::assertSame(Defaults::BASE_REFERENCE, $config->git()->baseReference());
         self::assertSame(Defaults::BRANCH_PREFIX, $config->git()->branchPrefix());
+        self::assertSame(BranchStrategy::PerTask, $config->git()->strategy());
+        // Derived from the prefix, and reported as derived: the setting is
+        // absent, so the project has not chosen a name.
+        self::assertSame('ralph/shared', $config->git()->sharedBranch());
+        self::assertFalse($config->git()->sharedBranchIsConfigured());
         self::assertFalse($config->git()->push()->isEnabled());
         self::assertSame(Defaults::PUSH_REMOTE, $config->git()->push()->remote());
         self::assertSame(Defaults::ITERATIONS, $config->limits()->iterations());
@@ -139,6 +145,8 @@ final class ConfigurationLoaderTest extends TestCase
             'git' => [
                 'base' => 'origin/main',
                 'branch_prefix' => 'agent/',
+                'strategy' => 'shared',
+                'shared_branch' => 'agent/october',
                 'push' => ['enabled' => true, 'remote' => 'upstream'],
             ],
             'limits' => [
@@ -166,6 +174,9 @@ final class ConfigurationLoaderTest extends TestCase
 
         self::assertSame('origin/main', $config->git()->baseReference());
         self::assertSame('agent/', $config->git()->branchPrefix());
+        self::assertSame(BranchStrategy::Shared, $config->git()->strategy());
+        self::assertSame('agent/october', $config->git()->sharedBranch());
+        self::assertTrue($config->git()->sharedBranchIsConfigured());
         self::assertTrue($config->git()->push()->isEnabled());
         self::assertSame('upstream', $config->git()->push()->remote());
 

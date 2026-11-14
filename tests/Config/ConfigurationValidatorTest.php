@@ -485,6 +485,55 @@ final class ConfigurationValidatorTest extends TestCase
     }
 
     #[Test]
+    public function an_unknown_execution_strategy_is_rejected(): void
+    {
+        $exception = $this->failure(['git' => ['strategy' => 'one-branch']]);
+
+        self::assertStringContainsString(
+            '"git.strategy" must be one of "per-task" or "shared", "one-branch" given.',
+            $exception->getMessage(),
+        );
+        self::assertContains('"per-task" gives every task its own branch.', $exception->hints());
+        self::assertContains(
+            '"shared" commits every task of a run to "git.shared_branch".',
+            $exception->hints(),
+        );
+    }
+
+    #[Test]
+    public function an_empty_execution_strategy_is_rejected(): void
+    {
+        $exception = $this->failure(['git' => ['strategy' => '']]);
+
+        self::assertStringContainsString('"git.strategy" must not be empty.', $exception->getMessage());
+        self::assertContains('It must be a Git execution strategy.', $exception->hints());
+    }
+
+    #[Test]
+    public function a_shared_branch_git_would_reject_is_rejected(): void
+    {
+        $exception = $this->failure(['git' => ['strategy' => 'shared', 'shared_branch' => 'run/../x']]);
+
+        self::assertStringContainsString(
+            '"git.shared_branch" is not a usable branch name: it contains "..", which Git reads as a range.',
+            $exception->getMessage(),
+        );
+        self::assertContains('Remove "git.shared_branch" to use "<prefix>shared".', $exception->hints());
+    }
+
+    #[Test]
+    public function a_blank_shared_branch_is_rejected(): void
+    {
+        $exception = $this->failure(['git' => ['shared_branch' => ' ']]);
+
+        self::assertStringContainsString('"git.shared_branch" must not be blank.', $exception->getMessage());
+        self::assertContains(
+            'It must be the branch a shared-branch run commits to.',
+            $exception->hints(),
+        );
+    }
+
+    #[Test]
     public function a_base_reference_containing_whitespace_is_rejected(): void
     {
         $exception = $this->failure(['git' => ['base' => 'my branch']]);

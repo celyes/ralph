@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Git;
 
+use Celyes\RalphPhp\Config\BranchStrategy;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Exception\ConfigurationException;
@@ -53,6 +54,17 @@ use Celyes\RalphPhp\Tasks\TaskGeneration;
  * branch is answered by the state store, which recorded it, and never by
  * parsing. {@see BranchName::hasPrefix()} is as far as spelling is trusted.
  *
+ * **Under {@see BranchStrategy::Shared} none of the above applies.** Every pass
+ * in the run is named after the one branch the project configured
+ * ({@see \Celyes\RalphPhp\Config\GitSettings::sharedBranch()}), so the task
+ * is not in the name at all — the commit carries it, as it always did
+ * ({@see CommitMessage}), and which commit belongs to which task is recorded
+ * rather than spelled. The name is derived afresh from one setting instead of
+ * from three, so the shortening and slugging below are skipped entirely; what
+ * is kept is the rule that matters on resume, since a recorded name is still
+ * never recomputed. That is what lets a project switch modes between two runs
+ * without the pass that is halfway through losing track of its branch.
+ *
  * Free of I/O, like {@see BaseCommit}: this decides what a branch is called,
  * and the repository is asked about it elsewhere.
  */
@@ -92,8 +104,11 @@ final class BranchNamer
      */
     private const int MINIMUM_DESCRIPTION = 4;
 
-    public function __construct(private readonly string $prefix = Defaults::BRANCH_PREFIX)
-    {
+    public function __construct(
+        private readonly string $prefix = Defaults::BRANCH_PREFIX,
+        private readonly BranchStrategy $strategy = BranchStrategy::PerTask,
+        private readonly string $shared = '',
+    ) {
     }
 
     /**
@@ -101,7 +116,9 @@ final class BranchNamer
      */
     public static function forProject(Configuration $configuration): self
     {
-        return new self($configuration->git()->branchPrefix());
+        $git = $configuration->git();
+
+        return new self($git->branchPrefix(), $git->strategy(), $git->sharedBranch());
     }
 
     /**
@@ -110,6 +127,14 @@ final class BranchNamer
     public function prefix(): string
     {
         return trim($this->prefix);
+    }
+
+    /**
+     * How the run distributes its commits across branches.
+     */
+    public function strategy(): BranchStrategy
+    {
+        return $this->strategy;
     }
 
     /**
@@ -123,6 +148,10 @@ final class BranchNamer
      */
     public function nameFor(TaskGeneration $generation, string $description = ''): BranchName
     {
+        if ($this->strategy->isShared()) {
+            return $this->sharedName($generation);
+        }
+
         $prefix = $this->prefix();
         $identity = $prefix . $generation->slug();
         $readable = $this->readableHalf($description, self::MAX_LENGTH - strlen($identity) - 1);
@@ -147,6 +176,60 @@ final class BranchNamer
         }
 
         return BranchName::fromString($name);
+    }
+
+    /**
+     * The one branch a shared-branch run commits to.
+     *
+     * The generation is taken for the failure message only: the name is the
+     * same for every pass, which is the whole of the mode, and an unusable one
+     * is worth reporting against the pass that reached it so the person reading
+     * the error knows how far the run got.
+     *
+     * The setting named in the remedy is the one the user can act on, which is
+     * not always the one holding the bad name: an absent `git.shared_branch` is
+     * derived from `git.branch_prefix`, so a prefix that is legal as a prefix
+     * and illegal as a whole name is reported as the prefix problem it is.
+     * {@see \Celyes\RalphPhp\Config\ConfigurationValidator} draws the same
+     * distinction, and catches both before a run starts; this is the second
+     * lock on that door, for settings assembled in code.
+     *
+     * @throws ConfigurationException when the configured branch is one Git
+     *                                would refuse
+     */
+    private function sharedName(TaskGeneration $generation): BranchName
+    {
+        $name = trim($this->shared);
+        $problem = BranchName::problemWith($name);
+
+        if ($problem === null) {
+            return BranchName::fromString($name);
+        }
+
+        $derived = $name === '' || $name === trim($this->prefix) . Defaults::SHARED_BRANCH_SEGMENT;
+
+        throw new ConfigurationException(
+            sprintf(
+                'git.strategy is "%s", which commits %s to the branch "%s", and Git would refuse it: it %s.',
+                BranchStrategy::Shared->value,
+                $generation->label(),
+                $name,
+                $problem,
+            ),
+            $derived
+                ? [
+                    sprintf(
+                        'Without "git.shared_branch", a run commits to "<prefix>%s", from git.branch_prefix "%s".',
+                        Defaults::SHARED_BRANCH_SEGMENT,
+                        $this->prefix,
+                    ),
+                    'Correct git.branch_prefix in .ralph/config.json, or name the branch with git.shared_branch, then run the command again.',
+                ]
+                : [
+                    sprintf('git.shared_branch is "%s".', $this->shared),
+                    'Correct git.shared_branch in .ralph/config.json, then run the command again.',
+                ],
+        );
     }
 
     /**

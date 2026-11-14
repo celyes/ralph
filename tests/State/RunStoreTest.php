@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Tests\State;
 use Celyes\RalphPhp\Agent\AgentSelection;
 use Celyes\RalphPhp\Agent\AgentSource;
 use Celyes\RalphPhp\Config\AgentDefinition;
+use Celyes\RalphPhp\Config\BranchStrategy;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Limits;
@@ -418,6 +419,61 @@ final class RunStoreTest extends TestCase
     }
 
     /**
+     * The mode is read out of the snapshot, so a project that switches it
+     * mid-run cannot move the commits a run already placed.
+     */
+    #[Test]
+    public function a_run_records_the_branch_strategy_it_was_started_under(): void
+    {
+        $run = $this->runs->open($this->agent(), $this->configuration());
+
+        self::assertSame(BranchStrategy::PerTask, $run->branchStrategy());
+        self::assertSame('per-task', $run->toArray()['branch_strategy']);
+        // No one branch to name in per-task mode, so none is reported.
+        self::assertNull($run->sharedBranch());
+        self::assertNull($run->toArray()['shared_branch']);
+
+        $shared = $this->runs->open($this->agent(), $this->configuration([
+            'strategy' => 'shared',
+            'shared_branch' => 'release/october',
+        ]));
+
+        self::assertSame(BranchStrategy::Shared, $this->runs->get($shared->rowId())->branchStrategy());
+        self::assertSame('release/october', $this->runs->get($shared->rowId())->sharedBranch());
+    }
+
+    #[Test]
+    public function a_shared_run_that_named_no_branch_reports_the_one_derived_from_its_prefix(): void
+    {
+        $run = $this->runs->open($this->agent(), $this->configuration([
+            'strategy' => 'shared',
+            'branch_prefix' => 'agent/',
+        ]));
+
+        self::assertSame('agent/shared', $this->runs->get($run->rowId())->sharedBranch());
+    }
+
+    /**
+     * A run from a release before the setting existed: its snapshot has no
+     * `git.strategy`, and it was per task, which is what it must read as.
+     */
+    #[Test]
+    public function a_run_recorded_before_the_setting_existed_reads_as_per_task(): void
+    {
+        $run = $this->runs->open($this->agent(), $this->configuration());
+
+        $this->database->execute(
+            'UPDATE runs SET configuration = ? WHERE run_id = ?',
+            ['{"git":{"base":"HEAD","branch_prefix":"ralph/"}}', $run->runId()],
+        );
+
+        $read = $this->runs->get($run->rowId());
+
+        self::assertSame(BranchStrategy::PerTask, $read->branchStrategy());
+        self::assertNull($read->sharedBranch());
+    }
+
+    /**
      * A run that has spent `$iterations` tasks and `$seconds` working.
      */
     private function spent(RunRecord $run, int $iterations, int $seconds): RunRecord
@@ -434,8 +490,15 @@ final class RunStoreTest extends TestCase
         return new AgentSelection(AgentDefinition::builtIn('codex'), AgentSource::ProjectDefault);
     }
 
-    private function configuration(): Configuration
+    /**
+     * @param array<string, mixed> $git
+     */
+    private function configuration(array $git = []): Configuration
     {
-        return (new ConfigurationLoader())->defaults($this->root);
+        $loader = new ConfigurationLoader();
+
+        return $git === []
+            ? $loader->defaults($this->root)
+            : $loader->fromArray(['git' => $git], $this->root);
     }
 }

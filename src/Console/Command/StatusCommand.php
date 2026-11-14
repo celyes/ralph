@@ -481,6 +481,15 @@ final class StatusCommand extends ProjectCommand
         ));
         $output->line(sprintf(
             '  %s  %s',
+            $style->label('branches   '),
+            // The mode the run froze, not the one configured now: a project
+            // that switched modes since has not moved this run's commits.
+            $run->sharedBranch() === null
+                ? $run->branchStrategy()->label()
+                : sprintf('%s, %s', $run->branchStrategy()->label(), $run->sharedBranch()),
+        ));
+        $output->line(sprintf(
+            '  %s  %s',
             $style->label('checks     '),
             // A run may freeze none: `checks` is empty until a project says how
             // it is verified. Said in words rather than left as a blank value,
