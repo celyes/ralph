@@ -50,6 +50,7 @@ final class RunRecord
         private readonly string $tasksPath,
         private readonly string $baseReference,
         private readonly ?string $baseSha,
+        private readonly ?string $establishedSharedBranch,
         private readonly ?string $host,
         private readonly ?int $pid,
         private readonly ?int $resumedFrom,
@@ -93,6 +94,7 @@ final class RunRecord
             self::text($row, 'tasks_path'),
             self::text($row, 'base_reference'),
             self::nullableText($row, 'base_sha'),
+            self::nullableText($row, 'shared_branch'),
             self::nullableText($row, 'host'),
             isset($row['pid']) ? (int) $row['pid'] : null,
             isset($row['resumed_from']) ? (int) $row['resumed_from'] : null,
@@ -239,6 +241,20 @@ final class RunRecord
     /**
      * The branch a shared-branch run commits to, as the run recorded it.
      *
+     * The established branch when the run has one — the name it created or
+     * validated at its start, written to its row once ({@see
+     * \Celyes\RalphPhp\State\RunStore::recordSharedBranch()}, PROJECT.md
+     * section K, item 3). That column is the run's identity for the rest of its
+     * life, including across a resume: `git.shared_branch` and
+     * `git.branch_prefix` are both settings a user may edit between an
+     * interrupted run and the resume that finishes it, and a resume that
+     * derived the name again would continue on a second branch while the first
+     * one still held the commits.
+     *
+     * Otherwise what the run's own frozen configuration names, which is the
+     * answer for the window before the branch has been established and for a
+     * row written by a build that had no column for it.
+     *
      * Null in per-task mode, and null for a run whose snapshot predates the
      * setting: in both cases there is no one branch to name, and a derived one
      * would be this build's answer rather than the run's.
@@ -247,6 +263,10 @@ final class RunRecord
     {
         if (!$this->branchStrategy()->isShared()) {
             return null;
+        }
+
+        if ($this->establishedSharedBranch !== null && trim($this->establishedSharedBranch) !== '') {
+            return trim($this->establishedSharedBranch);
         }
 
         $git = $this->configuration['git'] ?? null;
@@ -263,6 +283,34 @@ final class RunRecord
         }
 
         return trim($prefix) . Defaults::SHARED_BRANCH_SEGMENT;
+    }
+
+    /**
+     * The shared branch the run actually established, as its row holds it.
+     *
+     * The column alone, with no derivation behind it: null means this run has
+     * not reached the point of creating or validating a branch, which is what
+     * tells a run at its start from one already committing to a branch.
+     * {@see self::sharedBranch()} is what a caller that only needs a name
+     * should ask for.
+     */
+    public function establishedSharedBranch(): ?string
+    {
+        $recorded = $this->establishedSharedBranch;
+
+        if ($recorded === null || trim($recorded) === '') {
+            return null;
+        }
+
+        return trim($recorded);
+    }
+
+    /**
+     * Whether the run has established the branch it commits to.
+     */
+    public function hasEstablishedSharedBranch(): bool
+    {
+        return $this->establishedSharedBranch() !== null;
     }
 
     /**

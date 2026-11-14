@@ -454,6 +454,67 @@ final class RunStoreTest extends TestCase
     }
 
     /**
+     * The identity of section K, item 3: the branch is established once and
+     * then belongs to the run, whatever the settings say afterwards.
+     */
+    #[Test]
+    public function a_shared_run_keeps_the_branch_it_established_when_the_setting_changes_under_it(): void
+    {
+        $run = $this->runs->open($this->agent(), $this->configuration([
+            'strategy' => 'shared',
+            'shared_branch' => 'release/october',
+        ]));
+
+        self::assertFalse($run->hasEstablishedSharedBranch());
+        self::assertNull($run->establishedSharedBranch());
+
+        $established = $this->runs->recordSharedBranch($run, 'release/october');
+
+        self::assertTrue($established->hasEstablishedSharedBranch());
+        self::assertSame('release/october', $established->establishedSharedBranch());
+
+        // What a resume reads: the row, not a name derived again from a file
+        // that has been edited since.
+        $this->database->execute(
+            'UPDATE runs SET configuration = ? WHERE run_id = ?',
+            ['{"git":{"strategy":"shared","shared_branch":"release/november","branch_prefix":"ralph/"}}', $run->runId()],
+        );
+
+        self::assertSame('release/october', $this->runs->get($run->rowId())->sharedBranch());
+    }
+
+    /**
+     * Recording the same branch again is what a resume does: it validates the
+     * branch before continuing and must be allowed to arrive at the same answer.
+     */
+    #[Test]
+    public function a_shared_branch_may_be_recorded_again_but_never_replaced(): void
+    {
+        $run = $this->runs->recordSharedBranch(
+            $this->runs->open($this->agent(), $this->configuration(['strategy' => 'shared'])),
+            'ralph/shared',
+        );
+
+        self::assertSame('ralph/shared', $this->runs->recordSharedBranch($run, 'ralph/shared')->sharedBranch());
+
+        $this->expectException(StateException::class);
+        $this->expectExceptionMessage('already commits to the shared branch "ralph/shared"');
+
+        $this->runs->recordSharedBranch($run, 'ralph/other');
+    }
+
+    #[Test]
+    public function a_blank_shared_branch_is_refused(): void
+    {
+        $run = $this->runs->open($this->agent(), $this->configuration(['strategy' => 'shared']));
+
+        $this->expectException(StateException::class);
+        $this->expectExceptionMessage('blank shared branch');
+
+        $this->runs->recordSharedBranch($run, '  ');
+    }
+
+    /**
      * A run from a release before the setting existed: its snapshot has no
      * `git.strategy`, and it was per task, which is what it must read as.
      */

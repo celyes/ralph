@@ -243,6 +243,37 @@ final class GenerationStore
     }
 
     /**
+     * The pass that produced a commit, when this project recorded one.
+     *
+     * What tells a commit this package made from a commit somebody made by
+     * hand, which is the question a shared branch's tip has to answer before a
+     * run may continue it ({@see \Celyes\RalphPhp\Git\SharedBranches}): a tip
+     * no row accounts for is work the run has never seen and must not build on
+     * silently.
+     *
+     * Compared as the full SHA, exactly as recorded. Git's abbreviations are
+     * not matched: a prefix lookup would make the answer depend on how many
+     * objects the repository happens to hold.
+     *
+     * @throws StateException when the rows cannot be read
+     */
+    public function atCommit(string $commit): ?GenerationRecord
+    {
+        $sha = trim($commit);
+
+        if ($sha === '') {
+            return null;
+        }
+
+        $rows = $this->database->query(
+            'SELECT * FROM generations WHERE commit_sha = ? ORDER BY id DESC LIMIT 1',
+            [$sha],
+        );
+
+        return $rows === [] ? null : GenerationRecord::fromRow($rows[0]);
+    }
+
+    /**
      * Every branch a generation already owns.
      *
      * @return list<string>

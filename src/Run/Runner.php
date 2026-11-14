@@ -685,6 +685,28 @@ final class Runner
         // about this one (section G, item 3).
         $checks = $run->verification();
 
+        // Once per run, before the first task and before anything is
+        // reconciled: in shared-branch mode every task commits to one branch,
+        // so the branch is created or validated here rather than named by each
+        // task, and what was found is written to the run's row — which is what
+        // makes a resume continue on the branch holding the commits rather than
+        // on the branch today's settings would name (section K, item 3).
+        //
+        // Null in per-task mode, where a branch belongs to a pass and
+        // {@see TaskPass} resolves it from the task's own row.
+        $shared = null;
+
+        if ($run->branchStrategy()->isShared()) {
+            $shared = $workbench->shared()->require($run, $base);
+            $run = $journal->runs()->recordSharedBranch($run, $shared->value());
+
+            // Said on the terminal rather than added to the event stream: the
+            // stream's four kinds are a documented vocabulary (section I, item
+            // 3), and the branch a run established is already readable from its
+            // row through `ralph status --json`.
+            $this->terminal?->line($this->style()->muted(sprintf('branch %s', $shared->describe())));
+        }
+
         // A resume's first act, before a budget is measured or an agent is
         // invoked: what the interrupted run left in the repository is put back
         // in step with what its rows say (section H, item 5).
@@ -715,6 +737,7 @@ final class Runner
             // A retry grants the configured attempt allowance again; every
             // other intent spends the one the task has left.
             $intent->isRetry() ? $this->attemptsAlreadyMade($journal, $selected) : 0,
+            $shared,
         );
 
         $limits = $this->configuration->limits();

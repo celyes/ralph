@@ -363,6 +363,59 @@ final class RunStore
     }
 
     /**
+     * Record the branch a shared-branch run established, once and for all.
+     *
+     * The persisted identity of PROJECT.md section K, item 3. Written after the
+     * branch has been created or validated and before the first task of the run
+     * is taken on, so that every pass — and every resume of the run — commits
+     * to the branch the run established rather than to the one the settings
+     * would name today.
+     *
+     * Recording the same branch twice is allowed and does nothing: a resume
+     * validates the branch again before it continues, and arriving at the same
+     * answer must not be an error. A *different* branch is refused rather than
+     * overwritten, because the first one may already hold the run's commits and
+     * a row quietly renamed onto another branch would leave them with nothing
+     * naming them.
+     *
+     * @throws StateException when the branch is blank, when the run already
+     *                        established a different one, or when the row
+     *                        cannot be written
+     */
+    public function recordSharedBranch(RunRecord $run, string $branch): RunRecord
+    {
+        $name = trim($branch);
+
+        if ($name === '') {
+            throw new StateException('A run cannot record a blank shared branch.');
+        }
+
+        $established = $run->establishedSharedBranch();
+
+        if ($established === $name) {
+            return $run;
+        }
+
+        if ($established !== null) {
+            throw new StateException(
+                sprintf(
+                    'Run %s already commits to the shared branch "%s" and cannot also commit to "%s".',
+                    $run->runId(),
+                    $established,
+                    $name,
+                ),
+                [
+                    'The branch a shared-branch run commits to is established once, before its first task '
+                        . '(PROJECT.md section K, item 3), so that a resume continues on the branch holding the commits.',
+                    sprintf('Finish or stop run %s, then start a new run to commit to "%s".', $run->runId(), $name),
+                ],
+            );
+        }
+
+        return $this->write($run, ['shared_branch' => $name]);
+    }
+
+    /**
      * Count one task taken on.
      *
      * The iteration limit of PROJECT.md section H, item 2 is counted here and

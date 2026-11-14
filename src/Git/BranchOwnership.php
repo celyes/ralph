@@ -44,6 +44,8 @@ final class BranchOwnership
      * @param RegisteredWorktree|null $checkedOutIn the worktree holding the branch, when one does
      * @param string|null            $reason       why the branch is not the pass's, phrased to follow "it …"
      * @param string|null            $owner        the recorded pass that holds the name, when another one does
+     * @param list<string>           $remedies     what to do about it, when the
+     *        generic advice does not apply — see {@see self::hints()}
      */
     private function __construct(
         private readonly TaskBranch $branch,
@@ -52,6 +54,7 @@ final class BranchOwnership
         private readonly ?RegisteredWorktree $checkedOutIn,
         private readonly ?string $reason,
         private readonly ?string $owner,
+        private readonly array $remedies = [],
     ) {
     }
 
@@ -83,6 +86,11 @@ final class BranchOwnership
      *
      * @param string $reason phrased to follow "it …", because it is read inside
      *        a sentence naming the branch
+     * @param list<string> $remedies what the user can do about this particular
+     *        refusal, where the generic advice would be wrong: a shared-branch
+     *        run is not fixed by renaming a prefix, for instance. Replaces the
+     *        closing line of {@see self::hints()} rather than the whole list,
+     *        since what the package will not do is true either way.
      */
     public static function unrelated(
         TaskBranch $branch,
@@ -90,8 +98,9 @@ final class BranchOwnership
         ?string $tip = null,
         ?RegisteredWorktree $checkedOutIn = null,
         ?string $owner = null,
+        array $remedies = [],
     ): self {
-        return new self($branch, BranchClaim::Unrelated, $tip, $checkedOutIn, $reason, $owner);
+        return new self($branch, BranchClaim::Unrelated, $tip, $checkedOutIn, $reason, $owner, $remedies);
     }
 
     /**
@@ -275,6 +284,10 @@ final class BranchOwnership
 
         if ($this->tip !== null) {
             $hints[] = sprintf('Run "git log --oneline -1 %s" to see what is on it.', $this->name());
+        }
+
+        if ($this->remedies !== []) {
+            return [...$hints, ...$this->remedies];
         }
 
         $hints[] = 'Rename or remove the branch yourself, or set a different "git.branch_prefix", then '

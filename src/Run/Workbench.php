@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Run;
 
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Git\BranchNamer;
+use Celyes\RalphPhp\Git\SharedBranches;
 use Celyes\RalphPhp\Git\TaskBranches;
 use Celyes\RalphPhp\Git\TaskCommitter;
 use Celyes\RalphPhp\Git\TaskPublisher;
@@ -48,6 +49,7 @@ final class Workbench
     public function __construct(
         private readonly TaskWorktrees $worktrees,
         private readonly TaskBranches $branches,
+        private readonly SharedBranches $shared,
         private readonly BranchNamer $namer,
         private readonly WorkspacePreparer $preparer,
         private readonly WorkspaceAuditor $auditor,
@@ -89,6 +91,7 @@ final class Workbench
         return new self(
             TaskWorktrees::forProject($configuration, $executable, $processes),
             TaskBranches::forProject($configuration, $executable, $processes),
+            SharedBranches::forProject($configuration, $generations, $executable, $processes),
             BranchNamer::forProject($configuration),
             WorkspacePreparer::forProject($configuration, $processes),
             WorkspaceAuditor::forProject($configuration, $generations, $executable, $processes),
@@ -121,6 +124,17 @@ final class Workbench
     public function branches(): TaskBranches
     {
         return $this->branches;
+    }
+
+    /**
+     * The branch a shared-branch run shares, and who may commit to it.
+     *
+     * Read by the runner once per run and by each pass thereafter; in per-task
+     * mode nothing asks it anything.
+     */
+    public function shared(): SharedBranches
+    {
+        return $this->shared;
     }
 
     public function namer(): BranchNamer

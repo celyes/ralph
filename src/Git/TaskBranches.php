@@ -234,7 +234,21 @@ final class TaskBranches
      */
     public function tipOf(TaskBranch $branch): ?string
     {
-        $result = $this->git->query(...[...self::TIP_COMMAND, $branch->name()->reference()]);
+        return $this->tipOfName($branch->name());
+    }
+
+    /**
+     * The commit a branch points at, asked about by name alone.
+     *
+     * For the branch a whole run shares ({@see SharedBranches}), which has no
+     * generation to belong to: the question is the same, and asking it twice in
+     * two classes would be two answers to keep in step.
+     *
+     * @throws BranchException when Git could not answer
+     */
+    public function tipOfName(BranchName $name): ?string
+    {
+        $result = $this->git->query(...[...self::TIP_COMMAND, $name->reference()]);
 
         if ($result->succeeded()) {
             return $result->trimmedOutput();
@@ -245,9 +259,9 @@ final class TaskBranches
         }
 
         throw $this->unanswered(
-            sprintf('whether %s exists', $branch->value()),
+            sprintf('whether %s exists', $name->value()),
             $result,
-            sprintf('git rev-parse --verify %s', $branch->name()->reference()),
+            sprintf('git rev-parse --verify %s', $name->reference()),
         );
     }
 
@@ -318,8 +332,22 @@ final class TaskBranches
      */
     private function contains(TaskBranch $branch, string $commit): bool
     {
+        return $this->nameContains($branch->name(), $commit);
+    }
+
+    /**
+     * Whether a branch's history contains a commit, by name alone.
+     *
+     * The counterpart of {@see self::tipOfName()}, and there for the same
+     * caller: a shared branch belongs to a run rather than to a pass.
+     *
+     * @throws BranchException when Git could not answer, which includes a
+     *                        recorded commit the repository no longer has
+     */
+    public function nameContains(BranchName $name, string $commit): bool
+    {
         $result = $this->git->query(
-            ...[...self::ANCESTRY_COMMAND, '--end-of-options', $commit, $branch->name()->reference()],
+            ...[...self::ANCESTRY_COMMAND, '--end-of-options', $commit, $name->reference()],
         );
 
         if ($result->succeeded()) {
@@ -331,9 +359,9 @@ final class TaskBranches
         }
 
         throw $this->unanswered(
-            sprintf('whether %s is still on %s', substr($commit, 0, BranchOwnership::SHORT_LENGTH), $branch->value()),
+            sprintf('whether %s is still on %s', substr($commit, 0, BranchOwnership::SHORT_LENGTH), $name->value()),
             $result,
-            sprintf('git merge-base --is-ancestor %s %s', $commit, $branch->name()->reference()),
+            sprintf('git merge-base --is-ancestor %s %s', $commit, $name->reference()),
         );
     }
 

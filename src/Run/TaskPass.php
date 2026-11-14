@@ -21,7 +21,10 @@ use Celyes\RalphPhp\Exception\PublicationException;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\CommitMessage;
+use Celyes\RalphPhp\Git\BranchOwnership;
+use Celyes\RalphPhp\Git\SharedBranch;
 use Celyes\RalphPhp\Git\StagedChanges;
+use Celyes\RalphPhp\Git\TaskBranch;
 use Celyes\RalphPhp\Git\TaskPublisher;
 use Celyes\RalphPhp\Git\TaskWorktree;
 use Celyes\RalphPhp\Log\AttemptLog;
@@ -139,6 +142,12 @@ final class TaskPass
      *        task whose attempts ran out — would be no retry at all. Fixed when
      *        the pass is built, so a retry grants one allowance rather than an
      *        endless one.
+     * @param SharedBranch|null $shared the branch the run established for every
+     *        task to commit to, in shared-branch mode; null in per-task mode,
+     *        where a branch belongs to a pass and is named after it. Fixed when
+     *        the pass is built because it is the run's and not the task's: it
+     *        was created or validated once, before the first task
+     *        ({@see \Celyes\RalphPhp\Git\SharedBranches}, section K, item 3).
      */
     public function __construct(
         private readonly Configuration $configuration,
@@ -155,6 +164,7 @@ final class TaskPass
         private readonly Clock $clock = new SystemClock(),
         private readonly Interruptions $interruptions = new Interruptions(),
         private readonly int $forgivenAttempts = 0,
+        private readonly ?SharedBranch $shared = null,
     ) {
     }
 
@@ -338,6 +348,74 @@ final class TaskPass
     }
 
     /**
+     * The branch this pass commits to.
+     *
+     * In per-task mode, the one the pass records or the one its task and the
+     * configured prefix name ({@see \Celyes\RalphPhp\Git\BranchNamer}).
+     *
+     * In shared-branch mode, the branch the *run* established, read off the
+     * run's own record rather than derived again — which is the half of section
+     * K, item 3 that matters after an interruption: `git.shared_branch` and
+     * `git.branch_prefix` are both settings a user may edit between an
+     * interrupted run and the resume that finishes it, and a pass that derived
+     * the name again would commit to a second branch while the first still held
+     * the run's work.
+     *
+     * A pass that already records a branch keeps it either way. A pass started
+     * under one strategy and finished under the other therefore ends up on the
+     * branch holding its commit, not on the branch the new strategy would name.
+     *
+     * @throws RalphException when no usable name can be produced
+     */
+    private function branchOf(GenerationRecord $record, string $description): TaskBranch
+    {
+        $shared = $this->shared;
+        $recorded = $record->branch();
+
+        if ($shared !== null && ($recorded === null || trim($recorded) === '')) {
+            return TaskBranch::generated($record->generation(), $shared->name());
+        }
+
+        return $this->workbench->namer()->forRecord($record, $description);
+    }
+
+    /**
+     * Whether the pass may use the branch it is named after.
+     *
+     * Two strategies, one question, and the difference is whose branch it is.
+     * In per-task mode {@see \Celyes\RalphPhp\Git\TaskBranches} decides from
+     * the pass's own row and from every other pass's: a name another generation
+     * records is taken. In shared-branch mode that rule is the wrong one by
+     * construction — every task of the run commits to the branch the *run*
+     * established — so {@see \Celyes\RalphPhp\Git\SharedBranches} answers
+     * instead, from the run's branch and the commit the pass's workspace starts
+     * at (section K, item 3).
+     *
+     * A pass whose row already records a branch other than the run's shared one
+     * keeps the per-task reading. That is a pass started under the other
+     * strategy and interrupted, and the branch holding its commit is its own; a
+     * run that moved it onto the shared branch would be renaming its way out of
+     * a record this package wrote, which is the one thing a resumed pass must
+     * never do ({@see \Celyes\RalphPhp\Git\BranchNamer}).
+     *
+     * @throws RalphException when the branch is not this pass's to use
+     */
+    private function branchFor(TaskBranch $branch, GenerationRecord $record): BranchOwnership
+    {
+        $shared = $this->shared;
+
+        if ($shared !== null && $branch->value() === $shared->value()) {
+            return $this->workbench->shared()->requireForPass($shared, $branch, $record, $this->base);
+        }
+
+        return $this->workbench->branches()->require(
+            $branch,
+            $record,
+            $this->journal->generations()->history(),
+        );
+    }
+
+    /**
      * The pass itself, with the attempt's log open around it.
      */
     private function carryOut(
@@ -356,12 +434,8 @@ final class TaskPass
             // Preparing. The branch is read before the workspace is created: a
             // name unrelated work holds is a refusal, and finding that out
             // costs nothing before a checkout and a dependency install.
-            $branch = $this->workbench->namer()->forRecord($record, $task->description());
-            $ownership = $this->workbench->branches()->require(
-                $branch,
-                $record,
-                $this->journal->generations()->history(),
-            );
+            $branch = $this->branchOf($record, $task->description());
+            $ownership = $this->branchFor($branch, $record);
 
             $worktree = $this->workbench->worktrees()->prepare($record->generation(), $this->base);
             $record = $this->journal->generations()->recordWorktree(

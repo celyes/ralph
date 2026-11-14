@@ -65,7 +65,7 @@ final class Migrations
      */
     public static function all(): array
     {
-        return [self::initial(), self::stopAction()];
+        return [self::initial(), self::stopAction(), self::sharedBranch()];
     }
 
     /**
@@ -121,6 +121,41 @@ final class Migrations
                 'ALTER TABLE runs ADD COLUMN stop_kind TEXT CHECK (stop_kind IN (%s))',
                 Schema::literals(Schema::stopKinds()),
             ),
+        ]);
+    }
+
+    /**
+     * Version 3: the branch a shared-branch run established.
+     *
+     * PROJECT.md section K, item 3 asks for the shared branch to be created or
+     * validated once per run and for its identity to be persisted, so that a
+     * resume continues on the same branch. The identity is a column and not a
+     * derivation for the reason every other frozen setting is a column: the
+     * name a shared-branch run commits to comes from `git.shared_branch` or
+     * from `git.branch_prefix`, both of which a user may edit between an
+     * interrupted run and the resume that finishes it, and a resume that
+     * recomputed the name would continue on a second branch while the first one
+     * still held the run's commits.
+     *
+     * Nullable, and no backfill, for the two cases that are genuinely empty: a
+     * per-task run commits to no one branch, and a run recorded by an earlier
+     * build established nothing. {@see RunRecord::sharedBranch()} falls back to
+     * what such a run's own configuration snapshot names, which is the honest
+     * answer for a row that predates the column.
+     *
+     * The `generations_branch` unique index is deliberately left as it is. One
+     * branch still belongs to one generation, because in shared-branch mode
+     * only the pass that creates the branch records it until the carry-forward
+     * of section K, item 4 exists; a run whose second task would have to share
+     * the row is stopped before it commits
+     * ({@see \Celyes\RalphPhp\Git\SharedBranches::forPass()}), and relaxing the
+     * index before then would remove the protection per-task mode depends on
+     * while buying nothing.
+     */
+    private static function sharedBranch(): Migration
+    {
+        return new Migration(3, 'the branch a shared-branch run established', [
+            'ALTER TABLE runs ADD COLUMN shared_branch TEXT',
         ]);
     }
 

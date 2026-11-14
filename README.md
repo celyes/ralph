@@ -1016,14 +1016,20 @@ Worth knowing before you rely on it.
   anything.
 - **One task at a time.** No parallel execution. Tasks are assumed independent:
   this release does not build one task on top of another's unmerged branch.
-- **`git.strategy: "shared"` is not finished.** The setting is accepted,
-  validated and recorded with the run, and every pass under it is named after
-  the one branch, but the runner still prepares each task from the run's base
-  commit. The first task of a shared-branch run commits to the branch; the
-  second stops, because the branch is recorded as another pass's and Ralph PHP
-  will not move a branch holding a commit it did not put there. Leave the
-  setting at `per-task` until creating the shared branch once per run, and
-  carrying each task's commit forward onto it, is implemented.
+- **`git.strategy: "shared"` carries one task per run so far.** The branch is
+  now established once per run — created if it is missing, validated if it is
+  there, and recorded against the run so a resume continues on it — and the
+  run's first task commits to it. The second task stops, because each task's
+  workspace is still prepared from the run's base commit: committing it would
+  move the branch onto history that does not contain the first task's commit,
+  and Ralph PHP will not do that. Carrying each task's commit forward into the
+  next task's workspace is the remaining piece; until it lands, leave the
+  setting at `per-task` for a run with more than one pending task.
+
+  What the mode already refuses is worth knowing, because it is what it will go
+  on refusing: a shared branch holding a commit no pass of the project recorded,
+  or one checked out in a worktree the run does not own, stops the run before an
+  agent is started, with the branch exactly where it was.
 - **No merges, deployments or pull requests**, and no generating a task list from
   a product idea.
 - **Agent CLIs move.** The invocations were exercised against Codex 0.4x and

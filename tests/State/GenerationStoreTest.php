@@ -1149,6 +1149,27 @@ final class GenerationStoreTest extends TestCase
         self::assertSame(2, $this->generations->latestFor($snapshot->id())?->number());
     }
 
+    /**
+     * What tells a commit this package made from one somebody made by hand,
+     * which is the question a shared branch's tip has to answer before a run
+     * may continue it.
+     */
+    #[Test]
+    public function the_pass_that_produced_a_commit_is_found_by_its_sha(): void
+    {
+        $snapshot = $this->record('Add a --dry-run option');
+        $pass = $this->generations->recordCommit($this->start($snapshot), str_repeat('a', 40));
+
+        self::assertSame($pass->slug(), $this->generations->atCommit(str_repeat('a', 40))?->slug());
+        self::assertSame($pass->slug(), $this->generations->atCommit(' ' . str_repeat('a', 40) . ' ')?->slug());
+
+        // Nothing recorded it, and an abbreviation is not matched: whether a
+        // prefix is unique depends on how many objects a repository holds.
+        self::assertNull($this->generations->atCommit(str_repeat('b', 40)));
+        self::assertNull($this->generations->atCommit(str_repeat('a', 12)));
+        self::assertNull($this->generations->atCommit('   '));
+    }
+
     #[Test]
     public function a_task_with_no_passes_has_no_latest_one(): void
     {
