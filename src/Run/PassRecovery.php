@@ -10,6 +10,7 @@ use Celyes\RalphPhp\Exception\CommitException;
 use Celyes\RalphPhp\Exception\RalphException;
 use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\Exception\WorktreeException;
+use Celyes\RalphPhp\Git\BranchHistories;
 use Celyes\RalphPhp\Git\BranchNamer;
 use Celyes\RalphPhp\Git\BranchRestorer;
 use Celyes\RalphPhp\Git\CommitIdentity;
@@ -60,6 +61,20 @@ use Celyes\RalphPhp\State\GenerationStore;
  * commits are left exactly as the stopped run left them, which is what keeps
  * `ralph retry` and a person's own inspection possible afterwards.
  *
+ * **A shared branch is reconciled as a history rather than as a reference**
+ * (PROJECT.md section K, item 5). Everything above holds for the branch a pass
+ * owns alone, where the pass's commit is the only commit on it and the tip is
+ * therefore the whole evidence. In
+ * {@see \Celyes\RalphPhp\Config\BranchStrategy::Shared} mode every task of the
+ * run commits to one branch, so a pass's commit stops being the tip the moment
+ * the next task commits: the tip is read *past* the pass's commit instead of
+ * compared to it, and what makes the difference between an expected advance and
+ * an unexpected one is whether every commit in between has a row naming it
+ * ({@see BranchHistories}). A run that has moved on with its own commits is
+ * consistent; one commit nobody recorded anywhere in that range stops the pass,
+ * because the convenient answers to it — reset the branch, commit over it,
+ * force it — are the ones that lose somebody's work.
+ *
  * **The verdict is returned, not acted on.** Blocking a pass, closing a run, or
  * carrying on to the next phase are the caller's decisions: the same reading
  * means "stop here" to `ralph resume` and "this is what you are retrying over"
@@ -68,13 +83,18 @@ use Celyes\RalphPhp\State\GenerationStore;
 final class PassRecovery
 {
     /**
-     * How many commits past the base a finished pass leaves.
+     * How many commits past the base a finished pass leaves on its own branch.
      *
      * A task workspace is checked out at the run's base commit and a pass makes
      * one commit on top of it. Two means something committed that this package
      * did not, and which of them is the pass's is not a question the trailers
      * can settle — the commit that is not the pass's may be a worker's, an
      * earlier attempt's, or a person's.
+     *
+     * The count is the whole reading only while the branch is the pass's alone.
+     * A shared branch is read commit by commit instead
+     * ({@see self::withoutRecordedCommitOnShared()}), because a commit per task
+     * is what the mode is for and a total says nothing about whose each one is.
      */
     private const int COMMITS_PER_PASS = 1;
 
@@ -85,6 +105,7 @@ final class PassRecovery
         private readonly BranchNamer $namer,
         private readonly CommitReader $commits,
         private readonly BranchRestorer $restorer,
+        private readonly BranchHistories $histories,
     ) {
     }
 
@@ -110,6 +131,7 @@ final class PassRecovery
             BranchNamer::forProject($configuration),
             CommitReader::forProject($configuration, $executable, $processes),
             BranchRestorer::forProject($configuration, $executable, $processes),
+            BranchHistories::forProject($configuration, $generations, $executable, $processes),
         );
     }
 
@@ -362,6 +384,10 @@ final class PassRecovery
             return Recovery::consistent($record, $findings, $identity);
         }
 
+        if ($record->branchIsShared() && $this->commits->contains($tip, $identity->sha())) {
+            return $this->withSharedBranchPastTheCommit($record, $branch, $identity, $tip, $findings);
+        }
+
         return Recovery::blocked(
             $record,
             Blocker::raised(
@@ -391,19 +417,100 @@ final class PassRecovery
     }
 
     /**
-     * Put back a branch reference whose commit the row still records.
+     * Reconcile a pass whose shared branch has moved on past its commit.
      *
-     * The name is the pass's: the schema allows one generation per branch, so a
-     * name this row holds is a name no other row can, and a reference under it
-     * would have been read as the branch's tip rather than as nothing. What is
-     * left is the reference being created between that reading and this write,
-     * and {@see BranchRestorer} refuses that rather than forcing it — raised
-     * instead of returned, because an ownership conflict that appears inside a
-     * recovery is not a state the recovery can describe.
+     * The state a shared-branch run produces as a matter of course and a
+     * per-task run never can: the pass committed, a later task of the run
+     * committed on top, and the branch's tip is that later commit. On its own
+     * branch that reading is a refusal — the branch moved off the pass's work —
+     * and here it is the normal case, because one branch carrying a commit per
+     * task is the whole of {@see \Celyes\RalphPhp\Config\BranchStrategy::Shared}
+     * (PROJECT.md section K, item 4).
+     *
+     * What still has to be true is that the advance is this project's. Every
+     * commit between the pass's and the tip is looked up in the state store,
+     * and one that no row accounts for stops the pass: resuming would push a
+     * branch carrying work no check of this run ran against, and finalizing
+     * would tick a box for a task whose branch holds somebody else's changes.
+     * The pass's own commit is left exactly where it is either way.
      *
      * @param list<string> $findings
      *
-     * @throws BranchException when Git refused to create the reference
+     * @throws RalphException when the repository or the store cannot be asked
+     */
+    private function withSharedBranchPastTheCommit(
+        GenerationRecord $record,
+        TaskBranch $branch,
+        CommitIdentity $identity,
+        string $tip,
+        array $findings,
+    ): Recovery {
+        $history = $this->histories->beyond($identity->sha(), $tip);
+
+        if ($history->isAccountedFor()) {
+            $findings[] = sprintf(
+                '%s holds its commit %s and %s',
+                $branch->value(),
+                $identity->shortSha(),
+                $history->describe(),
+            );
+
+            return Recovery::consistent($record, $findings, $identity);
+        }
+
+        return Recovery::blocked(
+            $record,
+            Blocker::raised(
+                sprintf(
+                    '%s records commit %s on the shared branch %s, which now points at %s. %s',
+                    $record->slug(),
+                    $identity->shortSha(),
+                    $branch->value(),
+                    substr($tip, 0, CommitIdentity::SHORT_LENGTH),
+                    (string) $history->reason(),
+                ),
+                sprintf(
+                    'Nothing was changed, and the pass\'s commit is still in the repository: "git show %s". '
+                        . 'Later tasks of a shared-branch run commit to the same branch, so commits past '
+                        . 'this pass\'s are expected; commits this project did not record are not, because '
+                        . 'resuming would publish them as the run\'s work. Decide what %s should hold, then '
+                        . 'resume.',
+                    $identity->sha(),
+                    $branch->value(),
+                ),
+            ),
+            [...$findings, ...$history->details()],
+            $identity,
+        );
+    }
+
+    /**
+     * Put back a branch reference whose commit the row still records.
+     *
+     * The name is one nothing else is using: a reference under it would have
+     * been read as the branch's tip rather than as nothing, a moment ago in
+     * {@see self::withRecordedCommit()}. What is left is the reference being
+     * created between that reading and this write, and {@see BranchRestorer}
+     * refuses that rather than forcing it — raised instead of returned, because
+     * an ownership conflict that appears inside a recovery is not a state the
+     * recovery can describe.
+     *
+     * **Where the reference is put back is the whole decision**, and the two
+     * modes answer it differently. A per-task branch holds one commit, the
+     * pass's, so the pass's commit is where the branch was and where it goes
+     * again. A shared branch holds a commit per task, and re-creating it at
+     * this pass's commit would leave every later task's commit reachable from
+     * nothing — not deleted, but out of reach of `git log` and of the next run,
+     * which is the loss this class exists to avoid. So a shared branch is put
+     * back at the furthest commit the store records on it that still has this
+     * pass's in its history ({@see self::sharedRestorePoint()}), which keeps the
+     * pass's commit *and* the run's.
+     *
+     * @param list<string> $findings
+     *
+     * @throws RalphException when Git refused to create the reference, or the
+     *         repository and the store cannot be reconciled about what the
+     *         branch held
      */
     private function restoreBranch(
         GenerationRecord $record,
@@ -412,18 +519,128 @@ final class PassRecovery
         array $findings,
         ?OutputSink $sink,
     ): Recovery {
-        $this->restorer->restore($branch, $identity->sha(), $sink);
+        $point = $record->branchIsShared()
+            ? $this->sharedRestorePoint($record, $identity)
+            : ['sha' => $identity->sha(), 'by' => null, 'blocker' => null];
+
+        if ($point['blocker'] !== null) {
+            return Recovery::blocked($record, $point['blocker'], $findings, $identity);
+        }
+
+        $this->restorer->restore($branch, $point['sha'], $sink);
 
         return Recovery::reconciled(
             $record,
-            [sprintf(
-                're-created the branch %s at the recorded commit %s',
-                $branch->value(),
-                $identity->shortSha(),
-            )],
+            [$point['by'] === null
+                ? sprintf(
+                    're-created the branch %s at the recorded commit %s',
+                    $branch->value(),
+                    $identity->shortSha(),
+                )
+                : sprintf(
+                    're-created the shared branch %s at %s, the commit %s recorded, which keeps this '
+                        . 'pass\'s commit %s in its history',
+                    $branch->value(),
+                    substr($point['sha'], 0, CommitIdentity::SHORT_LENGTH),
+                    $point['by'],
+                    $identity->shortSha(),
+                )],
             $findings,
             $identity,
         );
+    }
+
+    /**
+     * The commit a deleted shared branch is re-created at.
+     *
+     * A reference that has gone takes the reachability of everything on it with
+     * it, so the later tasks' commits cannot be walked down to from the pass's:
+     * the rows are the only remaining index of them
+     * ({@see GenerationStore::committedOn()}). Each recorded commit the
+     * repository still has and that has this pass's commit in its history is a
+     * candidate, and the one that contains all the others is the tip the branch
+     * had — creating the reference there loses nothing and recovers everything.
+     *
+     * Two candidates neither of which contains the other are two histories that
+     * once shared the name, which the branch cannot hold at the same time.
+     * Refused rather than chosen between, with both quoted: picking one would
+     * put the other out of reach, and the person reading the refusal is the only
+     * one who knows which line of work they want.
+     *
+     * @return array{sha: string, by: ?string, blocker: ?Blocker}
+     *
+     * @throws RalphException when the repository or the store cannot be asked
+     */
+    private function sharedRestorePoint(GenerationRecord $record, CommitIdentity $identity): array
+    {
+        $own = ['sha' => $identity->sha(), 'by' => null, 'blocker' => null];
+        $candidates = [];
+
+        foreach ($this->generations->committedOn((string) $record->branch()) as $other) {
+            $sha = (string) $other->commitSha();
+
+            if ($sha === $identity->sha() || !$this->commits->exists($sha)) {
+                continue;
+            }
+
+            if ($this->commits->contains($sha, $identity->sha())) {
+                $candidates[$sha] = $other->slug();
+            }
+        }
+
+        if ($candidates === []) {
+            return $own;
+        }
+
+        foreach ($candidates as $sha => $slug) {
+            if ($this->containsEvery($sha, array_keys($candidates))) {
+                return ['sha' => $sha, 'by' => $slug, 'blocker' => null];
+            }
+        }
+
+        return [
+            'sha' => $identity->sha(),
+            'by' => null,
+            'blocker' => Blocker::raised(
+                sprintf(
+                    '%s records commit %s on the shared branch %s, which no longer exists, and the commits '
+                        . 'this project recorded on that branch (%s) are not one history, so where the '
+                        . 'branch stood cannot be established.',
+                    $record->slug(),
+                    $identity->shortSha(),
+                    (string) $record->branch(),
+                    implode(', ', $candidates),
+                ),
+                sprintf(
+                    'Nothing was changed and every commit is still in the repository: "git show %s" and '
+                        . '"ralph status" list them. Re-create %s yourself at the commit the run should '
+                        . 'carry on from, then resume.',
+                    $identity->sha(),
+                    (string) $record->branch(),
+                ),
+            ),
+        ];
+    }
+
+    /**
+     * Whether one commit has all of these commits in its history.
+     *
+     * A commit is its own ancestor, which is Git's answer and the one that makes
+     * the candidate itself count rather than having to be skipped.
+     *
+     * @param list<string> $commits
+     *
+     * @throws CommitException when the repository cannot be asked
+     */
+    private function containsEvery(string $within, array $commits): bool
+    {
+        foreach ($commits as $commit) {
+            if (!$this->commits->contains($within, $commit)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -458,6 +675,50 @@ final class PassRecovery
             );
 
             return Recovery::consistent($record, $findings);
+        }
+
+        // A shared branch moves on without this pass: a no-change outcome is
+        // followed by the next task's commit like any other, and the pass's
+        // evidence is contradicted by a commit of *its own*, not by the
+        // branch having a tip it did not write. So the advance past the commit
+        // the pass started from is read, and the same rule decides it as
+        // everywhere else — every commit in it belongs to a pass, or the pass
+        // stops.
+        if ($record->branchIsShared() && $this->commits->contains($tip, $record->baseSha())) {
+            $history = $this->histories->beyond($record->baseSha(), $tip);
+
+            if ($history->isAccountedFor()) {
+                $findings[] = sprintf(
+                    'it was recorded as changing nothing, and %s %s, none of them its own',
+                    $branch->value(),
+                    $history->describe(),
+                );
+
+                return Recovery::consistent($record, $findings);
+            }
+
+            return Recovery::blocked(
+                $record,
+                Blocker::raised(
+                    sprintf(
+                        '%s was recorded as leaving the task unchanged, and the shared branch it claimed, '
+                            . '%s, has moved on from %s. %s',
+                        $record->slug(),
+                        $branch->value(),
+                        substr($record->baseSha(), 0, CommitIdentity::SHORT_LENGTH),
+                        (string) $history->reason(),
+                    ),
+                    sprintf(
+                        'Nothing was changed. The commits later tasks of the run put there are expected; a '
+                            . 'commit this project did not record is not, and a no-change outcome rests on '
+                            . 'there having been nothing to commit. Inspect "git log %s" and the pass\'s '
+                            . 'satisfaction record, then retry the task if the work is wanted.',
+                        $branch->value(),
+                    ),
+                ),
+                [...$findings, ...$history->details()],
+                $this->commits->identify($tip),
+            );
         }
 
         $identity = $this->commits->identify($tip);
@@ -522,6 +783,10 @@ final class PassRecovery
             $findings[] = sprintf('%s is still at the base commit, so nothing was committed', $branch->value());
 
             return Recovery::consistent($record, $findings);
+        }
+
+        if ($record->branchIsShared()) {
+            return $this->withoutRecordedCommitOnShared($record, $branch, $tip, $findings, $sink);
         }
 
         $identity = $this->commits->identify($tip);
@@ -623,6 +888,242 @@ final class PassRecovery
             )],
             $findings,
             $identity,
+            adopted: true,
+        );
+    }
+
+    /**
+     * Reconcile a pass with no recorded commit, on the run's shared branch.
+     *
+     * The named crash of PROJECT.md section H, item 5 as it happens in the
+     * default mode. The tip is not evidence about this pass on its own here:
+     * the commits ahead of the commit the pass's workspace was made from may be
+     * the pass's own, written a moment before the process stopped, or later
+     * tasks' and already recorded, or somebody else's. So the branch is read
+     * forwards from that commit ({@see BranchHistories}), and the first commit
+     * no row accounts for is the only one that can be this pass's — a pass
+     * commits directly onto the commit it started from, so anything of its own
+     * is the first thing past it.
+     *
+     * Four readings, one of which writes:
+     *
+     *  - **The branch no longer contains the commit the pass started from.**
+     *    Somebody rewrote it, and nothing of this pass can be found on it.
+     *    Stopped.
+     *  - **Nothing unrecorded ahead of that commit.** Every commit past it
+     *    belongs to another pass, so this one committed nothing and resumes
+     *    from its recorded phase.
+     *  - **The first unrecorded commit says this pass made it**, says it was
+     *    written against the base the row records, and carries only recorded
+     *    commits on top. Adopted — the write the crash prevented is made now,
+     *    which is what turns the pass's next step into a push or a checklist
+     *    write rather than another invocation of the agent.
+     *  - **Anything else** stops the pass with nothing written: a commit
+     *    naming another task, a commit of this pass's sitting above work that
+     *    was recorded after it, or an unaccounted-for commit on top of the
+     *    pass's own.
+     *
+     * @param list<string> $findings
+     *
+     * @throws RalphException when the repository or the store cannot be asked,
+     *         or the row cannot be written
+     */
+    private function withoutRecordedCommitOnShared(
+        GenerationRecord $record,
+        TaskBranch $branch,
+        string $tip,
+        array $findings,
+        ?OutputSink $sink,
+    ): Recovery {
+        $base = $record->baseSha();
+
+        if (!$this->commits->contains($tip, $base)) {
+            return Recovery::blocked(
+                $record,
+                Blocker::raised(
+                    sprintf(
+                        '%s records no commit, and the shared branch it claimed, %s, no longer contains %s, '
+                            . 'the commit its workspace was made from.',
+                        $record->slug(),
+                        $branch->value(),
+                        substr($base, 0, CommitIdentity::SHORT_LENGTH),
+                    ),
+                    sprintf(
+                        'Nothing was changed. The branch was rewritten rather than extended, so whether '
+                            . 'this pass committed cannot be read off it. Review "git log %s" and "git '
+                            . 'reflog %s"; if the pass\'s work is gone, "ralph retry %s" implements the '
+                            . 'task again from the branch as it then stands.',
+                        $branch->value(),
+                        $branch->value(),
+                        $record->task()->value(),
+                    ),
+                ),
+                $findings,
+                $this->commits->identify($tip),
+            );
+        }
+
+        $history = $this->histories->beyond($base, $tip);
+        $candidate = $history->stranger();
+
+        if ($candidate === null) {
+            if (!$history->isAccountedFor()) {
+                return Recovery::blocked(
+                    $record,
+                    Blocker::raised(
+                        sprintf(
+                            '%s records no commit, and whether it committed to the shared branch %s cannot '
+                                . 'be established. %s',
+                            $record->slug(),
+                            $branch->value(),
+                            (string) $history->reason(),
+                        ),
+                        sprintf(
+                            'Nothing was changed. Review "git log %s..%s", then either start the branch '
+                                . 'again from the base commit or retry the task.',
+                            substr($base, 0, CommitIdentity::SHORT_LENGTH),
+                            $branch->value(),
+                        ),
+                    ),
+                    [...$findings, ...$history->details()],
+                    null,
+                );
+            }
+
+            $findings[] = sprintf(
+                '%s %s, and none of them is this pass\'s, so it had committed nothing',
+                $branch->value(),
+                $history->describe(),
+            );
+
+            return Recovery::consistent($record, $findings);
+        }
+
+        if (!$candidate->names($record->generation())) {
+            return Recovery::blocked(
+                $record,
+                Blocker::raised(
+                    sprintf(
+                        '%s records no commit, and the shared branch it claimed, %s, holds %s past %s, '
+                            . 'which %s.',
+                        $record->slug(),
+                        $branch->value(),
+                        $candidate->shortSha(),
+                        substr($base, 0, CommitIdentity::SHORT_LENGTH),
+                        $this->whose($candidate, $record),
+                    ),
+                    sprintf(
+                        'Nothing was changed. A commit is only taken on when it says in its own trailers '
+                            . 'that this pass made it, since adopting any other would publish work no check '
+                            . 'of this run ran against. Inspect it with "git log %s", then decide what the '
+                            . 'branch should hold and resume.',
+                        $branch->value(),
+                    ),
+                ),
+                [...$findings, ...$history->details()],
+                $candidate,
+            );
+        }
+
+        if (!$history->strangerIsFirst()) {
+            return Recovery::blocked(
+                $record,
+                Blocker::raised(
+                    sprintf(
+                        '%s records no commit, and %s, which says this pass made it, sits above %s that %s '
+                            . 'recorded after the commit this pass started from.',
+                        $record->slug(),
+                        $candidate->shortSha(),
+                        self::commits(count($history->passes())),
+                        implode(', ', $history->passes()),
+                    ),
+                    sprintf(
+                        'Nothing was changed. A pass commits onto the commit its own workspace was made '
+                            . 'from, so this commit was made against a branch that has since been built on '
+                            . 'and cannot be adopted as the pass\'s. Inspect "git log %s", then retry the '
+                            . 'task to implement it against the branch as it now stands.',
+                        $branch->value(),
+                    ),
+                ),
+                [...$findings, ...$history->details()],
+                $candidate,
+            );
+        }
+
+        $against = $candidate->base();
+
+        if ($against !== null && $against !== $base) {
+            return Recovery::blocked(
+                $record,
+                Blocker::raised(
+                    sprintf(
+                        '%s claimed the shared branch %s, whose commit %s says it was written against the '
+                            . 'base commit %s, and the pass records %s as its base.',
+                        $record->slug(),
+                        $branch->value(),
+                        $candidate->shortSha(),
+                        substr($against, 0, CommitIdentity::SHORT_LENGTH),
+                        substr($base, 0, CommitIdentity::SHORT_LENGTH),
+                    ),
+                    'Nothing was changed. The commit is this pass\'s but belongs to a run started from a '
+                        . 'different base, so resuming on it would publish work verified against something '
+                        . 'else. Retry the task to implement it against the recorded base.',
+                ),
+                [...$findings, ...$history->details()],
+                $candidate,
+            );
+        }
+
+        $beyond = $this->histories->beyond($candidate->sha(), $tip);
+
+        if (!$beyond->isAccountedFor()) {
+            return Recovery::blocked(
+                $record,
+                Blocker::raised(
+                    sprintf(
+                        '%s made the commit %s on the shared branch %s and stopped before recording it, '
+                            . 'and the branch has moved on since. %s',
+                        $record->slug(),
+                        $candidate->shortSha(),
+                        $branch->value(),
+                        (string) $beyond->reason(),
+                    ),
+                    sprintf(
+                        'Nothing was changed, and the pass\'s commit is intact: "git show %s". It is not '
+                            . 'taken on while work nobody recorded sits on top of it, because resuming '
+                            . 'would publish that work as the run\'s. Decide what %s should hold, then '
+                            . 'resume.',
+                        $candidate->sha(),
+                        $branch->value(),
+                    ),
+                ),
+                [...$findings, ...$beyond->details()],
+                $candidate,
+            );
+        }
+
+        // The crash of section H, item 5, on the branch of section K: the
+        // commit was made, the process stopped before the row could say so.
+        $recorded = $this->generations->recordCommit($record, $candidate->sha());
+
+        $sink?->note(sprintf(
+            'recovery: adopted the commit %s, which %s made on the shared branch and did not record',
+            $candidate->shortSha(),
+            $record->slug(),
+        ));
+
+        return Recovery::reconciled(
+            $recorded,
+            [sprintf(
+                'adopted the commit %s from %s, which the interrupted run made and did not record%s',
+                $candidate->shortSha(),
+                $branch->value(),
+                $beyond->isEmpty()
+                    ? ''
+                    : sprintf('; the branch %s', $beyond->describe()),
+            )],
+            $findings,
+            $candidate,
             adopted: true,
         );
     }

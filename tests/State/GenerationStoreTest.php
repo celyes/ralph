@@ -1170,6 +1170,45 @@ final class GenerationStoreTest extends TestCase
         self::assertNull($this->generations->atCommit('   '));
     }
 
+    /**
+     * The index a deleted shared branch leaves behind: the reference is gone,
+     * its commits are unreachable, and the rows are the only remaining record
+     * of which commits were on it (PROJECT.md section K, item 5).
+     */
+    #[Test]
+    public function the_commits_this_project_recorded_on_a_branch_are_listed_in_order(): void
+    {
+        $first = $this->generations->recordCommit(
+            $this->generations->assignBranch($this->start($this->record('Add a greeting')), 'ralph/shared', shared: true),
+            str_repeat('a', 40),
+        );
+        $second = $this->generations->recordCommit(
+            $this->generations->assignBranch($this->start($this->record('Add a farewell')), 'ralph/shared', shared: true),
+            str_repeat('b', 40),
+        );
+
+        // A pass on the branch that never committed, and a pass that committed
+        // on a branch of its own: neither is a commit this branch holds.
+        $this->generations->assignBranch($this->start($this->record('Add a usage line')), 'ralph/shared', shared: true);
+        $this->generations->recordCommit(
+            $this->generations->assignBranch($this->start($this->record('Add a version line')), 'ralph/elsewhere'),
+            str_repeat('c', 40),
+        );
+
+        $recorded = $this->generations->committedOn('ralph/shared');
+
+        self::assertSame(
+            [$first->slug(), $second->slug()],
+            array_map(static fn ($pass): string => $pass->slug(), $recorded),
+        );
+        self::assertSame(
+            [str_repeat('a', 40), str_repeat('b', 40)],
+            array_map(static fn ($pass): ?string => $pass->commitSha(), $recorded),
+        );
+        self::assertSame([], $this->generations->committedOn('ralph/nothing'));
+        self::assertSame([], $this->generations->committedOn('  '));
+    }
+
     #[Test]
     public function a_task_with_no_passes_has_no_latest_one(): void
     {

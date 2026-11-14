@@ -77,6 +77,20 @@ final class CommitReader
     private const array COUNT_COMMAND = ['rev-list', '--count', '--end-of-options'];
 
     /**
+     * Which commits one reference has that another does not, oldest first.
+     *
+     * `--reverse` is what puts them in that order, and the order is the whole
+     * reason this exists rather than being left to the caller: a shared branch
+     * is read forwards from the commit a pass started on, so that the first
+     * answer is about the commit the pass would have made and every answer
+     * after it is about what was committed on top (PROJECT.md section K,
+     * item 5).
+     *
+     * @var list<string>
+     */
+    private const array LIST_COMMAND = ['rev-list', '--reverse', '--end-of-options'];
+
+    /**
      * Git's exit status for a reference that simply is not there.
      *
      * The same distinction {@see TaskBranches} draws: with `--quiet` this case
@@ -228,6 +242,55 @@ final class CommitReader
         }
 
         return (int) $result->trimmedOutput();
+    }
+
+    /**
+     * The commits a descendant has that an ancestor does not, oldest first.
+     *
+     * The reading a shared branch needs and a task branch never did. In
+     * {@see \Celyes\RalphPhp\Config\BranchStrategy::PerTask} mode the whole
+     * question is {@see self::countBetween()}'s — one commit past the base is a
+     * finished pass and anything else is a reconciliation — because the branch
+     * is the pass's alone. A shared branch legitimately holds a commit per
+     * task, so "how many" says nothing on its own and *which ones* is the only
+     * answer worth having: the commits past a pass's own commit are the later
+     * tasks' and are expected, and a commit nothing accounts for among them is
+     * the one thing that stops a resume
+     * ({@see \Celyes\RalphPhp\Git\BranchHistories}).
+     *
+     * Every commit in the range is returned, however long it is. Bounding the
+     * reading is the caller's, because a range too long to account for is a
+     * refusal rather than a shorter answer, and a caller cannot tell the two
+     * apart from a list that was quietly cut.
+     *
+     * @return list<string> the full SHAs, in the order they were committed
+     *
+     * @throws CommitException when Git could not answer
+     */
+    public function between(string $ancestor, string $descendant): array
+    {
+        $range = sprintf('%s..%s', trim($ancestor), trim($descendant));
+        $result = $this->git->query(...[...self::LIST_COMMAND, $range]);
+
+        if (!$result->succeeded()) {
+            throw $this->unanswered(
+                sprintf('which commits %s has past %s', self::quote($descendant), self::quote($ancestor)),
+                $result,
+                'git rev-list --reverse ' . $range,
+            );
+        }
+
+        $shas = [];
+
+        foreach (explode("\n", $result->trimmedOutput()) as $line) {
+            $sha = trim($line);
+
+            if ($sha !== '') {
+                $shas[] = $sha;
+            }
+        }
+
+        return $shas;
     }
 
     /**

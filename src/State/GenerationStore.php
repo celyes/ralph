@@ -274,6 +274,42 @@ final class GenerationStore
     }
 
     /**
+     * Every commit this project recorded on a branch, oldest row first.
+     *
+     * What a shared branch's reconciliation needs when the branch itself has
+     * gone (PROJECT.md section K, item 5): a deleted reference leaves its
+     * commits in the repository and unreachable, so they cannot be walked down
+     * to from the commit a pass records. The rows are the only remaining index
+     * of them, and re-creating the reference at the furthest of them is what
+     * puts the whole run's work back within reach instead of only the pass's
+     * own ({@see \Celyes\RalphPhp\Run\PassRecovery}).
+     *
+     * Ordered by row id, which is the order they were committed: a later task
+     * of a run commits after an earlier one, and the rows are written in that
+     * order too.
+     *
+     * @return list<GenerationRecord>
+     *
+     * @throws StateException when the rows cannot be read
+     */
+    public function committedOn(string $branch): array
+    {
+        $name = trim($branch);
+
+        if ($name === '') {
+            return [];
+        }
+
+        return array_map(
+            static fn (array $row): GenerationRecord => GenerationRecord::fromRow($row),
+            $this->database->query(
+                'SELECT * FROM generations WHERE branch = ? AND commit_sha IS NOT NULL ORDER BY id',
+                [$name],
+            ),
+        );
+    }
+
+    /**
      * Every branch a generation already owns.
      *
      * @return list<string>

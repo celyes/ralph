@@ -725,7 +725,11 @@ put there is refused instead. In shared mode that refusal arrives once per run,
 before an agent is started, and a task whose workspace is no longer at the tip —
 a newer run committed to the branch, or an interrupted pass is being resumed
 after one did — is refused too, because committing there would put the commits
-in between out of reach. Review `git log`, then start a new run.
+in between out of reach. Review `git log`, then start a new run. A resume reads
+the shared branch's whole history rather than only its tip: a commit nobody
+recorded anywhere between the run's base and the tip stops the run, because it
+would otherwise be carried into every later task's workspace and published as
+the run's own work.
 
 **Only verified task-workspace changes are staged**, and never runtime data,
 Ralph PHP's own files, or anything your ignore rules cover. A build directory
@@ -901,6 +905,20 @@ continues from the phase the pass stopped in. Nothing earlier is repeated:
 
 Neither case invokes the agent again or creates a second commit.
 
+**A shared branch is reconciled as a history, not as a single reference.** Under
+the default strategy a pass's commit stops being the branch tip as soon as the
+next task commits, so a resume reads the branch *past* each pass's own commit and
+asks the state database whose every commit in between is. An advance made of
+commits this project recorded is the ordinary case and is continued; one commit
+nobody recorded, anywhere along that history, stops the resume with that commit
+named and quoted — every way of carrying on from it either loses somebody's work
+or publishes it as the run's. A crash between a commit and the database update is
+recognised the same way it is on a per-task branch, by what the commit says about
+itself in its own trailers, except that the commit is looked for where a pass
+would have put it rather than at the tip. And if the branch itself has been
+deleted, it is re-created at the furthest commit the run recorded on it, so every
+task's commit comes back within reach rather than only the one being reconciled.
+
 **Checkbox writes are protected** by source-content checks and atomic
 replacement. A concurrent edit to the task file is preserved and the conflicting
 write is blocked rather than forced.
@@ -1054,7 +1072,11 @@ Worth knowing before you rely on it.
   would leave the commits in between unreachable. Nothing is reset or
   overwritten in either case; review `git log`, then start a new run so the
   task's workspace is made from the branch tip. A run that takes on no task
-  leaves the branch exactly where it found it.
+  leaves the branch exactly where it found it. On resume the check extends to
+  the branch's whole history back to the run's base, and that reading is
+  bounded: a shared branch holding more than 500 commits past the base — one
+  somebody merged a long line of development into, say — is refused as
+  unvouchable rather than vouched for from the part of it that was read.
 - **No merges, deployments or pull requests**, and no generating a task list from
   a product idea.
 - **Agent CLIs move.** The invocations were exercised against Codex 0.4x and

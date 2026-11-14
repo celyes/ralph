@@ -54,6 +54,7 @@ final class SharedBranches
         private readonly TaskBranches $branches,
         private readonly GenerationStore $generations,
         private readonly WorktreeLayout $layout,
+        private readonly BranchHistories $histories,
     ) {
     }
 
@@ -74,6 +75,7 @@ final class SharedBranches
             TaskBranches::forProject($configuration, $executable, $processes),
             $generations,
             WorktreeLayout::forProject($configuration),
+            BranchHistories::forProject($configuration, $generations, $executable, $processes),
         );
     }
 
@@ -92,12 +94,17 @@ final class SharedBranches
      *     are where this run's commits are made.
      *  3. **At the run's base commit** — the branch exists and holds nothing
      *     the run has not already got; continued.
-     *  4. **At a commit this project recorded** — the package put it there,
-     *     whether earlier in this run or in an earlier one; continued.
+     *  4. **At a commit this project recorded, with a history of them behind
+     *     it** — the package put the tip there, whether earlier in this run or
+     *     in an earlier one, and every commit between the run's base and it has
+     *     a row naming it too ({@see BranchHistories}); continued.
      *
      * Anything else is a commit nobody wrote a row for: somebody's own work, or
      * a reference the state store has lost track of. Refused, with the tip kept
-     * so that `git log` is the whole remedy.
+     * so that `git log` is the whole remedy. The history is read as well as the
+     * tip because a resume reads a branch a stopped run left behind, and a
+     * commit added part-way along it would otherwise be carried into every
+     * later task's workspace and published as the run's own (section K, item 5).
      *
      * @throws BranchException        when the repository cannot be asked, or the
      *                                run names no shared branch at all
@@ -135,6 +142,20 @@ final class SharedBranches
         $recorded = $this->generations->atCommit($tip);
 
         if ($recorded !== null) {
+            // The tip is this project's, and so must be everything under it
+            // back to the run's base (section K, item 5). A tip alone was the
+            // whole reading while a shared branch could only grow one commit at
+            // a time under this package's own hand; it stops being enough the
+            // moment a resume is reading a branch a stopped run left behind,
+            // because a commit somebody added in the middle of that history is
+            // work the run would carry forward into every later task's
+            // workspace and publish as its own.
+            $history = $this->histories->beyond($base->sha(), $tip);
+
+            if (!$history->isAccountedFor()) {
+                return SharedBranch::unrelated($name, $history->describe(), $tip, $worktree, $established);
+            }
+
             return SharedBranch::continuing($name, $tip, $recorded->slug(), $worktree, $established);
         }
 

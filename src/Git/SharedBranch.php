@@ -25,7 +25,8 @@ namespace Celyes\RalphPhp\Git;
  *    ahead of the work would be a reference to the base commit that a stopped
  *    run left behind with nothing on it.
  *  - **Established.** The branch exists and holds either the run's base commit
- *    or a commit this project recorded. The run continues it.
+ *    or a commit this project recorded, with nothing but recorded commits
+ *    between the two. The run continues it.
  *  - **Unrelated.** The branch exists and holds something nobody recorded, or
  *    is checked out somewhere the run does not own. The run stops, with the tip
  *    kept so the user can go and look at it.

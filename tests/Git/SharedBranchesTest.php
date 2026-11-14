@@ -178,6 +178,28 @@ final class SharedBranchesTest extends TestCase
     }
 
     /**
+     * The tip alone is not the reading on resume (PROJECT.md section K, item 5):
+     * a run reads a branch a stopped run left behind, and a commit somebody
+     * added part-way along its history would otherwise be carried into every
+     * later task's workspace and published as the run's own.
+     */
+    #[Test]
+    public function a_branch_whose_history_holds_a_commit_nobody_recorded_stops_the_run(): void
+    {
+        $stranger = $this->givenACommitOn(self::SHARED);
+        $pass = $this->passFrom(self::FIRST, $stranger);
+        $this->generations->recordCommit($pass, $this->givenACommitOn(self::SHARED));
+        $before = $this->refs();
+
+        $refusal = $this->refusal();
+
+        self::assertStringContainsString('is not a branch this run may commit to', $refusal->getMessage());
+        self::assertStringContainsString('no pass recorded', $refusal->getMessage());
+        self::assertStringContainsString(substr($stranger, 0, 12), $refusal->getMessage());
+        self::assertSame($before, $this->refs());
+    }
+
+    /**
      * Git allows a branch in one worktree at a time, and the run's commits are
      * made in the task workspaces: a branch somebody has checked out elsewhere
      * could not be committed to anyway, and finding that out here costs nothing.
