@@ -447,13 +447,12 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
         self::assertSame(0, $row->carriedIterations());
 
         // And the first run's completed task was not offered to the agent
-        // again: two tasks, two branches, one commit each.
+        // again: two tasks, one pass each, and a commit each on the branch the
+        // two runs share.
         self::assertCount(1, $this->project->journal()->generations()->forTask($this->identify(self::FIRST)));
-        self::assertCount(2, $this->project->taskBranches());
-
-        foreach ($this->project->taskBranches() as $branch) {
-            self::assertCount(1, $this->project->commitsOn($branch), $branch . ' holds one commit.');
-        }
+        self::assertCount(1, $this->project->journal()->generations()->forTask($this->identify(self::SECOND)));
+        self::assertSame(['ralph/shared'], $this->project->taskBranches());
+        self::assertCount(2, $this->project->commitsOn('ralph/shared'));
     }
 
     /**

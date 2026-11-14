@@ -100,14 +100,21 @@ final class RunStop
 
     /**
      * Every pending task was taken on and every one of them passed.
+     *
+     * @param ?string $branch the one branch the run committed to, which is
+     *        what a shared-branch run leaves to review; null in per-task mode,
+     *        where there is a branch per task and naming them all here would
+     *        say less than `git branch --list` does
      */
-    public static function everythingCompleted(int $taken, string $tasksPath): self
+    public static function everythingCompleted(int $taken, string $tasksPath, ?string $branch = null): self
     {
         return self::of(
             StopKind::Finished,
             sprintf('every pending task was completed (%d task%s)', $taken, $taken === 1 ? '' : 's'),
             sprintf(
-                'Review the task branches, then add the next work to %s and run `ralph run`.',
+                $branch === null
+                    ? 'Review the task branches, then add the next work to %s and run `ralph run`.'
+                    : 'Review ' . $branch . ', then add the next work to %s and run `ralph run`.',
                 $tasksPath,
             ),
         );

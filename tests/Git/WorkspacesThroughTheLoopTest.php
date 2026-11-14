@@ -187,7 +187,11 @@ final class WorkspacesThroughTheLoopTest extends TestCase
                 FixtureStep::success(['README.md' => "An example project.\n\n## Import\n"]),
             )
             ->withTasks([self::FIRST, self::SECOND])
-            ->withConfiguration(['git' => ['branch_prefix' => 'agent/ralph-']]);
+            // Per task, because that is the mode in which a branch belongs to
+            // a task and can be named after it; the default commits a run's
+            // tasks to one branch, which has no name of the task's own to
+            // assert ({@see SharedBranchThroughTheLoopTest}).
+            ->withConfiguration(['git' => ['branch_prefix' => 'agent/ralph-', 'strategy' => 'per-task']]);
 
         $base = $this->project->headOf('HEAD');
 
@@ -528,7 +532,11 @@ final class WorkspacesThroughTheLoopTest extends TestCase
         $this->project
             ->withWorker(FixtureStep::success([self::EDITED => self::EDIT]))
             ->withTasks([self::FIRST])
-            ->withConfiguration();
+            // Per task: the refusal under test is the one a *task's* branch
+            // gets, decided from the pass's own row. A shared branch somebody
+            // else owns is refused once per run instead, before any task is
+            // taken on ({@see SharedBranchThroughTheLoopTest}).
+            ->withConfiguration(['git' => ['strategy' => 'per-task']]);
 
         // The branch the pass would name, created by hand with work on it.
         $name = (new BranchNamer())

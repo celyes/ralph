@@ -260,6 +260,43 @@ final class SharedBranchThroughTheLoopTest extends TestCase
     }
 
     /**
+     * A project that says nothing about branches gets the shared one.
+     *
+     * Section K, item 2: shared is what the package does when it is not told
+     * otherwise, so the case configures no `git` section at all and reads the
+     * mode back out of the repository and the run's row. The two cases above
+     * set the setting explicitly, which is exactly what cannot establish this.
+     */
+    #[Test]
+    public function a_project_that_configures_no_strategy_commits_to_the_shared_branch(): void
+    {
+        $this->project
+            ->withWorker(
+                FixtureStep::success([self::EDITED => self::EDIT]),
+                FixtureStep::success(['README.md' => "# Project\n\nThe import command.\n"]),
+            )
+            ->withTasks([self::FIRST, self::SECOND])
+            ->withConfiguration();
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertSame([self::SHARED], $this->project->taskBranches());
+        self::assertCount(2, $this->project->commitsOn(self::SHARED));
+
+        $run = $this->project->journal()->runs()->latest();
+        self::assertNotNull($run);
+        self::assertTrue($run->branchStrategy()->isShared());
+        self::assertSame(self::SHARED, $run->sharedBranch());
+
+        // And it is the carry-forward, not just the one name: the second task
+        // was given a workspace holding the first task's edit.
+        $second = $this->project->headOf(self::SHARED);
+        self::assertSame(self::EDIT, $this->contentOf($second, self::EDITED));
+        self::assertSame($this->parentOf($second), $this->project->headOf(self::SHARED . '~1'));
+    }
+
+    /**
      * The commit a commit sits on.
      */
     private function parentOf(string $commit): string

@@ -17,6 +17,7 @@ use Celyes\RalphPhp\Init\InitializationReport;
 use Celyes\RalphPhp\Init\InitializedPath;
 use Celyes\RalphPhp\Init\ProjectInitializer;
 use Celyes\RalphPhp\Init\Templates;
+use Celyes\RalphPhp\Tests\Support\JsonDocument;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use Celyes\RalphPhp\Tests\Support\TemporaryProject;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -95,6 +96,31 @@ final class ProjectInitializerTest extends TestCase
         self::assertSame(
             $loader->defaults($this->project->root())->toArray(),
             $loader->load($this->project->root())->toArray(),
+        );
+    }
+
+    /**
+     * Section K, item 2 in the file a user actually reads: the configuration
+     * `ralph init` writes names the shared strategy, so a project that never
+     * touches the setting is in the mode the package defaults to and can see
+     * from the file which mode that is.
+     */
+    #[Test]
+    public function the_written_configuration_names_the_shared_branch_strategy(): void
+    {
+        (new ProjectInitializer())->initialize($this->project->root());
+
+        $written = JsonDocument::parse(
+            (string) file_get_contents($this->project->path(Defaults::CONFIG_FILE)),
+        );
+
+        self::assertSame('shared', $written->string('git.strategy'));
+        // The mode is written; the branch is left for the project to choose,
+        // so the name is a present null rather than a derived spelling.
+        self::assertTrue($written->isNull('git.shared_branch'));
+
+        self::assertTrue(
+            (new ConfigurationLoader())->load($this->project->root())->git()->strategy()->isShared(),
         );
     }
 

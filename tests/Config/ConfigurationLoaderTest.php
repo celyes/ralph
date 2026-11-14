@@ -65,7 +65,7 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(['codex', 'claude'], $config->agentNames());
         self::assertSame(Defaults::BASE_REFERENCE, $config->git()->baseReference());
         self::assertSame(Defaults::BRANCH_PREFIX, $config->git()->branchPrefix());
-        self::assertSame(BranchStrategy::PerTask, $config->git()->strategy());
+        self::assertSame(BranchStrategy::Shared, $config->git()->strategy());
         // Derived from the prefix, and reported as derived: the setting is
         // absent, so the project has not chosen a name.
         self::assertSame('ralph/shared', $config->git()->sharedBranch());

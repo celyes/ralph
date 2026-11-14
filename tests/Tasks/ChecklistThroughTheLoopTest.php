@@ -178,7 +178,11 @@ final class ChecklistThroughTheLoopTest extends TestCase
         self::assertSame(LifecycleState::Completed, $after->state());
         self::assertSame($branch, $after->branch());
         self::assertSame($commit, $after->commitSha());
-        self::assertSame($commit, $this->project->headOf($branch));
+        // Its commit is still on the branch it recorded. Still *on* rather
+        // than still the tip of: the run's tasks share a branch under the
+        // default, so the new task's commit is now the tip and the finished
+        // task's is the commit beneath it.
+        self::assertTrue($this->project->branchContains($branch, $commit));
         self::assertCount(
             1,
             $this->project->journal()->generations()->forTask($after->task()),
@@ -189,15 +193,12 @@ final class ChecklistThroughTheLoopTest extends TestCase
             'The run that verified it is still the one credited with it.',
         );
 
-        // And the one genuinely new task really was done: three tasks, three
-        // branches, each with one commit, none of them a second commit for
-        // work that was already finished.
+        // And the one genuinely new task really was done: three commits, one
+        // per task, on the branch the runs share, none of them a second commit
+        // for work that was already finished.
         $branches = $this->project->taskBranches();
-        self::assertCount(3, $branches);
-
-        foreach ($branches as $name) {
-            self::assertCount(1, $this->project->commitsOn($name), $name . ' holds one commit.');
-        }
+        self::assertSame(['ralph/shared'], $branches);
+        self::assertCount(3, $this->project->commitsOn('ralph/shared'));
 
         // The ticked lines the user wrote are left as the user wrote them, and
         // the new one is ticked in the style of the line it was written on.
@@ -226,7 +227,13 @@ final class ChecklistThroughTheLoopTest extends TestCase
                 FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run, again\n"]),
             )
             ->withTasks([self::FIRST])
-            ->withConfiguration();
+            // Per task, because the guarantee under test is a per-task one:
+            // the reopened pass must not land on the branch holding the first
+            // pass's commit. Under the default both passes commit to the run's
+            // shared branch, in order, and what protects the first commit
+            // there is that nothing is reset or moved rather than that the
+            // names differ.
+            ->withConfiguration(['git' => ['strategy' => 'per-task']]);
 
         self::assertSame(ExitCode::SUCCESS, $this->project->ralph(['run'])->exitCode);
 

@@ -175,7 +175,7 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
 
         self::assertCount(1, $this->project->agent(self::ALTERNATE)->attempts());
         self::assertSame([], $this->project->agent(self::PREFERRED)->attempts());
-        self::assertSame([self::ALTERNATE_FILE], $this->filesIn($this->branchFor(self::FIRST)));
+        self::assertSame([self::ALTERNATE_FILE], $this->filesCommittedFor(self::FIRST));
 
         $overriding = $this->project->journal()->runs()->latest();
         self::assertNotNull($overriding);
@@ -197,7 +197,7 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
             'The run with no option did not go back to the configured default.',
         );
         self::assertCount(1, $this->project->agent(self::ALTERNATE)->attempts());
-        self::assertSame([self::PREFERRED_FILE], $this->filesIn($this->branchFor(self::SECOND)));
+        self::assertSame([self::PREFERRED_FILE], $this->filesCommittedFor(self::SECOND));
 
         $second = $this->project->journal()->runs()->latest();
         self::assertNotNull($second);
@@ -548,6 +548,28 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
     private function branchFor(string $description): string
     {
         return (string) $this->passFor($description)->branch();
+    }
+
+    /**
+     * The files a task's own commit added, which is the work one agent did.
+     *
+     * Read from the commit rather than from the branch it is on, because the
+     * run's tasks share a branch under the default strategy: a branch holding
+     * two tasks' files says nothing about which agent wrote which, and the
+     * commit does.
+     *
+     * @return list<string>
+     */
+    private function filesCommittedFor(string $description): array
+    {
+        $sha = $this->passFor($description)->commitSha();
+
+        if ($sha === null) {
+            return [];
+        }
+
+        return Git::run($this->project->root(), 'show', '--name-only', '--format=', $sha)
+            ->standardOutputLines();
     }
 
     /**

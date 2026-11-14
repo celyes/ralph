@@ -23,6 +23,7 @@ use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\BaseResolver;
 use Celyes\RalphPhp\Git\ControllingCheckout;
+use Celyes\RalphPhp\Git\SharedBranch;
 use Celyes\RalphPhp\Process\Interruption;
 use Celyes\RalphPhp\Process\Interruptions;
 use Celyes\RalphPhp\Process\ProcessRunner;
@@ -685,12 +686,29 @@ final class Runner
         // about this one (section G, item 3).
         $checks = $run->verification();
 
-        // Once per run, before the first task and before anything is
-        // reconciled: in shared-branch mode every task commits to one branch,
-        // so the branch is created or validated here rather than named by each
-        // task, and what was found is written to the run's row — which is what
-        // makes a resume continue on the branch holding the commits rather than
-        // on the branch today's settings would name (section K, item 3).
+        // A resume's first act, before a budget is measured or an agent is
+        // invoked: what the interrupted run left in the repository is put back
+        // in step with what its rows say (section H, item 5).
+        //
+        // Ahead of the shared branch being established, and that order is the
+        // whole of what makes the named crash of item 5 recoverable in the
+        // default mode. A pass that committed and stopped before its row could
+        // say so leaves the shared branch at a commit no row names, which is
+        // exactly what {@see \Celyes\RalphPhp\Git\SharedBranches::establish()}
+        // reads as somebody else's work. Reconciling first is what writes the
+        // SHA into that row, so the branch is a branch this project recorded by
+        // the time it is judged. Nothing here needs the branch: a pass is
+        // reconciled against the branch its own row claimed.
+        $recoveries = $intent->continuesARun()
+            ? $this->reconcile($journal, $workbench, $tasks)
+            : [];
+
+        // Once per run and before the first task: in shared-branch mode every
+        // task commits to one branch, so the branch is created or validated
+        // here rather than named by each task, and what was found is written to
+        // the run's row — which is what makes a resume continue on the branch
+        // holding the commits rather than on the branch today's settings would
+        // name (section K, item 3).
         //
         // Null in per-task mode, where a branch belongs to a pass and
         // {@see TaskPass} resolves it from the task's own row.
@@ -706,13 +724,6 @@ final class Runner
             // row through `ralph status --json`.
             $this->terminal?->line($this->style()->muted(sprintf('branch %s', $shared->describe())));
         }
-
-        // A resume's first act, before a budget is measured or an agent is
-        // invoked: what the interrupted run left in the repository is put back
-        // in step with what its rows say (section H, item 5).
-        $recoveries = $intent->continuesARun()
-            ? $this->reconcile($journal, $workbench, $tasks)
-            : [];
 
         $unreconciled = $this->unreconciled($recoveries);
 
@@ -850,7 +861,7 @@ final class Runner
             }
         }
 
-        $stopped ??= $this->whyItEnded($tasks, $results);
+        $stopped ??= $this->whyItEnded($tasks, $results, $shared);
         $run = $this->endOfRun($journal, $run, $stopped);
 
         $report = RunReport::of($run, $agent, $base, $tasks, $results, $stopped, $drift);
@@ -1173,8 +1184,11 @@ final class Runner
      * limit it was measured against.
      *
      * @param list<TaskResult> $results
+     * @param ?SharedBranch    $shared the branch a shared-branch run
+     *        established, so a finished run can say which branch to review;
+     *        null in per-task mode
      */
-    private function whyItEnded(TaskList $tasks, array $results): RunStop
+    private function whyItEnded(TaskList $tasks, array $results, ?SharedBranch $shared = null): RunStop
     {
         if ($tasks->isEmpty()) {
             return RunStop::noTasks($this->configuration->tasksPath());
@@ -1190,7 +1204,11 @@ final class Runner
         ));
 
         if ($unfinished === []) {
-            return RunStop::everythingCompleted(count($results), $this->configuration->tasksPath());
+            return RunStop::everythingCompleted(
+                count($results),
+                $this->configuration->tasksPath(),
+                $shared?->value(),
+            );
         }
 
         return RunStop::unfinished(

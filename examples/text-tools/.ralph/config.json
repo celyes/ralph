@@ -45,6 +45,8 @@
     "git": {
         "base": "HEAD",
         "branch_prefix": "ralph/",
+        "strategy": "shared",
+        "shared_branch": null,
         "push": {
             "enabled": false,
             "remote": "origin"

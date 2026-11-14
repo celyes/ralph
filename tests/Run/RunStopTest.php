@@ -370,6 +370,11 @@ final class RunStopTest extends TestCase
         self::assertStringContainsString('every pending task was completed (3 tasks)', $done->reason());
         self::assertStringContainsString('Review the task branches', $done->nextAction());
 
+        // A shared-branch run leaves one branch to review, so it is named
+        // rather than described in the plural.
+        $shared = RunStop::everythingCompleted(3, '.ralph/tasks.md', 'ralph/shared');
+        self::assertStringContainsString('Review ralph/shared, then add the next work', $shared->nextAction());
+
         self::assertFalse($empty->needsAttention());
         self::assertFalse($checked->needsAttention());
         self::assertFalse($done->needsAttention());

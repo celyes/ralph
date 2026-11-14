@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Support;
 
 use Celyes\RalphPhp\Agent\BuiltInAdapters;
+use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Run\Journal;
@@ -560,6 +561,18 @@ final class LoopProject
     }
 
     /**
+     * The settings as the commands load them, file and defaults together.
+     *
+     * For a case that has to name something the configuration decides — the
+     * branch a pass will take, say — with the package's own reading rather than
+     * with a spelling the case guessed.
+     */
+    public function configuration(): Configuration
+    {
+        return (new ConfigurationLoader())->load($this->root());
+    }
+
+    /**
      * The state store, as the commands read it.
      *
      * @throws RuntimeException when the project has no state store
@@ -623,6 +636,18 @@ final class LoopProject
         $log = Git::tryRun($this->root(), 'log', '--format=%s', 'HEAD..' . $branch);
 
         return $log->exitCode === 0 ? $log->standardOutputLines() : [];
+    }
+
+    /**
+     * Whether a branch's history holds a commit.
+     *
+     * Not the same question as {@see headOf()}, and the one to ask of a branch
+     * a run's tasks share: a commit that is no longer the tip is still the
+     * commit of the task that made it.
+     */
+    public function branchContains(string $branch, string $sha): bool
+    {
+        return Git::tryRun($this->root(), 'merge-base', '--is-ancestor', $sha, $branch)->exitCode === 0;
     }
 
     /**

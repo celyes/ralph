@@ -204,7 +204,7 @@ final class BranchNamerTest extends TestCase
     #[Test]
     public function a_prefix_is_taken_from_the_project_configuration(): void
     {
-        $namer = BranchNamer::forProject($this->configuration('feature/ralph-'));
+        $namer = BranchNamer::forProject($this->configuration('feature/ralph-', 'per-task'));
 
         self::assertSame('feature/ralph-', $namer->prefix());
         self::assertStringStartsWith('feature/ralph-TASK-', $namer->nameFor($this->generation())->value());

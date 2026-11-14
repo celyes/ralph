@@ -258,7 +258,8 @@ final class RunCommandTest extends TestCase
         // when the reader went away.
         self::assertSame(2, $this->project->journal()->tasks()->verified()->count(), $result->describe());
         self::assertStringNotContainsString('- [ ] ', $this->project->checklist());
-        self::assertCount(2, $this->project->taskBranches());
+        self::assertSame(['ralph/shared'], $this->project->taskBranches());
+        self::assertCount(2, $this->project->commitsOn('ralph/shared'));
 
         $run = $this->project->journal()->runs()->latest();
         self::assertNotNull($run);

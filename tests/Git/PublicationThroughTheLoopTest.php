@@ -398,10 +398,16 @@ final class PublicationThroughTheLoopTest extends TestCase
      * The branch a first pass at a task will take, named with the package's own
      * namer so that a case is about the collision rather than about guessing a
      * spelling.
+     *
+     * Read through the project's configuration rather than from a bare namer,
+     * because the name the pass takes is the strategy's answer: the shared
+     * branch under the default, and a branch named after the task under
+     * `git.strategy: "per-task"`. Every case here runs one task, so which it is
+     * changes the spelling and nothing about the push.
      */
     private function branchFor(string $description): string
     {
-        return (new BranchNamer())
+        return BranchNamer::forProject($this->project->configuration())
             ->nameFor(TaskGeneration::first($this->identify($description)), $description)
             ->value();
     }

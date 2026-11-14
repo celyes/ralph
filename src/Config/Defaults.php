@@ -108,14 +108,21 @@ final class Defaults
     /**
      * How a run distributes its task commits across branches.
      *
-     * Per task, which is the behaviour every release before shared-branch mode
-     * existed had, and the conservative one: a pass that owns its own branch
-     * cannot put a commit on history another task is building on, and a task
-     * that fails leaves nothing behind for the next one to read.
+     * Shared, because a checklist is usually one piece of work split up rather
+     * than a bag of unrelated errands: the second task wants to see what the
+     * first one did, and under the per-task mode it cannot, because its
+     * workspace is made from the run's base commit. One branch also leaves one
+     * history to review instead of a branch per ticked box.
+     *
+     * The cost is the one the mode's refusals are about: tasks of a run share a
+     * branch, so a task building on a mistake the task before it made inherits
+     * it. Projects whose checklist items really are independent — and anyone
+     * who wants each task reviewable, revertable and mergeable on its own — set
+     * `git.strategy` to {@see BranchStrategy::PerTask}.
      *
      * @see BranchStrategy for what the two modes are for
      */
-    public const string BRANCH_STRATEGY = BranchStrategy::PerTask->value;
+    public const string BRANCH_STRATEGY = BranchStrategy::Shared->value;
 
     /**
      * Branch a shared-branch run commits to: derived, not fixed.

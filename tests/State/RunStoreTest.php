@@ -427,11 +427,19 @@ final class RunStoreTest extends TestCase
     {
         $run = $this->runs->open($this->agent(), $this->configuration());
 
-        self::assertSame(BranchStrategy::PerTask, $run->branchStrategy());
-        self::assertSame('per-task', $run->toArray()['branch_strategy']);
+        // The default, which is the shared branch derived from the prefix.
+        self::assertSame(BranchStrategy::Shared, $run->branchStrategy());
+        self::assertSame('shared', $run->toArray()['branch_strategy']);
+        self::assertSame('ralph/shared', $run->sharedBranch());
+        self::assertSame('ralph/shared', $run->toArray()['shared_branch']);
+
+        $perTask = $this->runs->open($this->agent(), $this->configuration(['strategy' => 'per-task']));
+
+        self::assertSame(BranchStrategy::PerTask, $perTask->branchStrategy());
+        self::assertSame('per-task', $perTask->toArray()['branch_strategy']);
         // No one branch to name in per-task mode, so none is reported.
-        self::assertNull($run->sharedBranch());
-        self::assertNull($run->toArray()['shared_branch']);
+        self::assertNull($perTask->sharedBranch());
+        self::assertNull($perTask->toArray()['shared_branch']);
 
         $shared = $this->runs->open($this->agent(), $this->configuration([
             'strategy' => 'shared',

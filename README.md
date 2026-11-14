@@ -18,7 +18,7 @@
 You keep a Markdown checklist of tasks. Ralph PHP works through it one task at a
 time. For each task it opens an isolated Git worktree, hands the task to a
 coding agent — Codex or Claude Code — runs your verification commands itself,
-commits what passed on a branch of its own, and only then ticks the box. When
+commits what passed to the run's branch, and only then ticks the box. When
 something needs a person, it stops and says so.
 
 **The loop owns the work; the agent only implements it.** Task selection, state,
@@ -40,10 +40,10 @@ through six phases, and the run names each one as it enters it:
 
 | Phase | What happens | Who does the work |
 | --- | --- | --- |
-| **preparing** | A worktree and a branch are created for the task off the base commit, and the briefing is assembled: the task, your context file, and notes from earlier attempts. | Ralph PHP |
+| **preparing** | A worktree is created for the task — off the run's branch by default, off the base commit under `per-task` — and the briefing is assembled: the task, your context file, and notes from earlier attempts. | Ralph PHP |
 | **executing** | The agent is started in that worktree with the briefing on its standard input. Its output is streamed to your terminal and to the task's log. | the agent |
 | **verifying** | Your `checks` commands are run in the worktree. Each command's output, exit code and duration are recorded. | Ralph PHP |
-| **committing** | The worktree's changes are staged and committed on the task branch, with the task identifier in the commit trailers. | Ralph PHP |
+| **committing** | The worktree's changes are staged and committed on the run's branch, with the task identifier in the commit trailers. | Ralph PHP |
 | **publishing** | The branch is pushed to your remote, if you enabled pushing. Skipped otherwise. | Ralph PHP |
 | **finalizing** | The task's checkbox is ticked in `.ralph/tasks.md`. | Ralph PHP |
 
@@ -73,7 +73,7 @@ run](#bailing-out-of-a-run).
 | --- | --- |
 | **task** | One top-level `- [ ]` item in `.ralph/tasks.md`. Identified by a hash of its description, like `TASK-19E0214A`. |
 | **run** | One invocation of `ralph run`, processing tasks until they run out or a limit stops it. |
-| **pass** | One go at a single task, with its own branch and worktree. Unticking a completed task starts a second pass, whose names carry a `-g2` suffix. Also called a *generation*. |
+| **pass** | One go at a single task, with its own worktree and a commit of its own. Unticking a completed task starts a second pass, whose names carry a `-g2` suffix. Also called a *generation*. |
 | **attempt** | One invocation of the agent inside a pass. Failed checks buy another attempt; they do not start a new pass. |
 | **check** | One verification command from `checks`, run by Ralph PHP in the task's worktree, never by the agent. |
 | **workspace** | The linked Git worktree a pass works in, under `.ralph/runtime/worktrees/`. Your own checkout is never worked in. |
@@ -103,6 +103,7 @@ $ ralph run
 run-20261111-222204-dcc43e: codex (adapter "codex", selected by the project configuration), processing pending tasks
 base HEAD (4f2a1c90b3d7)
 checks: tests (frozen aebd852638df)
+branch ralph/shared (new)
 
 [1/1] TASK-19E0214A Add a --dry-run option to the import command
 --- workspace TASK-19E0214A in .ralph/runtime/worktrees/TASK-19E0214A, from HEAD (4f2a1c90b3d7) (created by this run)
@@ -117,10 +118,10 @@ checks: tests (frozen aebd852638df)
 --- commit: 9c3b7e1a2f40 TASK-19E0214A: Add a --dry-run option to the import command
 --- completed: verified and committed
 ---   checklist: .ralph/tasks.md line 3, now checked
-TASK-19E0214A completed: verified and committed (9c3b7e1a on ralph/TASK-19E0214A-add-a-dry-run-option)
+TASK-19E0214A completed: verified and committed (9c3b7e1a on ralph/shared)
 
 run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — every pending task was completed (1 task)
-  next: Review the task branches, then add the next work to .ralph/tasks.md and run `ralph run`.
+  next: Review ralph/shared, then add the next work to .ralph/tasks.md and run `ralph run`.
 ```
 
 ## Contents
@@ -266,7 +267,7 @@ composer install
 ralph init          # keeps the three .ralph/ files the example ships
 git commit -am "Ignore Ralph PHP runtime data"   # init edited .gitignore
 ralph preflight
-ralph run           # three tasks, three branches, three commits
+ralph run           # three tasks, three commits, one branch
 ```
 
 [`examples/README.md`](examples/README.md) walks through it: what the three
@@ -280,8 +281,8 @@ commits, the verification output, the elapsed time, and what a person had to do
 — three interventions the first time, none the second.
 
 The example has to be its own repository because each task is implemented in a
-linked worktree on a branch off the base commit — run it inside this checkout
-and those branches would be made here.
+linked worktree and committed to a branch the run creates — run it inside this
+checkout and that branch and those commits would be made here.
 
 ## Commands
 
@@ -381,7 +382,8 @@ taken on.
 For a task that is *interrupted*, use `resume` instead — it finishes the pass
 from where it stopped rather than attempting it again. For a task that was
 checked off, untick the item and run `ralph run`: the work is taken on as a new
-pass with its own branch, and the finished one keeps its commit and evidence.
+pass with a commit of its own, and the finished one keeps its commit and
+evidence.
 
 ### `ralph help [COMMAND]`, `ralph version`
 
@@ -429,9 +431,11 @@ are one task. A repeated description is an error rather than work done twice.
 
 **What makes a task work well here:** it describes one change small enough to
 verify on its own; it says how the change is verified, not only what it should
-do; it names the files or areas involved when you know them; and it stands on
-its own, because this release does not build one task on top of another task's
-unmerged branch.
+do; and it names the files or areas involved when you know them. Under the
+default `git.strategy` the tasks of one run are committed to one branch in
+order, so a later task is given a workspace holding what the earlier ones
+committed and may build on it. Under `per-task` it may not: every task starts
+from the base commit, so each has to stand on its own.
 
 Avoid editing the file while a run is in progress. The runner rewrites the
 checkbox of the task it finishes, and it will notice a task that changed under
@@ -461,7 +465,7 @@ any work starts.
   "git": {
     "base": "HEAD",
     "branch_prefix": "ralph/",
-    "strategy": "per-task",
+    "strategy": "shared",
     "shared_branch": null,
     "push": {"enabled": false, "remote": "origin"}
   },
@@ -491,9 +495,9 @@ any work starts.
 | `workspace.copy[]` | `[]` | files copied in from your checkout, such as a local `.env` |
 | `git.base` | `HEAD` | commit task branches start from |
 | `git.branch_prefix` | `ralph/` | prefix for generated branch names |
-| `git.strategy` | `per-task` | `per-task` gives every task its own branch; `shared` commits every task of a run to one branch |
-| `git.shared_branch` | `null` | the branch `shared` commits to; `null` derives `<branch_prefix>shared` |
-| `git.push.enabled` | `false` | whether to push task branches |
+| `git.strategy` | `shared` | `shared` commits every task of a run to one branch, in order; `per-task` gives every task its own branch |
+| `git.shared_branch` | `null` | the branch `shared` commits to; `null` derives `<branch_prefix>shared`, so `ralph/shared` |
+| `git.push.enabled` | `false` | whether to push the branch a task committed to |
 | `git.push.remote` | `origin` | remote to push to |
 | `limits.*` | see above | see [Limits](#limits) |
 
@@ -694,13 +698,34 @@ for.
 A copied file is never staged, so a credential listed there reaches the agent
 without reaching the branch.
 
-**Each task gets its own branch**, `<prefix><TASK-ID>-<description-slug>`, for
-example `ralph/TASK-19E0214A-add-a-dry-run-option`. A task reopened after being
+**`git.strategy` decides which branch a task's commit lands on**, and there are
+two answers.
+
+`shared`, the default, commits every task of a run to one branch —
+`git.shared_branch`, or `<prefix>shared` when you name none, so `ralph/shared`.
+The branch is established once per run, before the first task: created if it is
+missing, validated if it is there, and recorded against the run so a resume
+continues on it. Each task is then given a workspace made from the branch tip as
+it stood when the task was taken on, so a later task sees what the earlier ones
+committed, and each task keeps a commit of its own. One branch and one history
+to review, and `git log --format='%s%n%b' HEAD..ralph/shared` says which commit
+belongs to which task.
+
+`per-task` gives every task a branch of its own,
+`<prefix><TASK-ID>-<description-slug>` — for example
+`ralph/TASK-19E0214A-add-a-dry-run-option`. A task reopened after being
 completed takes a `-g2` suffix on the identifier —
 `ralph/TASK-19E0214A-g2-add-a-dry-run-option` — so two passes at one task can
-never name the same branch. Ownership is recorded, so a
-resume knows the branch is its own; a branch that belongs to unrelated work is
-refused rather than reset or overwritten.
+never name the same branch. Every task starts from the base commit, so none can
+see another's work and each is reviewable, revertable and mergeable alone.
+
+Either way **ownership is recorded, and nothing is reset or overwritten.** A
+resume knows the branch is its own; a branch holding work this project did not
+put there is refused instead. In shared mode that refusal arrives once per run,
+before an agent is started, and a task whose workspace is no longer at the tip —
+a newer run committed to the branch, or an interrupted pass is being resumed
+after one did — is refused too, because committing there would put the commits
+in between out of reach. Review `git log`, then start a new run.
 
 **Only verified task-workspace changes are staged**, and never runtime data,
 Ralph PHP's own files, or anything your ignore rules cover. A build directory
@@ -724,8 +749,9 @@ Those are queryable with the tools you already have — `git log
 travel with the commit into every clone, which the state database does not. Only
 the agent's *name* is written, never its settings.
 
-**Pushing is opt-in.** With `git.push.enabled` true, each task branch is pushed
-to `git.push.remote` after its commit. A rejected push keeps the local commit
+**Pushing is opt-in.** With `git.push.enabled` true, the branch a task committed
+to is pushed to `git.push.remote` after its commit — the run's shared branch
+once per task under the default, each task's own branch under `per-task`. A rejected push keeps the local commit
 and records the publication as outstanding; `ralph resume` retries the push
 alone, without re-running the agent or making a second commit.
 
@@ -1001,7 +1027,7 @@ safe to run.
 | Exit 75, "waiting for a person" | The agent asked a question, or ownership of a branch or change was ambiguous. | Read the last line of output and `ralph logs TASK-ID`. Resolve the question — usually by rewriting the task to answer it — then `ralph retry TASK-ID`. |
 | Exit 130 | The run was interrupted. The work is preserved. | `ralph resume`. It continues from the phase the task stopped in and never repeats earlier phases. |
 | Exit 124 | A configured limit stopped the run while tasks remained. | Nothing is wrong. Run `ralph run` again, or raise `limits.iterations` / `limits.run_timeout`. |
-| A branch was refused as unrelated work | A branch with the name this pass would use already exists and is not recorded as the run's. | Rename or delete that branch, or change `git.branch_prefix`. Ralph PHP will not reset a branch it does not own. |
+| A branch was refused as unrelated work | A branch the run would commit to already exists and holds a commit this project did not record. | Rename or delete that branch, or name another with `git.shared_branch` (or change `git.branch_prefix` under `per-task`). Ralph PHP will not reset a branch it does not own. |
 | A push was rejected, but the commit is there | Publication is recorded as outstanding and the local commit is kept. | Fix the remote side — usually a pull or a force-push decision of your own — then `ralph resume`, which retries only the push. |
 | Checks pass in your checkout but fail in the worktree | A fresh worktree has your tracked files and nothing else: no `vendor/`, no `.env`, no build output. | Put the commands that make a worktree usable in `workspace.prepare` (`composer install`), and files no commit carries in `workspace.copy`. |
 | The run pauses saying a task changed | The task file was edited while the run was working on it. | Leave `.ralph/tasks.md` alone during a run. Reconcile the edit, then run again. |
@@ -1014,31 +1040,21 @@ Worth knowing before you rely on it.
 - **Review every commit.** Checks and commits are evidence for review, not proof
   that a natural-language requirement was satisfied. Nothing here merges
   anything.
-- **One task at a time.** No parallel execution. Under the default `per-task`
-  strategy tasks are assumed independent: a task is not built on top of another
-  task's unmerged branch. `git.strategy: "shared"` is the exception, and the
-  only one — within a single run, each task is built on the commits the tasks
-  before it made on the shared branch.
-- **`git.strategy: "shared"` commits a run's tasks to one branch, in order.**
-  The branch is established once per run — created if it is missing, validated
-  if it is there, and recorded against the run so a resume continues on it — and
-  every task of the run commits to it, keeping a commit of its own. Each task's
-  workspace is made from the branch tip as it stood when the task was taken on,
-  so a later task sees what the earlier ones committed and can build on it. A
-  run that takes on no task leaves the branch exactly where it found it.
-
-  What the mode refuses is worth knowing. A shared branch holding a commit no
-  pass of the project recorded, or one checked out in a worktree the run does
+- **One task at a time.** No parallel execution. Under the default
+  `git.strategy: "shared"` the tasks of one run are carried out in order on one
+  branch, so a later task can build on what the earlier ones committed — and
+  inherits their mistakes just as readily. Under `per-task` tasks are assumed
+  independent: each starts from the base commit, and no task is built on top of
+  another task's unmerged branch.
+- **The shared branch is refused rather than moved.** A branch holding a commit
+  no pass of the project recorded, or one checked out in a worktree the run does
   not own, stops the run before an agent is started. So does a pass whose
   workspace is no longer at the tip — a newer run committed to the branch, or an
   interrupted pass is being resumed after one did — because committing there
   would leave the commits in between unreachable. Nothing is reset or
-  overwritten in either case; start a new run so the task's workspace is made
-  from the branch tip.
-
-  Worktree cleanup is not yet part of finalization in either strategy, so a
-  completed task's worktree stays under `.ralph/runtime/worktrees/` until you
-  remove it.
+  overwritten in either case; review `git log`, then start a new run so the
+  task's workspace is made from the branch tip. A run that takes on no task
+  leaves the branch exactly where it found it.
 - **No merges, deployments or pull requests**, and no generating a task list from
   a product idea.
 - **Agent CLIs move.** The invocations were exercised against Codex 0.4x and

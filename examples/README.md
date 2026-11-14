@@ -100,23 +100,26 @@ ralph run
 ```
 
 Each task is done in its own linked worktree under `.ralph/runtime/worktrees/`,
-on its own branch off `HEAD`. The agent's output is streamed as it arrives and
-kept in `.ralph/runtime/logs/TASK-ID/`.
+and all three commit to one branch, `ralph/shared`, in checklist order — the
+default `git.strategy` the example's configuration spells out. The agent's
+output is streamed as it arrives and kept in `.ralph/runtime/logs/TASK-ID/`.
 
 ## What you should see afterwards
 
 ```bash
-ralph status                 # three completed tasks, with their branches and commits
-git branch --list 'ralph/*'  # one branch per task
-git show ralph/TASK-44AEB58A-add-a-maximum-length-to-the-slug-generator
+ralph status                 # three completed tasks, with their branch and commits
+git branch --list 'ralph/*'  # one branch for the run
+git log --oneline HEAD..ralph/shared   # one commit per task, in checklist order
+git show ralph/shared        # the last task's commit
 git diff -- .ralph/tasks.md  # the three checkboxes the runner ticked
 ralph logs TASK-44AEB58A     # the agent's output and the verification output
 ```
 
 Three things are worth looking at specifically:
 
-- **The branches are separate and nothing is merged.** Reviewing and merging is
-  yours to do; this release does not do either.
+- **The branch is yours to review and nothing is merged.** One commit per task,
+  each naming its task in its trailers (`git log --format='%s%n%b'`), and
+  merging is yours to do: this release does not do it.
 - **The ticks are in your checkout, uncommitted.** Ralph PHP writes the
   checkbox of a task that passed and commits nothing in your own checkout. (The
   example tracks `.ralph/tasks.md` on purpose, with a negated ignore rule, so
@@ -130,7 +133,7 @@ Throw the copy away and start from step 1. Within one copy:
 
 ```bash
 git checkout -- .ralph/tasks.md                     # untick the boxes
-# drop the task branches:
+# drop the run's branch (and any other under the prefix):
 git branch --list 'ralph/*' --format='%(refname:short)' | xargs -r git branch -D
 rm -rf .ralph/runtime                               # drop state, logs and worktrees
 git worktree prune
@@ -147,9 +150,10 @@ the point here and is not what you want in a real project.
 | Make Excerpt cut on a word boundary instead of mid-word | `src/Excerpt.php`, `tests/ExcerptTest.php` |
 | Add a ReadingTime class that estimates how long a text takes to read | new `src/ReadingTime.php`, new test |
 
-Each is small, verifiable by `composer test` alone, and touches its own files —
-which is what this release needs, because every branch starts from the base
-commit and no task can build on another's unmerged work.
+Each is small, verifiable by `composer test` alone, and touches its own files.
+They would work under `git.strategy: "per-task"` too, where every branch starts
+from the base commit and no task can see another's work; under the default they
+run in order on one branch, so a later task *could* build on an earlier one.
 
 They are also written the way the README asks you to write a task: one change
 per item, with the acceptance criteria as indented bullets under it. Read

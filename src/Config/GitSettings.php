@@ -53,10 +53,10 @@ final class GitSettings
      * Already validated by the time a run can read it
      * ({@see ConfigurationValidator}), so an unparseable value here would mean
      * the settings were assembled in code rather than loaded from a file. It
-     * falls back to the default rather than raising: this accessor is read on
-     * the way to naming a branch, and the default is the conservative mode —
-     * a pass that owns its own branch cannot land a commit on work another task
-     * is using.
+     * falls back to {@see Defaults::BRANCH_STRATEGY} rather than raising: this
+     * accessor is read on the way to naming a branch, and a project that said
+     * nothing readable about the mode is in the mode a project that said
+     * nothing at all is in.
      */
     public function strategy(): BranchStrategy
     {

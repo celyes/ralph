@@ -358,9 +358,14 @@ final class RunnerTest extends TestCase
         self::assertSame(Completion::UserCompleted, $imported->completion());
         self::assertSame([], $journal->generations()->forTask($imported->id()));
 
-        // Two commits, one per task, each on its own branch.
-        self::assertNotSame($report->results()[0]->branch(), $report->results()[1]->branch());
+        // Two commits, one per task, on the one branch the run shares — and in
+        // the order the file lists them, the second built on the first.
+        self::assertSame($report->results()[0]->branch(), $report->results()[1]->branch());
         self::assertNotSame($report->results()[0]->commitSha(), $report->results()[1]->commitSha());
+        self::assertSame(
+            $report->results()[0]->commitSha(),
+            $this->parentOf((string) $report->results()[1]->commitSha()),
+        );
     }
 
     /**
@@ -1976,7 +1981,13 @@ final class RunnerTest extends TestCase
         $this->givenTasks([self::FIRST]);
         $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
 
-        $first = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'));
+        // Per task: the refusal under test belongs to the pass, which carries
+        // it from phase to phase. A shared branch somebody has committed to is
+        // refused once per run instead, before a task is taken on, so the run
+        // would stop before reaching the publication this case is about.
+        $perTask = array_replace_recursive($this->pushingTo('origin'), ['git' => ['strategy' => 'per-task']]);
+
+        $first = $this->loopOver(ScriptedVerifier::passing(), $perTask);
         $failed = $first->results()[0];
         $branch = (string) $failed->branch();
 
@@ -1994,7 +2005,7 @@ final class RunnerTest extends TestCase
         Git::run($worktree, 'add', 'NOTES.md');
         Git::commit($worktree, 'Somebody looks at the work and adds to it');
 
-        $report = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'));
+        $report = $this->loopOver(ScriptedVerifier::passing(), $perTask);
         $result = $report->results()[0];
 
         self::assertFalse($result->wasChecked());
@@ -2793,6 +2804,14 @@ final class RunnerTest extends TestCase
         $lines = array_filter(array_map('trim', explode("\n", $result->standardOutput)));
 
         return array_values($lines);
+    }
+
+    /**
+     * The commit a commit was made on top of.
+     */
+    private function parentOf(string $sha): string
+    {
+        return trim(Git::run($this->project->root(), 'rev-parse', $sha . '^')->standardOutput);
     }
 
     /**
