@@ -42,10 +42,13 @@ namespace Celyes\RalphPhp\State;
  * Two invariants are enforced by partial unique indexes rather than by
  * application code, because they are the ones whose violation destroys work:
  *
- * - **One branch, one generation.** A branch name appears on at most one
- *   generation, which is the storage half of the promise that reopening a
- *   finished task gets a separately owned branch and can never reset the branch
- *   the earlier pass left behind.
+ * - **One branch, one generation — unless the branch is the run's.** A branch
+ *   a pass owns alone appears on at most one generation, which is the storage
+ *   half of the promise that reopening a finished task gets a separately owned
+ *   branch and can never reset the branch the earlier pass left behind. A
+ *   shared branch is marked as such on the row and excluded from the index,
+ *   because every task of a shared-branch run commits to it
+ *   ({@see self::sharedBranchPasses()}).
  * - **One open pass per task.** A task has at most one generation in a state it
  *   can be continued from. This is the invariant `GenerationHistory` refuses to
  *   guess at; if two rows could claim to be the current pass, a run would have
@@ -65,7 +68,7 @@ final class Migrations
      */
     public static function all(): array
     {
-        return [self::initial(), self::stopAction(), self::sharedBranch()];
+        return [self::initial(), self::stopAction(), self::sharedBranch(), self::sharedBranchPasses()];
     }
 
     /**
@@ -143,19 +146,57 @@ final class Migrations
      * what such a run's own configuration snapshot names, which is the honest
      * answer for a row that predates the column.
      *
-     * The `generations_branch` unique index is deliberately left as it is. One
-     * branch still belongs to one generation, because in shared-branch mode
-     * only the pass that creates the branch records it until the carry-forward
-     * of section K, item 4 exists; a run whose second task would have to share
-     * the row is stopped before it commits
-     * ({@see \Celyes\RalphPhp\Git\SharedBranches::forPass()}), and relaxing the
-     * index before then would remove the protection per-task mode depends on
-     * while buying nothing.
+     * The `generations_branch` unique index was left as it was by this
+     * migration, because at the time only the pass that created the shared
+     * branch could record it; {@see self::sharedBranchPasses()} is where the
+     * carry-forward of section K, item 4 relaxes it, and why.
      */
     private static function sharedBranch(): Migration
     {
         return new Migration(3, 'the branch a shared-branch run established', [
             'ALTER TABLE runs ADD COLUMN shared_branch TEXT',
+        ]);
+    }
+
+    /**
+     * Version 4: several passes of one run on one shared branch.
+     *
+     * PROJECT.md section K, item 4 asks for a shared-branch run's tasks to
+     * carry each other's work forward while every task keeps a commit of its
+     * own. That makes the `generations_branch` unique index false: the branch
+     * is the *run's*, and each task of the run records it as the branch holding
+     * its commit.
+     *
+     * The index is not simply dropped, because the invariant it enforces is
+     * still the thing that stops a reopened task from resetting the branch an
+     * earlier pass left behind in per-task mode (section F, item 4). So the row
+     * says which kind of branch it holds, and the index excludes the shared
+     * ones:
+     *
+     *  - `branch_shared = 0` — a branch this pass owns alone, which is every
+     *    per-task branch. Still unique, still refused to a second pass.
+     *  - `branch_shared = 1` — the branch the run established, recorded by
+     *    every pass that commits to it. Shared by construction, so uniqueness
+     *    would be the wrong question.
+     *
+     * The default is 0 and there is no backfill, which is the honest reading of
+     * every row written before this: a pass recorded by an earlier build either
+     * owned a per-task branch or was the only pass that could record the shared
+     * one, and in both cases the branch was its alone.
+     *
+     * SQLite cannot add a condition to an existing index, so the index is
+     * dropped and recreated. Both statements run inside the migration's
+     * transaction ({@see Migrator}), so a failure leaves the old index in
+     * place rather than the table with none.
+     */
+    private static function sharedBranchPasses(): Migration
+    {
+        return new Migration(4, 'several passes of a run on one shared branch', [
+            'ALTER TABLE generations ADD COLUMN branch_shared INTEGER NOT NULL DEFAULT 0 '
+                . 'CHECK (branch_shared IN (0, 1))',
+            'DROP INDEX generations_branch',
+            'CREATE UNIQUE INDEX generations_branch
+                ON generations (branch) WHERE branch IS NOT NULL AND branch_shared = 0',
         ]);
     }
 

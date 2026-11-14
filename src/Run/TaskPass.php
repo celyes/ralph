@@ -348,6 +348,47 @@ final class TaskPass
     }
 
     /**
+     * The commit a pass's workspace starts from, as its own row records it.
+     *
+     * Not the run's base, which is only the starting point of the *first* thing
+     * a run builds: in shared-branch mode each task is checked out at the tip
+     * the branch had when the task was taken on, so that it can build on what
+     * the tasks before it committed (PROJECT.md section K, item 4). The row is
+     * the authority either way — it is what a resumed pass is reconciled
+     * against ({@see PassRecovery}) and what the commit message records — so
+     * reading it back is also what keeps those three in step.
+     */
+    private function baseOf(GenerationRecord $record): BaseCommit
+    {
+        return BaseCommit::of($record->baseReference(), $record->baseSha());
+    }
+
+    /**
+     * The commit a pass that is starting now will be built on.
+     *
+     * The run's base in per-task mode, where every task starts from the one
+     * commit the run resolved and no task can see another's work.
+     *
+     * In shared-branch mode, the tip of the run's branch
+     * ({@see \Celyes\RalphPhp\Git\SharedBranches::continuationOf()}): the
+     * first task of a run finds the branch missing or still at the base and so
+     * gets the base, and every task after a commit gets that commit. Asked per
+     * task rather than once per run because the answer moves as the run
+     * commits, and it is asked *before* the generation's row is written, since
+     * the row is where the answer is kept.
+     *
+     * @throws RalphException when the branch cannot be read or may not be used
+     */
+    private function baseForNewPass(): BaseCommit
+    {
+        if ($this->shared === null) {
+            return $this->base;
+        }
+
+        return $this->workbench->shared()->continuationOf($this->run, $this->base);
+    }
+
+    /**
      * The branch this pass commits to.
      *
      * In per-task mode, the one the pass records or the one its task and the
@@ -373,7 +414,7 @@ final class TaskPass
         $recorded = $record->branch();
 
         if ($shared !== null && ($recorded === null || trim($recorded) === '')) {
-            return TaskBranch::generated($record->generation(), $shared->name());
+            return TaskBranch::shared($record->generation(), $shared->name());
         }
 
         return $this->workbench->namer()->forRecord($record, $description);
@@ -405,7 +446,7 @@ final class TaskPass
         $shared = $this->shared;
 
         if ($shared !== null && $branch->value() === $shared->value()) {
-            return $this->workbench->shared()->requireForPass($shared, $branch, $record, $this->base);
+            return $this->workbench->shared()->requireForPass($shared, $branch, $record);
         }
 
         return $this->workbench->branches()->require(
@@ -437,7 +478,10 @@ final class TaskPass
             $branch = $this->branchOf($record, $task->description());
             $ownership = $this->branchFor($branch, $record);
 
-            $worktree = $this->workbench->worktrees()->prepare($record->generation(), $this->base);
+            $worktree = $this->workbench->worktrees()->prepare(
+                $record->generation(),
+                $this->baseOf($record),
+            );
             $record = $this->journal->generations()->recordWorktree(
                 $record,
                 $this->ownershipOf($record, $worktree),
@@ -545,7 +589,7 @@ final class TaskPass
                 $satisfaction = $this->workbench->satisfaction()->audit(
                     $worktree,
                     $attempt->number(),
-                    $this->base,
+                    $this->baseOf($record),
                     $this->workbench->auditor()->observe($worktree),
                     $staged,
                     $verification,
@@ -679,9 +723,16 @@ final class TaskPass
      * Open the pass: record the task as read, choose its generation, and get
      * the row it will be worked on through.
      *
-     * A pass being continued keeps its history, its branch and its attempt
-     * count; a reopened task gets a new generation with its own branch, which
-     * is what keeps the completed one intact (PROJECT.md section C, item 8).
+     * A pass being continued keeps its history, its branch, its attempt count
+     * and its base commit; a reopened task gets a new generation with its own
+     * branch, which is what keeps the completed one intact (PROJECT.md
+     * section C, item 8).
+     *
+     * The base is written once, here, and only for a pass that is starting.
+     * Everything afterwards reads it back off the row ({@see self::baseOf()}),
+     * so a resumed pass is prepared, verified and committed against the commit
+     * it was originally built on rather than against whatever the branch holds
+     * by then.
      *
      * @throws RalphException when the rows cannot be written
      */
@@ -695,12 +746,14 @@ final class TaskPass
         );
 
         if ($selection->continues() === null) {
+            $base = $this->baseForNewPass();
+
             return $this->journal->generations()->start(
                 $selection->generation(),
                 $recorded,
                 AgentRecord::of($this->agent),
-                $this->base->reference(),
-                $this->base->sha(),
+                $base->reference(),
+                $base->sha(),
                 TaskPublisher::expectationFor($this->configuration),
                 $this->run->rowId(),
             );
@@ -802,7 +855,7 @@ final class TaskPass
             $record,
             $task->description(),
             $attempt->number(),
-            $this->base,
+            $this->baseOf($record),
             $verification,
             $staged,
             $satisfaction,

@@ -48,6 +48,7 @@ final class GenerationRecord
         private readonly string $baseReference,
         private readonly string $baseSha,
         private readonly ?string $branch,
+        private readonly bool $branchIsShared,
         private readonly ?string $commitSha,
         private readonly bool $noChange,
         private readonly PushResult $push,
@@ -93,6 +94,7 @@ final class GenerationRecord
             self::string($row, 'base_reference'),
             self::string($row, 'base_sha'),
             self::nullableString($row, 'branch'),
+            self::flag($row, 'branch_shared'),
             self::nullableString($row, 'commit_sha'),
             self::boolean($row, 'no_change'),
             PushResult::fromStorage(
@@ -250,6 +252,22 @@ final class GenerationRecord
     public function ownsBranch(string $branch): bool
     {
         return $this->branch !== null && $this->branch === $branch;
+    }
+
+    /**
+     * Whether the recorded branch is the run's rather than this pass's alone.
+     *
+     * The distinction the `generations_branch` index is partial on
+     * ({@see Migrations}): a per-task branch belongs to one pass and a second
+     * pass asking for it is refused, while the branch a shared-branch run
+     * established is recorded by every task of the run that commits to it
+     * (PROJECT.md section K, item 4). False for a pass with no branch at all,
+     * and for every row written before the column existed, which is the honest
+     * reading of both.
+     */
+    public function branchIsShared(): bool
+    {
+        return $this->branch !== null && $this->branchIsShared;
     }
 
     /**
@@ -503,6 +521,20 @@ final class GenerationRecord
         }
 
         return (int) $value;
+    }
+
+    /**
+     * A boolean column that a row predating it simply does not have.
+     *
+     * Only for columns added by a later migration whose default is false, where
+     * absent and 0 mean the same thing. Everything else goes through
+     * {@see self::boolean()}, which refuses a row with the column missing.
+     *
+     * @param array<string, mixed> $row
+     */
+    private static function flag(array $row, string $column): bool
+    {
+        return array_key_exists($column, $row) && self::boolean($row, $column);
     }
 
     /**

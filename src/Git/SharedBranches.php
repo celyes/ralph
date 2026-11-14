@@ -177,6 +177,48 @@ final class SharedBranches
     }
 
     /**
+     * The commit a task taken on now starts its workspace from.
+     *
+     * The carry-forward of PROJECT.md section K, item 4, and the whole of it
+     * that is a decision: a task in shared-branch mode is checked out at the
+     * tip of the run's branch rather than at the run's base commit, so the
+     * work earlier tasks committed is *in* the workspace the agent is given and
+     * a later task can build on it. Per-task mode has no such reader, which is
+     * the independence PROJECT.md section 2 describes.
+     *
+     * Read per task rather than once per run, because the answer moves: it is
+     * the previous task's commit for the second task, and that task's for the
+     * third. The run-level reading is still the one that decides whether the
+     * branch may be used at all ({@see self::require()}), and it is made again
+     * here, so a branch somebody moved between two tasks of the same run stops
+     * the run before an agent is given a workspace built on it.
+     *
+     * The run's own base is returned unchanged while the branch does not exist
+     * or is still at that commit — the first task of a run, and every task of a
+     * run whose earlier tasks committed nothing. That keeps `git.base` as the
+     * reference such a pass records, rather than relabelling the same commit
+     * with a branch name it was not resolved from.
+     *
+     * @throws BranchException        when the branch holds work this project did
+     *                                not put there, or the repository cannot be
+     *                                asked
+     * @throws ConfigurationException when the configured branch is one Git
+     *                                would refuse
+     * @throws StateException         when the run's recorded branch is one Git
+     *                                could not hold
+     */
+    public function continuationOf(RunRecord $run, BaseCommit $base): BaseCommit
+    {
+        $tip = $this->require($run, $base)->tip();
+
+        if ($tip === null || $tip === $base->sha()) {
+            return $base;
+        }
+
+        return BaseCommit::of($this->nameFor($run)->value(), $tip);
+    }
+
+    /**
      * Whether the pass in hand may commit onto the run's shared branch.
      *
      * The reading is a {@see BranchOwnership} because that is what
@@ -184,7 +226,7 @@ final class SharedBranches
      * hand it the same thing: what the strategy changes is who the branch
      * belongs to, not how a commit is made.
      *
-     * Three refusals matter here, and none of them is about the name:
+     * Two refusals matter here, and neither of them is about the name:
      *
      *  - **A pass with a commit** keeps the branch only while the branch still
      *    contains that commit. The same rule {@see TaskBranches} applies to a
@@ -192,20 +234,21 @@ final class SharedBranches
      *    off the pass's commit is a different branch wearing the name.
      *  - **A pass without one** may commit only when the branch is where its
      *    workspace starts. A task's workspace is made from the commit its row
-     *    records as its base, so a branch that has moved past that — because an
-     *    earlier task in the run committed to it — cannot take this commit:
-     *    Git would write it on top of the workspace's own history and move the
-     *    branch to it, leaving the earlier task's commit unreachable. Carrying
-     *    one task's commit forward into the next task's workspace is section K,
-     *    item 4; until it exists, the second task of a shared-branch run stops
-     *    here, with everything the first one committed intact.
-     *  - **A pass at a branch another pass's row holds** stops as well, even
-     *    where the first two allow it — a project that merged the branch and ran
-     *    again brings the base level with the tip. A branch belongs to one
-     *    generation in the state store, the invariant that stops a reopened task
-     *    from resetting an earlier pass's branch, and relaxing it belongs with
-     *    item 4 too. Refused here rather than at the claim, so the reason names
-     *    the mode instead of an index.
+     *    records as its base, which in this mode is the branch tip the pass
+     *    started from ({@see self::continuationOf()}), so the ordinary case is
+     *    that the two agree and the commit extends the branch. A branch that
+     *    has moved on *since* — a newer run committed to it, or an interrupted
+     *    pass is being resumed after one did — cannot take this commit: Git
+     *    would write it on top of the workspace's own history and move the
+     *    branch to it, leaving the commits in between unreachable.
+     *
+     * What is *not* refused here, and was until the carry-forward of section K,
+     * item 4: a branch another pass's row also holds. That is what a shared
+     * branch is — one branch, a commit per task, every task's row naming it —
+     * and the state store is told as much when the branch is claimed
+     * ({@see \Celyes\RalphPhp\State\GenerationStore::assignBranch()}), so
+     * the index that keeps a reopened task from resetting a per-task branch
+     * still holds everywhere else.
      *
      * @throws BranchException when the repository cannot be asked
      */
@@ -213,7 +256,6 @@ final class SharedBranches
         SharedBranch $shared,
         TaskBranch $branch,
         GenerationRecord $record,
-        BaseCommit $base,
     ): BranchOwnership {
         if ($branch->value() !== $shared->value()) {
             return BranchOwnership::unrelated(
@@ -270,44 +312,14 @@ final class SharedBranches
         }
 
         if ($tip === $record->baseSha()) {
-            $owner = $this->recordedOwner($name, $record);
-
-            if ($owner !== null) {
-                // The branch is where this workspace starts, so a commit here
-                // would lose nothing — but the row cannot be shared yet: the
-                // state store allows a branch on one generation, which is what
-                // stops a reopened task from resetting an earlier pass's branch
-                // in per-task mode. Relaxing it for a shared branch belongs
-                // with the carry-forward of section K, item 4, where several
-                // passes of a run really do commit to one branch; until then
-                // this is refused here rather than at the claim, so that the
-                // reason names the mode instead of the index.
-                return BranchOwnership::unrelated(
-                    $branch,
-                    sprintf(
-                        'is recorded as the branch of %s, and a shared branch is held by one pass until a '
-                            . 'task\'s workspace can be made from the branch tip (PROJECT.md section K, item 4)',
-                        $owner,
-                    ),
-                    $tip,
-                    $worktree,
-                    $owner,
-                    [
-                        sprintf(
-                            'The commits on %s are intact, and %s is where the pass holding it is recorded.',
-                            $shared->value(),
-                            $owner,
-                        ),
-                        sprintf(
-                            'Review or merge %s, or set "git.strategy" to "%s" in .ralph/config.json to give '
-                                . 'each task a branch of its own, then run the command again.',
-                            $shared->value(),
-                            BranchStrategy::PerTask->value,
-                        ),
-                    ],
-                );
-            }
-
+            // The branch is exactly where this workspace starts, so the commit
+            // extends it and loses nothing — whether the tip is the run's base
+            // commit or the commit an earlier task of the run put there, which
+            // is the carry-forward of section K, item 4. That an earlier pass's
+            // row also names the branch is expected in this mode and is not
+            // asked about: the claim records the branch as shared, and the
+            // store's one-branch-one-generation index is partial on exactly
+            // that.
             return BranchOwnership::ours($branch, $tip, $worktree);
         }
 
@@ -315,8 +327,7 @@ final class SharedBranches
             $branch,
             sprintf(
                 'is at %s, and this task\'s workspace was made from %s, so a commit here would leave %s '
-                    . 'unreachable; a task cannot yet continue from an earlier task\'s commit on a shared '
-                    . 'branch (PROJECT.md section K, item 4)',
+                    . 'unreachable',
                 substr($tip, 0, BranchOwnership::SHORT_LENGTH),
                 substr($record->baseSha(), 0, BranchOwnership::SHORT_LENGTH),
                 substr($tip, 0, BranchOwnership::SHORT_LENGTH),
@@ -326,16 +337,16 @@ final class SharedBranches
             $this->generations->atCommit($tip)?->slug(),
             [
                 sprintf(
-                    'Every task workspace of this run is made from %s, which is why a later task cannot '
-                        . 'continue from the commit on %s.',
-                    $base->shortSha(),
+                    'A task\'s workspace is made from the tip of %s as it stood when the task was taken '
+                        . 'on, so the branch has moved on since — a newer run committed to it, or this pass '
+                        . 'is being resumed after one did.',
                     $shared->value(),
                 ),
                 sprintf(
-                    'Review or merge %s, or set "git.strategy" to "%s" in .ralph/config.json to give each '
-                        . 'task a branch of its own, then run the command again.',
+                    'The commits on %s are intact and nothing was written. Review "git log %s", then start '
+                        . 'a new run so the task\'s workspace is made from the branch tip.',
                     $shared->value(),
-                    BranchStrategy::PerTask->value,
+                    $shared->value(),
                 ),
             ],
         );
@@ -351,9 +362,8 @@ final class SharedBranches
         SharedBranch $shared,
         TaskBranch $branch,
         GenerationRecord $record,
-        BaseCommit $base,
     ): BranchOwnership {
-        $ownership = $this->forPass($shared, $branch, $record, $base);
+        $ownership = $this->forPass($shared, $branch, $record);
 
         if (!$ownership->isUsable()) {
             throw new BranchException(
@@ -364,35 +374,6 @@ final class SharedBranches
         }
 
         return $ownership;
-    }
-
-    /**
-     * The recorded pass holding a branch, when one other than this pass does.
-     *
-     * The same question {@see TaskBranches} asks of every per-task branch, and
-     * asked the same way — against the rows, by exact name — because the answer
-     * has the same consequence: a branch one pass records is where that pass's
-     * commit is, and the state store allows the name on one generation only.
-     *
-     * @throws \Celyes\RalphPhp\Exception\StateException when the rows cannot be read
-     */
-    private function recordedOwner(BranchName $name, GenerationRecord $record): ?string
-    {
-        if ($record->ownsBranch($name->value())) {
-            return null;
-        }
-
-        foreach ($this->generations->history()->records() as $recorded) {
-            if ($recorded->generation()->equals($record->generation())) {
-                continue;
-            }
-
-            if ($recorded->ownsBranch($name->value())) {
-                return $recorded->generation()->label();
-            }
-        }
-
-        return null;
     }
 
     /**

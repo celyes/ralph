@@ -278,7 +278,6 @@ final class SharedBranchesTest extends TestCase
             $shared,
             $this->branchFor($pass, $shared),
             $pass,
-            $this->baseCommit(),
         );
 
         self::assertSame(BranchClaim::Available, $ownership->claim());
@@ -296,7 +295,6 @@ final class SharedBranchesTest extends TestCase
             $shared,
             $this->branchFor($pass, $shared),
             $pass,
-            $this->baseCommit(),
         );
 
         self::assertSame(BranchClaim::Ours, $ownership->claim());
@@ -304,10 +302,13 @@ final class SharedBranchesTest extends TestCase
     }
 
     /**
-     * The case the whole pass-level reading exists for. The first task has
-     * committed, so the branch is past the commit the second task's workspace
-     * was made from — and a commit made in that workspace would move the branch
-     * onto history that does not contain the first task's work.
+     * The case the pass-level reading exists for once tasks carry each other's
+     * work forward: a workspace made from a commit the branch has since moved
+     * past. A pass taken on now would be built on the tip
+     * ({@see SharedBranches::continuationOf()}), so this is the resumed pass of
+     * an older run, or one whose branch a newer run committed to — and a commit
+     * made in that workspace would move the branch onto history that does not
+     * contain the commits in between.
      */
     #[Test]
     public function a_later_pass_is_stopped_while_its_workspace_cannot_continue_the_branch(): void
@@ -328,40 +329,116 @@ final class SharedBranchesTest extends TestCase
         self::assertSame($committed, $reading->tip());
         self::assertSame($first->slug(), $reading->owner());
         self::assertStringContainsString('would leave', $refusal->getMessage());
-        // In the reason rather than only in the hints, because the reason is
-        // what a run prints when it stops on a task.
-        self::assertStringContainsString('section K, item 4', $refusal->getMessage());
-        self::assertStringContainsString('"git.strategy" to "per-task"', implode("\n", $refusal->hints()));
+        self::assertStringContainsString('the branch has moved on since', implode("\n", $refusal->hints()));
+        self::assertStringContainsString('commits on ralph/shared are intact', implode("\n", $refusal->hints()));
         self::assertSame($before, $this->refs());
     }
 
     /**
-     * The branch is where the second task's workspace starts — the project
-     * merged it and ran again — so nothing would be lost by committing. The row
-     * is what cannot be shared yet, and the refusal says so in those terms
-     * rather than leaving the state store to complain about an index.
+     * The carry-forward itself (PROJECT.md section K, item 4): the first task
+     * has committed to the branch, the second task's workspace was made from
+     * that commit, and the second task may commit — the branch its row will
+     * record is already recorded by the first task's row, which is what a
+     * shared branch means.
      */
     #[Test]
-    public function a_pass_at_a_branch_another_pass_records_is_stopped_in_the_modes_own_terms(): void
+    public function a_pass_may_commit_to_the_branch_an_earlier_pass_of_the_run_records(): void
     {
         $first = $this->passAt(self::FIRST);
-        $this->generations->assignBranch($first, self::SHARED);
-        $this->givenABranch(self::SHARED, $this->base);
+        $committed = $this->givenACommitOn(self::SHARED);
+        $this->generations->recordCommit(
+            $this->generations->assignBranch($first, self::SHARED, shared: true),
+            $committed,
+        );
 
         $shared = $this->shared()->require($this->givenARun(), $this->baseCommit());
-        $second = $this->passAt(self::SECOND);
-        $before = $this->refs();
 
-        $refusal = $this->passRefusal($shared, $second);
+        // What the second task's workspace is made from, now that the branch
+        // has a commit on it.
+        $second = $this->passFrom(self::SECOND, $committed);
 
-        self::assertStringContainsString(
-            sprintf('is recorded as the branch of %s', $first->slug()),
-            $refusal->getMessage(),
+        $ownership = $this->shared()->requireForPass(
+            $shared,
+            $this->branchFor($second, $shared),
+            $second,
         );
-        self::assertStringContainsString('held by one pass', $refusal->getMessage());
-        self::assertStringContainsString('section K, item 4', $refusal->getMessage());
-        self::assertStringContainsString('commits on ralph/shared are intact', implode("\n", $refusal->hints()));
-        self::assertSame($before, $this->refs());
+
+        self::assertSame(BranchClaim::Ours, $ownership->claim());
+        self::assertSame($committed, $ownership->tip());
+    }
+
+    /**
+     * The other half: the state store lets the second pass record the branch
+     * the first one already holds, because the claim says it is shared.
+     */
+    #[Test]
+    public function two_passes_of_a_run_may_record_the_same_shared_branch(): void
+    {
+        $first = $this->generations->assignBranch($this->passAt(self::FIRST), self::SHARED, shared: true);
+        $second = $this->generations->assignBranch($this->passAt(self::SECOND), self::SHARED, shared: true);
+
+        self::assertTrue($first->ownsBranch(self::SHARED));
+        self::assertTrue($second->ownsBranch(self::SHARED));
+        self::assertTrue($second->branchIsShared());
+    }
+
+    /**
+     * The first task of a run, with nothing on the branch yet: the run's own
+     * base commit, recorded with the reference `git.base` named.
+     */
+    #[Test]
+    public function the_first_task_of_a_run_is_built_on_the_runs_base_commit(): void
+    {
+        $base = $this->shared()->continuationOf($this->givenARun(), $this->baseCommit());
+
+        self::assertSame($this->base, $base->sha());
+        self::assertSame('HEAD', $base->reference());
+    }
+
+    #[Test]
+    public function a_branch_still_at_the_base_commit_leaves_the_runs_own_base_alone(): void
+    {
+        $this->givenABranch(self::SHARED, $this->base);
+
+        $base = $this->shared()->continuationOf($this->givenARun(), $this->baseCommit());
+
+        self::assertSame($this->base, $base->sha());
+        self::assertSame('HEAD', $base->reference());
+    }
+
+    /**
+     * The reader the carry-forward is built on: a later task is checked out at
+     * the tip of the branch, so the commits the tasks before it made are in the
+     * workspace the agent is given.
+     */
+    #[Test]
+    public function a_later_task_is_built_on_the_commit_the_branch_carries(): void
+    {
+        $first = $this->passAt(self::FIRST);
+        $committed = $this->givenACommitOn(self::SHARED);
+        $this->generations->recordCommit($first, $committed);
+
+        $base = $this->shared()->continuationOf($this->givenARun(), $this->baseCommit());
+
+        self::assertSame($committed, $base->sha());
+        self::assertSame(self::SHARED, $base->reference());
+    }
+
+    /**
+     * Read again for every task, not once per run: a branch somebody moved
+     * between two tasks stops the run before the next task is given a
+     * workspace built on it.
+     */
+    #[Test]
+    public function a_task_is_not_built_on_a_commit_nobody_recorded(): void
+    {
+        $this->givenACommitOn(self::SHARED);
+        $run = $this->givenARun();
+
+        $this->expectException(BranchException::class);
+        $this->expectExceptionMessage('nor a commit this project recorded');
+
+        $this->shared()->continuationOf($run, $this->baseCommit());
     }
 
     /**
@@ -381,7 +458,6 @@ final class SharedBranchesTest extends TestCase
             $shared,
             $this->branchFor($pass, $shared),
             $pass,
-            $this->baseCommit(),
         );
 
         self::assertSame(BranchClaim::Ours, $ownership->claim());
@@ -462,13 +538,22 @@ final class SharedBranchesTest extends TestCase
      */
     private function branchFor(GenerationRecord $record, SharedBranch $shared): TaskBranch
     {
-        return TaskBranch::generated($record->generation(), $shared->name());
+        return TaskBranch::shared($record->generation(), $shared->name());
     }
 
     /**
-     * A recorded pass at a task, owning nothing yet.
+     * A recorded pass at a task, owning nothing yet, built on the run's base.
      */
     private function passAt(string $description): GenerationRecord
+    {
+        return $this->passFrom($description, $this->base);
+    }
+
+    /**
+     * The same, built on a named commit: what a pass taken on after an earlier
+     * task of the run committed records as its base.
+     */
+    private function passFrom(string $description, string $base): GenerationRecord
     {
         $snapshot = TaskSnapshot::of(Task::fromItem(new ChecklistItem(
             $description,
@@ -486,8 +571,8 @@ final class SharedBranchesTest extends TestCase
             TaskGeneration::first($snapshot->id()),
             $snapshot,
             AgentRecord::ofDefinition(AgentDefinition::builtIn('codex')),
-            'HEAD',
-            $this->base,
+            $base === $this->base ? 'HEAD' : self::SHARED,
+            $base,
         );
     }
 
@@ -512,7 +597,6 @@ final class SharedBranchesTest extends TestCase
                 $shared,
                 $branch ?? $this->branchFor($record, $shared),
                 $record,
-                $this->baseCommit(),
             );
         } catch (BranchException $exception) {
             return $exception;

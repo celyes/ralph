@@ -35,6 +35,7 @@ final class TaskBranch
         private readonly TaskGeneration $generation,
         private readonly BranchName $name,
         private readonly bool $generated,
+        private readonly bool $shared = false,
     ) {
     }
 
@@ -44,6 +45,21 @@ final class TaskBranch
     public static function generated(TaskGeneration $generation, BranchName $name): self
     {
         return new self($generation, $name, true);
+    }
+
+    /**
+     * The run's shared branch, handed to a pass that has none recorded.
+     *
+     * Generated, like {@see self::generated()} — this run produced the name,
+     * nothing is recorded yet — and marked, because the mark is what the
+     * storage layer needs: a shared branch is recorded by every task of the run
+     * that commits to it, so it is the one name a second pass may claim
+     * ({@see \Celyes\RalphPhp\State\GenerationStore::assignBranch()},
+     * PROJECT.md section K, item 4).
+     */
+    public static function shared(TaskGeneration $generation, BranchName $name): self
+    {
+        return new self($generation, $name, true, shared: true);
     }
 
     /**
@@ -92,6 +108,18 @@ final class TaskBranch
     public function wasRetained(): bool
     {
         return !$this->generated;
+    }
+
+    /**
+     * Whether this is the branch the run shares between its tasks.
+     *
+     * False for a retained name even when it happens to be the shared branch:
+     * a pass that already records a branch has claimed it, and the claim is
+     * where the distinction was stored.
+     */
+    public function isShared(): bool
+    {
+        return $this->shared;
     }
 
     /**

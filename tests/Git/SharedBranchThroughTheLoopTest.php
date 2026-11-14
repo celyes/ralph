@@ -31,12 +31,12 @@ use PHPUnit\Framework\TestCase;
  *  - the branch is **recorded on the run**, so `status` names it and a later
  *    command continues it rather than deriving a name again.
  *
- * The second task of a run stops here, and deliberately: carrying one task's
- * commit forward into the next task's workspace is section K, item 4, and
- * until it exists a second commit would move the branch onto history that does
- * not contain the first task's work. The case asserts the refusal *and* that
- * the first task's commit is still on the branch, which is the half that
- * matters.
+ * Section K, item 4 adds the fourth, and it is the one a user notices: the
+ * tasks of a run are committed to that branch **in order**, each built on what
+ * the ones before it committed, with a commit kept per task. The cases below
+ * assert it from the repository — two commits, one parent chain, and the first
+ * task's file inside the second task's commit — rather than from the run's own
+ * account of itself.
  */
 #[CoversClass(SharedBranches::class)]
 #[CoversClass(SharedBranch::class)]
@@ -107,12 +107,13 @@ final class SharedBranchThroughTheLoopTest extends TestCase
     }
 
     /**
-     * The interim limit of the mode, asserted rather than left to be discovered:
-     * the run's second task stops, and everything the first one committed is
-     * exactly where it was.
+     * The carry-forward (PROJECT.md section K, item 4): both tasks commit to
+     * the one branch, in order, and the second task's workspace held what the
+     * first one committed — which is what the repository says, and the reason
+     * the mode exists.
      */
     #[Test]
-    public function the_second_task_of_a_shared_run_stops_without_moving_the_branch(): void
+    public function the_tasks_of_a_shared_run_commit_to_one_branch_in_order(): void
     {
         $this->project
             ->withWorker(
@@ -123,26 +124,42 @@ final class SharedBranchThroughTheLoopTest extends TestCase
             ->withConfiguration(['git' => ['strategy' => 'shared']]);
 
         $result = $this->project->ralph(['run']);
-        $committed = $this->project->headOf(self::SHARED);
 
-        // The run worked through the checklist and reports what did not pass,
-        // which is how a run ends when one of its tasks is refused.
-        self::assertStringContainsString('1 of 2 did not pass', $result->allOutput(), $result->describe());
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString('2 of 2 tasks completed', $result->allOutput());
+
+        // One branch, still established once, with a commit per task on it.
+        self::assertSame([self::SHARED], $this->project->taskBranches());
+        self::assertSame(1, substr_count($result->standardOutput, 'branch ralph/shared (new)'));
+
+        $commits = $this->project->commitsOn(self::SHARED);
+
+        self::assertCount(2, $commits);
+
+        // In order: the second task's commit is the tip and the first task's is
+        // its parent, which is what "sequentially, on one branch" has to mean.
+        self::assertStringContainsString(self::SECOND, $commits[0]);
+        self::assertStringContainsString(self::FIRST, $commits[1]);
+        self::assertSame(
+            $this->project->headOf(self::SHARED . '~1'),
+            $this->project->headOf(self::SHARED . '^'),
+        );
+
+        // The carry-forward itself: the first task's file is in the tree the
+        // second task committed, so its workspace was made from the branch tip
+        // rather than from the run's base commit.
         self::assertStringContainsString(
-            'so a commit here would leave ' . substr($committed, 0, 12) . ' unreachable',
+            'from ' . self::SHARED,
             $result->allOutput(),
             $result->describe(),
         );
-        self::assertStringContainsString('section K, item 4', $result->allOutput());
+        self::assertSame(
+            self::EDIT,
+            $this->contentOf($this->project->headOf(self::SHARED), self::EDITED),
+        );
 
-        // The first task's work: committed, ticked, and still the tip.
-        self::assertCount(1, $this->project->commitsOn(self::SHARED));
         self::assertStringContainsString('- [x] ' . self::FIRST, $this->project->checklist());
-
-        // The second task's: nothing, and still pending.
-        self::assertStringContainsString('- [ ] ' . self::SECOND, $this->project->checklist());
-        self::assertSame([self::SHARED], $this->project->taskBranches());
-        self::assertSame($committed, $this->project->headOf(self::SHARED));
+        self::assertStringContainsString('- [x] ' . self::SECOND, $this->project->checklist());
     }
 
     /**
@@ -181,8 +198,9 @@ final class SharedBranchThroughTheLoopTest extends TestCase
     }
 
     /**
-     * A second run finds the branch its predecessor left and continues it,
-     * rather than starting a branch of its own.
+     * A second run finds the branch its predecessor left, continues it rather
+     * than starting one of its own, and builds its task on the commit it finds
+     * there.
      */
     #[Test]
     public function a_later_run_continues_the_branch_an_earlier_one_committed_to(): void
@@ -193,7 +211,9 @@ final class SharedBranchThroughTheLoopTest extends TestCase
                 FixtureStep::success(['README.md' => "# Project\n\nThe import command.\n"]),
             )
             ->withTasks([self::FIRST, self::SECOND])
-            ->withConfiguration(['git' => ['strategy' => 'shared']]);
+            // One task per run, so the second task is a different run's work
+            // on the branch the first run established.
+            ->withConfiguration(['git' => ['strategy' => 'shared'], 'limits' => ['iterations' => 1]]);
 
         $this->project->ralph(['run']);
         $committed = $this->project->headOf(self::SHARED);
@@ -206,10 +226,14 @@ final class SharedBranchThroughTheLoopTest extends TestCase
             $again->describe(),
         );
 
-        // Still one branch, still one commit on it: a run that could not take
-        // the next task on did not take anything away either.
+        // Still one branch, and the second run's commit sits on top of the
+        // first run's rather than beside it.
         self::assertSame([self::SHARED], $this->project->taskBranches());
-        self::assertSame($committed, $this->project->headOf(self::SHARED));
+        self::assertSame($committed, $this->parentOf($this->project->headOf(self::SHARED)));
+        self::assertSame(
+            self::EDIT,
+            $this->contentOf($this->project->headOf(self::SHARED), self::EDITED),
+        );
     }
 
     /**
@@ -233,6 +257,27 @@ final class SharedBranchThroughTheLoopTest extends TestCase
         self::assertStringNotContainsString('branch ralph/shared', $result->standardOutput);
         self::assertCount(2, $this->project->taskBranches());
         self::assertNotContains(self::SHARED, $this->project->taskBranches());
+    }
+
+    /**
+     * The commit a commit sits on.
+     */
+    private function parentOf(string $commit): string
+    {
+        return trim(Git::run($this->project->root(), 'rev-parse', $commit . '^')->standardOutput);
+    }
+
+    /**
+     * What a file holds in a commit's tree.
+     *
+     * The carry-forward is read from this rather than from a file listing: the
+     * project starts with `src/Import.php` in it, so what proves the second
+     * task was built on the first is the *first task's edit* being in the
+     * second task's commit.
+     */
+    private function contentOf(string $commit, string $path): string
+    {
+        return Git::run($this->project->root(), 'show', $commit . ':' . $path)->standardOutput;
     }
 
     /**

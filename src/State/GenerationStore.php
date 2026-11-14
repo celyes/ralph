@@ -483,19 +483,34 @@ final class GenerationStore
     /**
      * Claim a branch for this pass.
      *
-     * The storage half of branch ownership. The database allows a branch name
-     * on at most one generation, so a second pass asking for a branch an
-     * earlier one owns is refused here rather than resetting it — which is the
-     * behaviour PROJECT.md section F, item 4 requires and the reason reopening
-     * a task cannot destroy the commit the first pass left behind.
+     * The storage half of branch ownership. The database allows a per-task
+     * branch name on at most one generation, so a second pass asking for a
+     * branch an earlier one owns is refused here rather than resetting it —
+     * which is the behaviour PROJECT.md section F, item 4 requires and the
+     * reason reopening a task cannot destroy the commit the first pass left
+     * behind.
+     *
+     * A *shared* branch is the exception, and `$shared` is how the caller says
+     * so. The branch a shared-branch run established belongs to the run, and
+     * every task of that run records it as the branch holding its commit
+     * (section K, item 4), so the row is marked and the unique index skips it
+     * ({@see Migrations}). The flag is the committer's reading of the branch it
+     * was handed, not a guess made here: only the runner knows whether the name
+     * came from the run's shared branch or from the task's own.
      *
      * Re-claiming the branch this pass already owns is allowed and does
      * nothing, so resume does not have to remember whether it got this far.
      *
-     * @throws StateException when the branch belongs to another pass
+     * @param bool $shared whether the name is the run's shared branch rather
+     *        than one this pass owns alone
+     *
+     * @throws StateException when a per-task branch belongs to another pass
      */
-    public function assignBranch(GenerationRecord $generation, string $branch): GenerationRecord
-    {
+    public function assignBranch(
+        GenerationRecord $generation,
+        string $branch,
+        bool $shared = false,
+    ): GenerationRecord {
         $name = $this->reference($branch, 'branch');
 
         if ($generation->ownsBranch($name)) {
@@ -504,7 +519,10 @@ final class GenerationStore
 
         return $this->guard(
             $generation->slug(),
-            fn (): GenerationRecord => $this->write($generation, ['branch' => $name]),
+            fn (): GenerationRecord => $this->write($generation, [
+                'branch' => $name,
+                'branch_shared' => $shared ? 1 : 0,
+            ]),
         );
     }
 

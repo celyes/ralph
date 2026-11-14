@@ -369,6 +369,12 @@ final class TaskCommitter
      * rewritten. Ownership is what resume depends on, so a pass that moved
      * branch between commits could never be reconciled.
      *
+     * Whether the branch is the run's shared one is passed on rather than
+     * decided here: the name was handed to the pass by the runner, which is the
+     * only thing that knows which strategy produced it, and the storage layer
+     * needs the answer because a shared branch is the one name a second pass
+     * may claim (PROJECT.md section K, item 4).
+     *
      * @throws CommitException when the row names another branch, or cannot be
      *                         written
      */
@@ -400,7 +406,11 @@ final class TaskCommitter
         }
 
         try {
-            $claimed = $this->generations->assignBranch($generation, $branch->value());
+            $claimed = $this->generations->assignBranch(
+                $generation,
+                $branch->value(),
+                $branch->isShared(),
+            );
         } catch (StateException $exception) {
             throw new CommitException(
                 sprintf(

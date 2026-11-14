@@ -1014,22 +1014,31 @@ Worth knowing before you rely on it.
 - **Review every commit.** Checks and commits are evidence for review, not proof
   that a natural-language requirement was satisfied. Nothing here merges
   anything.
-- **One task at a time.** No parallel execution. Tasks are assumed independent:
-  this release does not build one task on top of another's unmerged branch.
-- **`git.strategy: "shared"` carries one task per run so far.** The branch is
-  now established once per run — created if it is missing, validated if it is
-  there, and recorded against the run so a resume continues on it — and the
-  run's first task commits to it. The second task stops, because each task's
-  workspace is still prepared from the run's base commit: committing it would
-  move the branch onto history that does not contain the first task's commit,
-  and Ralph PHP will not do that. Carrying each task's commit forward into the
-  next task's workspace is the remaining piece; until it lands, leave the
-  setting at `per-task` for a run with more than one pending task.
+- **One task at a time.** No parallel execution. Under the default `per-task`
+  strategy tasks are assumed independent: a task is not built on top of another
+  task's unmerged branch. `git.strategy: "shared"` is the exception, and the
+  only one — within a single run, each task is built on the commits the tasks
+  before it made on the shared branch.
+- **`git.strategy: "shared"` commits a run's tasks to one branch, in order.**
+  The branch is established once per run — created if it is missing, validated
+  if it is there, and recorded against the run so a resume continues on it — and
+  every task of the run commits to it, keeping a commit of its own. Each task's
+  workspace is made from the branch tip as it stood when the task was taken on,
+  so a later task sees what the earlier ones committed and can build on it. A
+  run that takes on no task leaves the branch exactly where it found it.
 
-  What the mode already refuses is worth knowing, because it is what it will go
-  on refusing: a shared branch holding a commit no pass of the project recorded,
-  or one checked out in a worktree the run does not own, stops the run before an
-  agent is started, with the branch exactly where it was.
+  What the mode refuses is worth knowing. A shared branch holding a commit no
+  pass of the project recorded, or one checked out in a worktree the run does
+  not own, stops the run before an agent is started. So does a pass whose
+  workspace is no longer at the tip — a newer run committed to the branch, or an
+  interrupted pass is being resumed after one did — because committing there
+  would leave the commits in between unreachable. Nothing is reset or
+  overwritten in either case; start a new run so the task's workspace is made
+  from the branch tip.
+
+  Worktree cleanup is not yet part of finalization in either strategy, so a
+  completed task's worktree stays under `.ralph/runtime/worktrees/` until you
+  remove it.
 - **No merges, deployments or pull requests**, and no generating a task list from
   a product idea.
 - **Agent CLIs move.** The invocations were exercised against Codex 0.4x and
