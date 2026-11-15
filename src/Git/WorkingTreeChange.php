@@ -166,6 +166,35 @@ final class WorkingTreeChange
     }
 
     /**
+     * Whether this change is nothing but a tracked file that has gone.
+     *
+     * Asked by {@see WorktreeCleaner} when it is finishing a removal that was
+     * interrupted. `git worktree remove` deletes the worktree directory entry
+     * by entry, so a part-deleted workspace reports exactly this and nothing
+     * else — deletions, staged or not, of files a commit holds. Anything the
+     * removal could not have produced, a modification or an untracked file, is
+     * somebody's work and is what stops cleanup finishing the job.
+     *
+     * A conflict is not a deletion however it is spelled: `DD` is both sides
+     * deleting a path, which is a merge to resolve rather than a file that has
+     * simply gone.
+     */
+    public function isDeletion(): bool
+    {
+        if ($this->isUntracked() || $this->isUnmerged()) {
+            return false;
+        }
+
+        foreach ([$this->indexStatus, $this->worktreeStatus] as $status) {
+            if ($status !== 'D' && $status !== self::UNCHANGED) {
+                return false;
+            }
+        }
+
+        return $this->indexStatus !== self::UNCHANGED || $this->worktreeStatus !== self::UNCHANGED;
+    }
+
+    /**
      * Whether part of this change is already in the index.
      */
     public function isStaged(): bool

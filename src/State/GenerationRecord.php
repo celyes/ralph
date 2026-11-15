@@ -53,6 +53,7 @@ final class GenerationRecord
         private readonly bool $noChange,
         private readonly PushResult $push,
         private readonly WorktreeOwnership $worktree,
+        private readonly ?CleanupState $cleanup,
         private readonly ?Blocker $blocker,
         private readonly Timestamp $startedAt,
         private readonly Timestamp $updatedAt,
@@ -106,6 +107,7 @@ final class GenerationRecord
                 self::nullableString($row, 'worktree_path'),
                 self::boolean($row, 'owns_worktree'),
             ),
+            CleanupState::recorded(self::nullableString($row, 'cleanup_state')),
             Blocker::recorded(self::nullableString($row, 'blocker')),
             Timestamp::fromStorage(self::string($row, 'started_at')),
             Timestamp::fromStorage(self::string($row, 'updated_at')),
@@ -312,6 +314,35 @@ final class GenerationRecord
     public function worktree(): WorktreeOwnership
     {
         return $this->worktree;
+    }
+
+    /**
+     * How far cleanup of the workspace got, or null when none was started.
+     */
+    public function cleanup(): ?CleanupState
+    {
+        return $this->cleanup;
+    }
+
+    /**
+     * Whether a removal of the workspace was issued and never confirmed.
+     *
+     * The question a resumed cleanup asks before it reads the directory: what
+     * is left at the recorded path is then the remains of a deletion this
+     * package asked for, not work to protect
+     * ({@see \Celyes\RalphPhp\Git\WorktreeCleaner::assess()}).
+     */
+    public function cleanupIsUnfinished(): bool
+    {
+        return $this->cleanup?->isInProgress() ?? false;
+    }
+
+    /**
+     * Whether the workspace was removed and the removal confirmed.
+     */
+    public function cleanupIsFinished(): bool
+    {
+        return $this->cleanup?->isFinished() ?? false;
     }
 
     /**

@@ -785,6 +785,43 @@ when every one of these holds:
 Anything else is kept, with the reason stated. Cleanup never withdraws work that
 has already been earned.
 
+**A removal is not recorded until Git confirms it, and an interrupted one is
+finished later.** `git worktree remove` exiting zero is not taken as proof:
+`git worktree list` must no longer mention the path and the directory must no
+longer be there before anything is written down. Until then the record goes on
+naming the workspace, and the next `ralph run` or `ralph resume` picks the
+cleanup up where it stopped. Three interruptions are recoverable rather than
+permanent:
+
+- **before the command** — the workspace is still whole, and is removed as
+  usual;
+- **during it** — Git deletes the worktree directory before its own record of
+  it, so what is left is a part-deleted directory. Ralph PHP marks the record
+  *before* it issues a removal, and that mark is how the remains are recognised
+  as its own and finished off, with `--force` where Git now refuses them and
+  with `git worktree repair` first where the interruption took the workspace's
+  link to the repository. A directory with no such mark is never forced: Git's
+  refusal is a second opinion worth keeping. Nor is one holding anything the
+  removal could not have produced — a modified or an untracked file is work,
+  and keeps the directory exactly as it would have on the first attempt, so
+  what you write while looking at a workspace a run told you about is safe.
+- **after it** — the directory and the registration have gone and only the
+  record still names them, so clearing the record is all that is left to do.
+
+Running cleanup again is always safe. The decision is taken afresh from the
+record and the repository every time, so a workspace that has gone is reported
+as gone, and one that is being kept is re-examined — a pass whose first attempt
+failed keeps its workspace on purpose, and the attempt that then passes removes
+the same directory the earlier one was told to leave alone.
+
+Two limits are worth stating. `git worktree repair` arrived in Git 2.30, above
+this package's floor of 2.24; on an older Git, an interruption that took the
+workspace's `.git` file leaves a directory for you to remove with `git worktree
+remove --force`. And if a part-deleted directory loses its `git worktree`
+registration — which takes a removal that reported a failure rather than an
+interruption — Ralph PHP has nothing left to act on and keeps the path for you
+to look at, because it never deletes a directory itself.
+
 ## Context and memory
 
 Each attempt is briefed with the task and its criteria, your `.ralph/CONTEXT.md`

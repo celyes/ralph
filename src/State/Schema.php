@@ -22,7 +22,7 @@ use InvalidArgumentException;
  * Some of these lists mirror a PHP enum that already exists
  * ({@see LifecycleState}, {@see Phase}, {@see Completion}, {@see PushState},
  * {@see AttemptOutcome}, {@see AgentSource}, {@see CheckOutcome},
- * {@see ChecklistMarker}, {@see ChecklistUpdateState}); those are built from
+ * {@see ChecklistMarker}, {@see ChecklistUpdateState}, {@see CleanupState}); those are built from
  * the enum's cases so the two cannot drift. The rest — run states and the Git
  * reference vocabularies — are named here first because the schema needs them
  * before the types that will own them are written, and those types are
@@ -128,6 +128,21 @@ final class Schema
     public static function checklistUpdateStates(): array
     {
         return ChecklistUpdateState::values();
+    }
+
+    /**
+     * How far cleanup of a task workspace got.
+     *
+     * Nullable in the column, because "never attempted" is the state almost
+     * every row is in and is not a value worth spelling. Built from
+     * {@see CleanupState} so the column cannot hold a state the enum does not
+     * have.
+     *
+     * @return list<string>
+     */
+    public static function cleanupStates(): array
+    {
+        return CleanupState::values();
     }
 
     /**

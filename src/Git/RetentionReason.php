@@ -28,8 +28,9 @@ namespace Celyes\RalphPhp\Git;
  * clean it looks. Three are about **work that would be lost**
  * ({@see self::UncommittedWork}, {@see self::UnrecordedCommit},
  * {@see self::CommitUnreferenced}). One is the item's headline
- * ({@see self::PassUnfinished}). The last three are Git saying no, or not
- * answering at all.
+ * ({@see self::PassUnfinished}). The last four are Git saying no, not
+ * answering at all, or answering and being wrong
+ * ({@see self::RemovalUnconfirmed}).
  */
 enum RetentionReason: string
 {
@@ -152,6 +153,24 @@ enum RetentionReason: string
     case RemovalRefused = 'removal-refused';
 
     /**
+     * Git ran the removal and the workspace is still there.
+     *
+     * The reason PROJECT.md section K, item 7's "do not mark cleanup complete
+     * until Git confirms the worktree is removed" needs a name. A command that
+     * exits zero is Git's account of what it did, and cleanup's record is
+     * checked against the repository instead: `git worktree list` must no
+     * longer mention the path and the directory must no longer be there. When
+     * either still is — a deletion the filesystem refused part of, a
+     * registration a concurrent `worktree add` wrote back — the cleanup is not
+     * finished, so it is not recorded as finished, and the row goes on naming
+     * the workspace so that a later run tries again.
+     *
+     * The pass itself is unaffected, as with every other reason here: its
+     * commit, its branch and its tick were durable before cleanup began.
+     */
+    case RemovalUnconfirmed = 'removal-unconfirmed';
+
+    /**
      * Every reason, in the order {@see WorktreeCleaner} asks about them:
      * ownership first, then contents, then Git's own answers.
      *
@@ -182,7 +201,7 @@ enum RetentionReason: string
     public function isGitRefusal(): bool
     {
         return match ($this) {
-            self::Locked, self::Unreadable, self::RemovalRefused => true,
+            self::Locked, self::Unreadable, self::RemovalRefused, self::RemovalUnconfirmed => true,
             self::PassUnfinished, self::NotOwned, self::NotOurPath, self::NotRegistered,
             self::UncommittedWork, self::UnrecordedCommit, self::CommitUnreferenced => false,
         };
@@ -204,6 +223,7 @@ enum RetentionReason: string
             self::CommitUnreferenced => 'the commit this pass made is not held by its branch',
             self::Unreadable => 'the workspace could not be read',
             self::RemovalRefused => 'Git refused to remove the workspace',
+            self::RemovalUnconfirmed => 'the removal ran and the workspace is still there',
         };
     }
 
@@ -223,6 +243,7 @@ enum RetentionReason: string
             self::CommitUnreferenced => 'The commit is still in the repository; point a branch at the SHA above before removing the workspace.',
             self::Unreadable => 'Run `git status` and `git worktree list` yourself to see what Git reports.',
             self::RemovalRefused => 'The pass, its commit and its branch are unaffected. Look at the path: a removal that fails part way through leaves whatever it could not delete.',
+            self::RemovalUnconfirmed => 'Nothing was recorded as cleaned up, so the next run will try again. Run `git worktree list` and look at the path to see what is still there.',
         };
     }
 }

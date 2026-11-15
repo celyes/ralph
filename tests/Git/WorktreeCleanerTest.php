@@ -18,12 +18,14 @@ use Celyes\RalphPhp\Git\TaskBranches;
 use Celyes\RalphPhp\Git\TaskCommitter;
 use Celyes\RalphPhp\Git\TaskWorktree;
 use Celyes\RalphPhp\Git\TaskWorktrees;
+use Celyes\RalphPhp\Git\WorkingTreeChange;
 use Celyes\RalphPhp\Git\WorkspaceRetention;
 use Celyes\RalphPhp\Git\WorkspaceStager;
 use Celyes\RalphPhp\Git\WorktreeCleaner;
 use Celyes\RalphPhp\Git\WorktreeCleanup;
 use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\Blocker;
+use Celyes\RalphPhp\State\CleanupState;
 use Celyes\RalphPhp\State\Database;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\GenerationStore;
@@ -64,6 +66,8 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(WorktreeCleanup::class)]
 #[CoversClass(RetentionReason::class)]
 #[CoversClass(RetentionVerdict::class)]
+#[CoversClass(CleanupState::class)]
+#[CoversClass(WorkingTreeChange::class)]
 final class WorktreeCleanerTest extends TestCase
 {
     private const string DESCRIPTION = 'Add a greeting command';
@@ -207,7 +211,7 @@ final class WorktreeCleanerTest extends TestCase
         self::assertNull($this->registrationAt($workspace->path()));
         self::assertNull($this->recordOf($pass)->worktree()->path());
         self::assertContains(
-            sprintf('cleanup: %s had already gone; Git\'s record of it was cleared', $workspace->path()),
+            sprintf('cleanup: %s had already gone; the record of it was cleared', $workspace->path()),
             $sink->notes,
         );
     }
@@ -675,11 +679,17 @@ final class WorktreeCleanerTest extends TestCase
     }
 
     /**
-     * A workspace that has already been cleaned up, or that a `rm -rf` and a
-     * `git worktree prune` both reached: nothing is there, and nothing is wrong.
+     * A row naming a workspace that nothing is left of: the last step of a
+     * cleanup, carried out on its own.
+     *
+     * Reached by a `rm -rf` and a `git worktree prune`, and reached by a crash
+     * between Git confirming a removal and the state store hearing about it.
+     * Either way the only thing still referring to the workspace is the row,
+     * and clearing it is the whole of what is left to do — nothing is deleted,
+     * because there is nothing there to delete.
      */
     #[Test]
-    public function a_row_naming_a_workspace_that_has_entirely_gone_is_absent(): void
+    public function a_row_naming_a_workspace_that_has_entirely_gone_is_finished_off(): void
     {
         $pass = $this->givenAPass();
         $workspace = $this->givenAWorkspace($pass);
@@ -690,9 +700,13 @@ final class WorktreeCleanerTest extends TestCase
 
         $cleanup = $this->cleaner()->clean($pass);
 
-        self::assertTrue($cleanup->retention()->isAbsent());
+        self::assertTrue($cleanup->wasRemoved());
+        self::assertTrue($cleanup->clearedRegistrationOnly());
         self::assertSame($workspace->path(), $cleanup->path());
-        self::assertFalse($cleanup->wasRemoved());
+
+        $record = $this->recordOf($pass);
+        self::assertNull($record->worktree()->path());
+        self::assertSame(CleanupState::Removed, $record->cleanup());
     }
 
     /**
@@ -714,6 +728,339 @@ final class WorktreeCleanerTest extends TestCase
         self::assertTrue($cleanup->wasKept());
         self::assertTrue($cleanup->retention()->hasReason(RetentionReason::PassUnfinished));
         self::assertNotNull($this->registrationAt($workspace->path()));
+    }
+
+    // ------------------------------------------ idempotence and recovery
+
+    /**
+     * Cleanup is safe to call again, and the second call says so.
+     *
+     * The first requirement of PROJECT.md section K, item 7. Nothing is
+     * remembered between calls — the decision is taken from the row and the
+     * repository every time — so what makes the second call a no-op is that the
+     * first one left the row saying the workspace has gone, which is also what
+     * lets the line a person reads tell "already removed" from "never had one".
+     */
+    #[Test]
+    public function cleaning_up_the_same_pass_twice_changes_nothing_the_second_time(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $commit = (string) $pass->commitSha();
+        $branch = (string) $pass->branch();
+        $pass = $this->generations->complete($pass);
+
+        self::assertTrue($this->cleaner()->clean($pass)->wasRemoved());
+
+        $sink = new RecordingSink();
+        $again = $this->cleaner()->clean($this->recordOf($pass), $sink);
+
+        self::assertFalse($again->wasRemoved());
+        self::assertFalse($again->wasKept());
+        self::assertTrue($again->retention()->isAbsent());
+        self::assertTrue($again->retention()->wasAlreadyCleaned());
+        self::assertNull($again->path());
+        self::assertContains(
+            sprintf('cleanup: %s: its workspace has already been removed', $pass->generation()->label()),
+            $sink->notes,
+        );
+
+        // And the deliverable is untouched by either call.
+        self::assertSame($commit, $this->tipOf($branch));
+        self::assertSame($commit, $this->recordOf($pass)->commitSha());
+        self::assertSame(CleanupState::Removed, $this->recordOf($pass)->cleanup());
+    }
+
+    /**
+     * A sweep over a run's history after it has already been swept: every pass
+     * is accounted for and nothing is done twice.
+     */
+    #[Test]
+    public function a_second_sweep_accounts_for_every_pass_and_repeats_nothing(): void
+    {
+        $finished = $this->givenAPass();
+        $finishedWorkspace = $this->givenAWorkspace($finished);
+        $finished = $this->generations->complete($this->generations->recordNoChange($finished));
+
+        $failed = $this->givenAPass('Add a farewell command');
+        $failedWorkspace = $this->givenAWorkspace($failed);
+        $this->inWorkspace($failedWorkspace, 'src/Farewell.php', self::WORK);
+        $failed = $this->generations->fail($failed);
+
+        $this->cleaner()->sweep([$finished, $failed]);
+        $again = $this->cleaner()->sweep([$this->recordOf($finished), $this->recordOf($failed)]);
+
+        self::assertCount(2, $again);
+        self::assertTrue($again[0]->retention()->wasAlreadyCleaned());
+        self::assertTrue($again[1]->wasKept());
+
+        self::assertDirectoryDoesNotExist($finishedWorkspace->path());
+        self::assertSame(self::WORK, file_get_contents($failedWorkspace->path() . '/src/Farewell.php'));
+    }
+
+    /**
+     * The classic crash: Git removed the workspace, and the process died before
+     * the state store heard about it.
+     *
+     * The row is left naming a directory that is not there and marked with a
+     * removal that was never confirmed, which is exactly what
+     * {@see WorktreeCleaner::clean()} writes before it issues the command. The
+     * next cleanup finishes the one step left — clearing the row — and deletes
+     * nothing, because there is nothing left to delete.
+     */
+    #[Test]
+    public function a_removal_the_state_store_never_heard_about_is_finished_by_the_next_cleanup(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $commit = (string) $pass->commitSha();
+        $branch = (string) $pass->branch();
+        $pass = $this->generations->complete($pass);
+
+        $this->givenAnInterruptedRemoval($pass);
+        Git::run($this->project->root(), 'worktree', 'remove', $workspace->path());
+        self::assertSame($workspace->path(), $this->recordOf($pass)->worktree()->path());
+
+        $cleanup = $this->cleaner()->clean($this->recordOf($pass));
+
+        self::assertTrue($cleanup->wasRemoved());
+        self::assertTrue($cleanup->clearedRegistrationOnly());
+
+        $record = $this->recordOf($pass);
+        self::assertNull($record->worktree()->path());
+        self::assertSame(CleanupState::Removed, $record->cleanup());
+
+        // The commit and the branch are what the pass is reviewed from, and
+        // neither the crash nor the recovery touched them.
+        self::assertSame($commit, $this->tipOf($branch));
+        self::assertSame($commit, $record->commitSha());
+    }
+
+    /**
+     * The crash in the middle: Git deleted part of the workspace and stopped.
+     *
+     * `git worktree remove` refuses such a tree without `--force`, because its
+     * own deletions read as modified files — so without the recorded removal to
+     * recognise the husk by, the directory would be preserved for ever. This is
+     * the case the mark on the row exists for.
+     */
+    #[Test]
+    public function a_part_deleted_workspace_is_finished_off_only_when_a_removal_was_recorded(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $commit = (string) $pass->commitSha();
+        $branch = (string) $pass->branch();
+        $pass = $this->generations->complete($pass);
+
+        $this->givenAPartDeletedWorkspace($workspace);
+
+        // Without the mark: Git would refuse, and so does this.
+        $kept = $this->cleaner()->clean($this->recordOf($pass));
+
+        self::assertTrue($kept->wasKept());
+        self::assertTrue($kept->retention()->hasReason(RetentionReason::UncommittedWork));
+        self::assertDirectoryExists($workspace->path());
+
+        // With it: the husk is what is left of a removal this package issued,
+        // and finishing it is finishing that.
+        $this->givenAnInterruptedRemoval($this->recordOf($pass));
+        $cleanup = $this->cleaner()->clean($this->recordOf($pass));
+
+        self::assertTrue($cleanup->wasRemoved());
+        self::assertFalse($cleanup->clearedRegistrationOnly());
+        self::assertDirectoryDoesNotExist($workspace->path());
+        self::assertNull($this->registrationAt($workspace->path()));
+
+        $record = $this->recordOf($pass);
+        self::assertNull($record->worktree()->path());
+        self::assertSame(CleanupState::Removed, $record->cleanup());
+        self::assertSame($commit, $this->tipOf($branch));
+    }
+
+    /**
+     * The same crash, after it had taken the workspace's `.git` file.
+     *
+     * Git declines to remove a worktree it cannot validate even with
+     * `--force`, which would leave the package unable to finish a deletion it
+     * started. `git worktree repair` writes the link back, and the removal then
+     * goes through — the one other command here that writes anything, and one
+     * that deletes nothing.
+     */
+    #[Test]
+    public function a_workspace_whose_link_the_interrupted_removal_took_is_repaired_and_removed(): void
+    {
+        if (version_compare((string) Git::version(), '2.30.0', '<')) {
+            self::markTestSkipped('"git worktree repair" arrived in Git 2.30.');
+        }
+
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $commit = (string) $pass->commitSha();
+        $branch = (string) $pass->branch();
+        $pass = $this->generations->complete($pass);
+
+        $this->givenAPartDeletedWorkspace($workspace);
+        unlink($workspace->path() . '/.git');
+        self::assertSame(
+            128,
+            Git::tryRun($this->project->root(), 'worktree', 'remove', '--force', $workspace->path())->exitCode,
+            'Git is expected to refuse a worktree whose link to the repository has gone.',
+        );
+
+        $this->givenAnInterruptedRemoval($this->recordOf($pass));
+        $cleanup = $this->cleaner()->clean($this->recordOf($pass));
+
+        self::assertTrue($cleanup->wasRemoved());
+        self::assertDirectoryDoesNotExist($workspace->path());
+        self::assertNull($this->registrationAt($workspace->path()));
+        self::assertNull($this->recordOf($pass)->worktree()->path());
+        self::assertSame($commit, $this->tipOf($branch));
+    }
+
+    /**
+     * A removal that exits zero and leaves the workspace where it is.
+     *
+     * "Do not mark cleanup complete until Git confirms the worktree is
+     * removed", asserted against a `git` that claims to have done it. What the
+     * package records is checked against the repository and the filesystem, not
+     * against an exit status — so nothing is written down, the row goes on
+     * naming the workspace, and the removal stays recorded as unconfirmed for
+     * the next run to finish. Which it then does, with a real Git.
+     */
+    #[Test]
+    public function a_removal_git_reports_as_done_while_the_workspace_stays_is_not_recorded_as_complete(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $pass = $this->generations->complete($pass);
+
+        $sink = new RecordingSink();
+        $cleanup = $this->cleanerUsing($this->givenAGitThatOnlyPretendsToRemove())
+            ->clean($pass, $sink);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertFalse($cleanup->wasRemoved());
+        self::assertSame(
+            sprintf('%s is still there after the removal ran', $workspace->path()),
+            $cleanup->retention()->observationFor(RetentionReason::RemovalUnconfirmed),
+        );
+        self::assertContains(
+            'cleanup: The removal ran and the workspace is still there: '
+                . sprintf('%s is still there after the removal ran', $workspace->path()),
+            $sink->notes,
+        );
+
+        // Nothing was recorded as finished, and the row still names the
+        // workspace — which is what makes the next run try again.
+        $record = $this->recordOf($pass);
+        self::assertSame($workspace->path(), $record->worktree()->path());
+        self::assertSame(CleanupState::Removing, $record->cleanup());
+        self::assertDirectoryExists($workspace->path());
+
+        self::assertTrue($this->cleaner()->clean($record)->wasRemoved());
+        self::assertDirectoryDoesNotExist($workspace->path());
+        self::assertSame(CleanupState::Removed, $this->recordOf($pass)->cleanup());
+    }
+
+    /**
+     * The narrowing that keeps the forced retry from being a licence.
+     *
+     * A removal that reported success without removing anything leaves the
+     * workspace whole and the mark in place, and the message sends a person to
+     * look at the path — so the next run must not delete what they wrote while
+     * they were there. Deletions are the removal's own work and do not stop it;
+     * anything the removal could not have produced does.
+     */
+    #[Test]
+    public function a_resumed_removal_keeps_a_workspace_somebody_has_written_in(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $pass = $this->generations->complete($pass);
+
+        $this->givenAPartDeletedWorkspace($workspace);
+        $this->inWorkspace($workspace, 'what-i-found.md', "worth keeping\n");
+        $this->givenAnInterruptedRemoval($this->recordOf($pass));
+
+        $cleanup = $this->cleaner()->clean($this->recordOf($pass));
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertSame(
+            '1 change(s) the interrupted removal cannot account for: untracked file: what-i-found.md',
+            $cleanup->retention()->observationFor(RetentionReason::UncommittedWork),
+        );
+        self::assertSame(
+            "worth keeping\n",
+            file_get_contents($workspace->path() . '/what-i-found.md'),
+        );
+        self::assertSame(CleanupState::Removing, $this->recordOf($pass)->cleanup());
+
+        // And once what they wrote is gone, the removal finishes as it would
+        // have — preserving is not a one-way door.
+        unlink($workspace->path() . '/what-i-found.md');
+
+        self::assertTrue($this->cleaner()->clean($this->recordOf($pass))->wasRemoved());
+        self::assertDirectoryDoesNotExist($workspace->path());
+    }
+
+    /**
+     * The one question a resumed removal still asks.
+     *
+     * Finishing a removal skips what can only be read inside the workspace,
+     * because a part-deleted checkout answers those questions about its own
+     * dismantling. It does not skip the promise that the pass's commit survives
+     * the directory: that is asked of the project's repository, which can still
+     * answer, and it is still a reason to stop.
+     */
+    #[Test]
+    public function a_resumed_removal_still_refuses_to_take_a_commit_no_branch_holds(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $commit = $this->commitInWorkspaceAsThePass($workspace);
+        $pass = $this->generations->complete($this->generations->recordCommit($pass, $commit));
+
+        $this->givenAnInterruptedRemoval($pass);
+        $cleanup = $this->cleaner()->clean($this->recordOf($pass));
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertStringContainsString(
+            'recorded with no branch',
+            (string) $cleanup->retention()->observationFor(RetentionReason::CommitUnreferenced),
+        );
+        self::assertDirectoryExists($workspace->path());
+        self::assertTrue($this->commitExists($commit));
+        self::assertSame(CleanupState::Removing, $this->recordOf($pass)->cleanup());
+    }
+
+    /**
+     * Preparing a workspace is also what forgets the cleanup of the last one:
+     * the mark is about the directory the row names, and a pass given a fresh
+     * one has had no removal issued against it.
+     */
+    #[Test]
+    public function recording_a_fresh_workspace_forgets_the_cleanup_of_the_last_one(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $this->givenAnInterruptedRemoval($pass);
+
+        self::assertTrue($this->recordOf($pass)->cleanupIsUnfinished());
+
+        $this->generations->recordWorktree(
+            $this->recordOf($pass),
+            $workspace->ownership(),
+        );
+
+        self::assertNull($this->recordOf($pass)->cleanup());
+        self::assertFalse($this->recordOf($pass)->cleanupIsUnfinished());
     }
 
     // ------------------------------------------------------------------ sweep
@@ -948,14 +1295,20 @@ final class WorktreeCleanerTest extends TestCase
     /**
      * The class's central promise, asserted the only way it can be.
      *
-     * Every destructive Git flag is refused by {@see WorktreeCleaner::assess()}
-     * before a removal is attempted, which is what makes the behaviour correct
-     * and also what makes it untestable from the outside: a `--force` added to
-     * the one command here would change no outcome any case in this file can
-     * reach, because nothing gets as far as the command unless Git would have
-     * agreed to it anyway. So the promise is checked against the source, where
-     * a flag that widens what cleanup may delete is visible whether or not any
+     * Most of what makes cleanup safe is refused by
+     * {@see WorktreeCleaner::assess()} before a removal is attempted, which is
+     * what makes the behaviour correct and also what makes much of it
+     * invisible from the outside: a `reset` or a `branch -D` added beside the
+     * one command here would change no outcome any case in this file can
+     * reach. So the promise is checked against the source, where a command
+     * that widens what cleanup may destroy is visible whether or not any
      * situation currently reaches it.
+     *
+     * `--force` is the exception, and it is checked **twice** — here, that
+     * there is exactly one of it, and behaviourally in
+     * `a_part_deleted_workspace_is_finished_off_only_when_a_removal_was_recorded()`
+     * and its companion, which together show that the gate is a removal this
+     * package recorded issuing and nothing else.
      */
     #[Test]
     public function cleanup_issues_no_command_that_can_delete_more_than_it_was_asked_to(): void
@@ -968,7 +1321,7 @@ final class WorktreeCleanerTest extends TestCase
                 && !str_starts_with(ltrim($line), '/*'),
         ));
 
-        foreach (["'--force'", "'-f'", "'branch'", "'reset'", "'prune'", "'checkout'", "'clean'"] as $argument) {
+        foreach (["'-f'", "'branch'", "'reset'", "'prune'", "'checkout'", "'clean'"] as $argument) {
             self::assertStringNotContainsString(
                 $argument,
                 $code,
@@ -976,7 +1329,18 @@ final class WorktreeCleanerTest extends TestCase
             );
         }
 
-        self::assertStringContainsString("'worktree',\n            'remove',", $code);
+        // One `--force`, in the one place a removal that is being resumed may
+        // reach: a second would mean a first attempt could overrule Git.
+        self::assertSame(
+            1,
+            substr_count($code, "'--force'"),
+            'Cleanup may force exactly one removal: the retry of one it recorded issuing.',
+        );
+
+        // The two commands that write, and nothing else. `repair` rewrites the
+        // link between a workspace and its repository; it deletes nothing.
+        self::assertStringContainsString("\$arguments = ['worktree', 'remove'];", $code);
+        self::assertStringContainsString("'worktree',\n            'repair',", $code);
     }
 
     // ---------------------------------------------------------------- helpers
@@ -1054,6 +1418,76 @@ final class WorktreeCleanerTest extends TestCase
         );
 
         return $this->recordOf($pass);
+    }
+
+    /**
+     * The row as {@see WorktreeCleaner::clean()} leaves it when it is
+     * interrupted between marking the removal and confirming it.
+     *
+     * Written through the store rather than by hand, so the test and the run
+     * reach the state the same way.
+     */
+    private function givenAnInterruptedRemoval(GenerationRecord $pass): GenerationRecord
+    {
+        return $this->generations->beginWorktreeCleanup($this->recordOf($pass));
+    }
+
+    /**
+     * A workspace as a removal that was interrupted part way leaves it: some of
+     * the tree gone, the rest still there.
+     *
+     * Deletions of tracked files, which is what Git's own `remove_dir_recursively`
+     * had got through — and which `git status` reports as modifications, which
+     * is why Git refuses to remove the remains without being forced.
+     */
+    private function givenAPartDeletedWorkspace(TaskWorktree $workspace): void
+    {
+        unlink($workspace->path() . '/src/Greeting.php');
+        unlink($workspace->path() . '/README.md');
+
+        self::assertDirectoryExists($workspace->path());
+        self::assertNotNull($this->registrationAt($workspace->path()));
+    }
+
+    /**
+     * A `git` that reports a removal it has not carried out.
+     *
+     * Everything else is passed through to the real Git, so the assessment
+     * before the removal and the confirmation after it are both answered by the
+     * repository as it actually is. The only lie is the one being tested: a
+     * `worktree remove` that exits zero and touches nothing.
+     *
+     * @return string the path to the executable
+     */
+    private function givenAGitThatOnlyPretendsToRemove(): string
+    {
+        $path = $this->project->root() . '/.ralph/runtime/git-that-pretends';
+        $script = sprintf(
+            "#!%s\n<?php\n"
+                . "\$arguments = array_slice(\$argv, 1);\n"
+                . "if ((\$arguments[0] ?? '') === 'worktree' && (\$arguments[1] ?? '') === 'remove') {\n"
+                . "    exit(0);\n"
+                . "}\n"
+                . "\$command = array_map('escapeshellarg', ['git', ...\$arguments]);\n"
+                . "passthru(implode(' ', \$command), \$status);\n"
+                . "exit(\$status);\n",
+            PHP_BINARY,
+        );
+
+        if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0o700, true) && !is_dir(dirname($path))) {
+            self::fail('Could not create ' . dirname($path));
+        }
+
+        if (file_put_contents($path, $script) === false || !chmod($path, 0o700)) {
+            self::fail('Could not install the git stub at ' . $path);
+        }
+
+        return $path;
+    }
+
+    private function cleanerUsing(string $executable): WorktreeCleaner
+    {
+        return WorktreeCleaner::forProject($this->configuration(), $this->generations, $executable);
     }
 
     private function cleaner(): WorktreeCleaner

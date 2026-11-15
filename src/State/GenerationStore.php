@@ -564,6 +564,12 @@ final class GenerationStore
 
     /**
      * Record the workspace this pass is using and whether it created it.
+     *
+     * Recording a workspace also forgets whatever cleanup had been started
+     * against the last one, because the column is about the directory the row
+     * names: a pass given a fresh workspace has had no removal issued against
+     * *it*, and carrying the old mark forward would tell a later cleanup that a
+     * directory it has never touched is a part-deleted husk.
      */
     public function recordWorktree(
         GenerationRecord $generation,
@@ -574,6 +580,58 @@ final class GenerationStore
         return $this->write($generation, [
             'worktree_path' => $columns['path'],
             'owns_worktree' => $columns['owned'],
+            'cleanup_state' => null,
+        ]);
+    }
+
+    /**
+     * Record that a removal of this pass's workspace is about to be issued.
+     *
+     * Written *before* the Git command, which is the whole point of the column
+     * (PROJECT.md section K, item 7). `git worktree remove` deletes the
+     * worktree directory and then Git's administrative record of it, so an
+     * interruption part way through leaves a directory that looks, from
+     * outside, exactly like one somebody has been editing. This mark is what
+     * tells the two apart afterwards: it says that this package judged the
+     * workspace removable and asked Git to delete it, so whatever is left at
+     * the path is the remains of that deletion.
+     *
+     * Idempotent: a row already marked is left as it is, so a cleanup that
+     * retries after an interruption does not have to remember whether it got
+     * this far.
+     */
+    public function beginWorktreeCleanup(GenerationRecord $generation): GenerationRecord
+    {
+        if ($generation->cleanupIsUnfinished()) {
+            return $generation;
+        }
+
+        return $this->write($generation, ['cleanup_state' => CleanupState::Removing->value]);
+    }
+
+    /**
+     * Record that the workspace has gone, in one statement.
+     *
+     * The two halves of the invariant are written together on purpose: the
+     * workspace columns are cleared and the cleanup is marked finished by the
+     * same `UPDATE`, so no crash can leave a row that both names a directory
+     * and claims to have removed it. A row naming a path always means a
+     * directory that is still there — or a removal the caller is in the middle
+     * of, which is what {@see self::beginWorktreeCleanup()} records.
+     *
+     * Everything that makes the pass reviewable stays: the branch, the commit
+     * SHA, the push result and the verification evidence. Only the workspace is
+     * forgotten, and only once Git has confirmed it is gone — which is the
+     * caller's job to establish before calling this.
+     */
+    public function finishWorktreeCleanup(GenerationRecord $generation): GenerationRecord
+    {
+        $columns = WorktreeOwnership::none()->toColumns();
+
+        return $this->write($generation, [
+            'worktree_path' => $columns['path'],
+            'owns_worktree' => $columns['owned'],
+            'cleanup_state' => CleanupState::Removed->value,
         ]);
     }
 

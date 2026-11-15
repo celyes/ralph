@@ -12,7 +12,6 @@ use Celyes\RalphPhp\Process\ProcessResult;
 use Celyes\RalphPhp\Process\ProcessRunner;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\GenerationStore;
-use Celyes\RalphPhp\State\WorktreeOwnership;
 use InvalidArgumentException;
 
 /**
@@ -39,11 +38,27 @@ use InvalidArgumentException;
  *  - Anything else is kept, with {@see RetentionReason} saying which of those
  *    was not true and {@see WorkspaceRetention} carrying the observation behind
  *    it.
- *  - The only Git command here that writes is `git worktree remove` **without
- *    `--force`**, which refuses a dirty or locked worktree on its own account.
- *    Nothing in this class deletes, moves or force-creates a reference: a
- *    finished pass's branch is the deliverable, and cleanup's duty towards it
- *    is to leave it exactly where it is.
+ *  - The only Git command here that writes is `git worktree remove`, and on a
+ *    first attempt it is issued **without `--force`**, so Git refuses a dirty
+ *    or locked worktree on its own account. Nothing in this class deletes,
+ *    moves or force-creates a reference, and nothing in it deletes a directory
+ *    itself: a finished pass's branch is the deliverable, and cleanup's duty
+ *    towards it is to leave it exactly where it is. The only other command here
+ *    that writes anything is `git worktree repair`
+ *    ({@see self::relink()}), which rewrites the two files linking a workspace
+ *    to its repository and deletes nothing.
+ *
+ * **Cleanup is idempotent, and finishes itself** (PROJECT.md section K,
+ * item 7). Every decision is taken afresh from the row and the repository, the
+ * row is marked before the removal is issued and completed only once Git and
+ * the filesystem both confirm the workspace has gone, and the completion is a
+ * single statement. Between them those make three interruptions recoverable
+ * rather than permanent: one before the command, which leaves a workspace to
+ * remove as usual; one during it, which leaves a part-deleted directory that
+ * the mark on the row identifies as a husk and a resumed removal finishes with
+ * `--force`; and one after it, which leaves a row naming a directory that has
+ * gone and whose last step — clearing that row — is all a later run has left to
+ * do. {@see self::clean()} sets all of that out in order.
  *
  * The branch check is the part worth stating twice, because it is what
  * "protects completed branches" means in practice. After the workspace is gone,
@@ -151,6 +166,27 @@ final class WorktreeCleaner
      * Raises nothing. Each question's unanswerable case is a reason to keep the
      * workspace, which is the only safe reading of silence and also the one
      * that keeps a diagnostic from failing.
+     *
+     * **A removal already under way changes which questions are worth
+     * asking.** When the row says a removal was issued and never confirmed
+     * ({@see \Celyes\RalphPhp\State\CleanupState::Removing}), the directory
+     * at the recorded path is one Git was already told to delete, having agreed
+     * at the time that it was clean — so what is left of it has to be read as
+     * the remains of that deletion rather than as evidence. A part-deleted
+     * checkout reports its own deletions as uncommitted changes, reports a HEAD
+     * it can no longer resolve, or cannot be opened as a working tree at all,
+     * and treating any of that as work to protect would preserve a husk for
+     * ever.
+     *
+     * What is still asked is everything that does not depend on the directory
+     * having survived — whose it is, where it is, whether Git has since locked
+     * it, and whether the pass's commit is held by its branch, which is put to
+     * the project's repository because the workspace may no longer be able to
+     * answer — and one question that does: whether anything in the workspace is
+     * something the removal **could not have produced**
+     * ({@see self::writtenSinceTheRemoval()}). A modification or an untracked
+     * file is somebody's work, and keeps the directory exactly as it would have
+     * on the first attempt.
      */
     public function assess(GenerationRecord $generation): WorkspaceRetention
     {
@@ -159,9 +195,12 @@ final class WorktreeCleaner
         $path = $ownership->path();
 
         if ($path === null) {
-            return WorkspaceRetention::absent($label);
+            return $generation->cleanupIsFinished()
+                ? WorkspaceRetention::cleaned($label)
+                : WorkspaceRetention::absent($label);
         }
 
+        $resuming = $generation->cleanupIsUnfinished();
         $reasons = [];
 
         if ($ownership->mustBePreserved()) {
@@ -213,11 +252,27 @@ final class WorktreeCleaner
 
         if ($registered === null) {
             if (!$present) {
+                // Nothing is at the path and Git has no record of it, so the
+                // only thing left of this workspace is the row that names it.
+                // Removable rather than absent, because clearing that row is
+                // the last step of a cleanup, and this is where an interruption
+                // between Git confirming a removal and the state store hearing
+                // about it is finished off (PROJECT.md section K, item 7). The
+                // same reading covers a workspace a user removed by hand and
+                // pruned: there is nothing to lose and a row to tidy.
                 return $reasons === []
-                    ? WorkspaceRetention::absent($label, $path)
+                    ? WorkspaceRetention::removable($label, $path)
                     : WorkspaceRetention::preserved($label, $path, $reasons);
             }
 
+            // Something is at the path and Git has no record of it. Kept even
+            // when a removal was under way: the registration is the only thing
+            // `git worktree remove` can act on, and with it gone this class has
+            // no way to finish the job — it does not delete directories itself.
+            // Git deletes the worktree directory before its own record of it,
+            // so reaching this state means the directory removal reported a
+            // failure and left part of the tree, which is a path for a person
+            // to look at rather than one to delete unseen.
             $reasons[RetentionReason::NotRegistered->value] = sprintf(
                 '%s exists, and "git worktree list" does not mention it',
                 $path,
@@ -254,7 +309,7 @@ final class WorktreeCleaner
                 : WorkspaceRetention::preserved($label, $path, $reasons);
         }
 
-        foreach ($this->inspect($generation, $path) as $reason => $observation) {
+        foreach ($this->inspect($generation, $path, $resuming) as $reason => $observation) {
             $reasons[$reason] = $observation;
         }
 
@@ -271,13 +326,45 @@ final class WorktreeCleaner
      * look without acting, and they are joined here so that a runner cannot act
      * without having looked.
      *
+     * **Safe to call again, and able to finish what an interruption started**
+     * (PROJECT.md section K, item 7). Four facts make that work, and they are
+     * worth reading in order:
+     *
+     *  1. The decision is taken from the row and the repository every time,
+     *     never from anything remembered, so a second call on a workspace that
+     *     has gone finds nothing to do and a second call on one that was kept
+     *     re-asks why.
+     *  2. {@see GenerationStore::beginWorktreeCleanup()} marks the row
+     *     **before** the Git command runs. That mark is the only thing that can
+     *     tell a part-deleted workspace from one somebody has been editing, and
+     *     it is what licenses the forced retry below.
+     *  3. Nothing is called complete on the strength of an exit status. Git is
+     *     asked again — `worktree list` must no longer mention the path, and
+     *     the directory must no longer be there — and a removal that cannot be
+     *     confirmed leaves the row naming the workspace so that a later run
+     *     tries again.
+     *  4. The completion is one statement
+     *     ({@see GenerationStore::finishWorktreeCleanup()}), so a row can never
+     *     both name a directory and claim to have removed it.
+     *
+     * The **forced retry** is the one escalation here, and its gate is narrow.
+     * `git worktree remove` deletes the worktree directory and then Git's
+     * record of it, so an interruption in the middle leaves a tree Git will
+     * refuse to remove — its own deletions read as modifications — and the
+     * husk would otherwise be preserved for ever. A removal that is being
+     * resumed may therefore pass `--force`, which finishes a deletion Git
+     * began after Git itself had agreed the workspace was clean. A *first*
+     * attempt never passes it: Git's refusal of a dirty or locked worktree is a
+     * second opinion on the decision this class has just made, and overriding
+     * it is what deletes somebody's files.
+     *
      * @param OutputSink|null $sink where the decision is noted as it is made —
      *        the attempt's log and the terminal. Never closed here: the caller
      *        that opened the log owns it.
      *
-     * @throws StateException when the workspace was removed and the state store
-     *                        would not record that, which leaves a row pointing
-     *                        at a directory that is gone
+     * @throws StateException when the state store will not record the start or
+     *                        the end of a removal, which would leave a row that
+     *                        cannot be reconciled with the directory
      */
     public function clean(GenerationRecord $generation, ?OutputSink $sink = null): WorktreeCleanup
     {
@@ -292,14 +379,46 @@ final class WorktreeCleaner
         }
 
         $path = (string) $retention->path();
+        $resuming = $generation->cleanupIsUnfinished();
         $stale = !is_dir($path);
-        $removal = $this->remove($path);
 
-        if (!$removal->succeeded()) {
+        // Written before the command and before anything is deleted, so that
+        // whatever an interruption leaves behind can be recognised afterwards.
+        $generation = $this->generations->beginWorktreeCleanup($generation);
+
+        $registered = $this->isRegistered($path);
+
+        if ($registered !== null) {
+            $removal = $this->remove($path, $resuming);
+
+            if (!$removal->succeeded() && $resuming) {
+                // A removal Git stopped part way through may have taken the
+                // workspace's own `.git` file with it, and Git declines to
+                // remove a worktree it can no longer validate even with
+                // `--force`. `worktree repair` writes that link back — see
+                // self::relink() — and then the removal can finish.
+                $this->relink($path);
+                $removal = $this->remove($path, true);
+            }
+
+            if (!$removal->succeeded()) {
+                return $this->report(
+                    WorktreeCleanup::kept($retention->withReason(
+                        RetentionReason::RemovalRefused,
+                        $removal->failureReason(),
+                    )),
+                    $sink,
+                );
+            }
+        }
+
+        $unconfirmed = $this->unconfirmed($path);
+
+        if ($unconfirmed !== null) {
             return $this->report(
                 WorktreeCleanup::kept($retention->withReason(
-                    RetentionReason::RemovalRefused,
-                    $removal->failureReason(),
+                    RetentionReason::RemovalUnconfirmed,
+                    $unconfirmed,
                 )),
                 $sink,
             );
@@ -343,11 +462,41 @@ final class WorktreeCleaner
      * Ask the workspace itself the three questions that can only be answered
      * inside it.
      *
+     * Two of the three are about the workspace's contents and one is about the
+     * repository's references, which is why `$resuming` does not simply skip
+     * the whole step: a removal that is being finished off has already had the
+     * contents questions answered — Git agreed the directory was clean when the
+     * first attempt was issued — but the promise that the pass's commit
+     * survives the directory is one this class re-checks every time, and it can
+     * be checked from the project's own repository, which a half-deleted
+     * workspace cannot be.
+     *
+     * @param bool $resuming whether a removal of this workspace was already
+     *        issued, in which case what is left of the directory is the remains
+     *        of that removal and is not read as evidence
+     *
      * @return array<string, string> {@see RetentionReason} value to the
      *         observation behind it
      */
-    private function inspect(GenerationRecord $generation, string $path): array
+    private function inspect(GenerationRecord $generation, string $path, bool $resuming = false): array
     {
+        if ($resuming) {
+            $reasons = [];
+            $written = $this->writtenSinceTheRemoval($path);
+
+            if ($written !== null) {
+                $reasons[RetentionReason::UncommittedWork->value] = $written;
+            }
+
+            $unreferenced = $this->unreferencedCommit($this->repository(), $generation);
+
+            if ($unreferenced !== null) {
+                $reasons[RetentionReason::CommitUnreferenced->value] = $unreferenced;
+            }
+
+            return $reasons;
+        }
+
         try {
             $git = Repository::at($path, $this->executable, $this->processes);
         } catch (InvalidArgumentException $failure) {
@@ -378,6 +527,74 @@ final class WorktreeCleaner
         }
 
         return $reasons;
+    }
+
+    /**
+     * What is in a part-removed workspace that the removal cannot account for,
+     * or null when there is nothing.
+     *
+     * The narrowing that keeps a resumed removal from being a licence. A
+     * workspace whose removal was issued and never confirmed may be anywhere
+     * between untouched and nearly gone, and both ends are safe to finish:
+     * Git agreed the directory was clean when the command went out, and every
+     * difference a part-way deletion can produce is a tracked file that is no
+     * longer there ({@see WorkingTreeChange::isDeletion()}). A **modification
+     * or an untracked file** is something the removal could not have made, so
+     * it is somebody's — a person who went to look at the path the run told
+     * them about, most likely, since a removal that reports success without
+     * removing anything leaves the workspace whole and the mark in place until
+     * the next run. That is work, and it stops the cleanup exactly as it would
+     * have stopped the first attempt.
+     *
+     * A workspace that cannot answer at all is not a reason to keep anything:
+     * a removal that has taken the `.git` file leaves a directory that is no
+     * longer a working tree, which is evidence of the deletion rather than of
+     * anybody's work. The ownership, path and lock questions still stand, and
+     * so does the branch holding the commit.
+     */
+    private function writtenSinceTheRemoval(string $path): ?string
+    {
+        try {
+            $git = Repository::at($path, $this->executable, $this->processes);
+        } catch (InvalidArgumentException) {
+            return null;
+        }
+
+        $result = $git->query(...WorkingTreeStatus::COMMAND);
+
+        if (!$result->succeeded()) {
+            return null;
+        }
+
+        try {
+            $status = WorkingTreeStatus::parse($result->standardOutput());
+        } catch (InvalidArgumentException) {
+            return null;
+        }
+
+        $paths = [];
+
+        foreach ($status->changes() as $change) {
+            if (!$change->isDeletion()) {
+                $paths[] = $change->describe();
+            }
+        }
+
+        if ($paths === []) {
+            return null;
+        }
+
+        $named = array_slice($paths, 0, self::PATHS_IN_MESSAGE);
+
+        if (count($paths) > self::PATHS_IN_MESSAGE) {
+            $named[] = sprintf('and %d more', count($paths) - self::PATHS_IN_MESSAGE);
+        }
+
+        return sprintf(
+            '%d change(s) the interrupted removal cannot account for: %s',
+            count($paths),
+            implode(', ', $named),
+        );
     }
 
     /**
@@ -530,38 +747,158 @@ final class WorktreeCleaner
      * on every platform, and because the path has already been checked to be
      * one this package hands out.
      *
-     * **No `--force`.** Git declines a dirty or locked worktree on its own
-     * account, and keeping that refusal is a second opinion on the decision
-     * this class has just made rather than an obstacle to it: the flag that
-     * would override it is the flag that deletes somebody's files.
+     * **No `--force` on a first attempt.** Git declines a dirty or locked
+     * worktree on its own account, and keeping that refusal is a second opinion
+     * on the decision this class has just made rather than an obstacle to it:
+     * the flag that would override it is the flag that deletes somebody's
+     * files.
+     *
+     * A **resumed** removal is the one exception, and the difference is that
+     * Git has already agreed once. `$resuming` is true only when the row
+     * records a removal of this very path that was issued and never confirmed
+     * ({@see \Celyes\RalphPhp\State\CleanupState::Removing}), which means
+     * the workspace was clean when the command went out and that what is left
+     * of the directory is what that command had got through. Git refuses such a
+     * tree — the deletions it made itself read as modifications — so without
+     * the flag the husk could never be finished off, which is what PROJECT.md
+     * section K, item 7 asks for. The flag is reachable no other way.
+     *
      * `--end-of-options` keeps an absolute path from being read as an option,
      * which it cannot be here, which is exactly why saying so costs nothing.
+     *
+     * @param bool $resuming whether this is finishing a removal that was
+     *        already issued against this path
      */
-    private function remove(string $path): ProcessResult
+    private function remove(string $path, bool $resuming = false): ProcessResult
     {
+        $arguments = ['worktree', 'remove'];
+
+        if ($resuming) {
+            $arguments[] = '--force';
+        }
+
         return $this->repository()->runWithin(
             self::REMOVAL_TIMEOUT_SECONDS,
+            ...[...$arguments, '--end-of-options', $path],
+        );
+    }
+
+    /**
+     * Write back the link between a part-deleted workspace and its repository.
+     *
+     * `git worktree remove` deletes the worktree directory before Git's
+     * administrative record of it, and within the directory it deletes entries
+     * in whatever order the filesystem hands them over — so an interruption may
+     * well have taken the `.git` file that says which repository the workspace
+     * belongs to. Git then refuses to remove the worktree *even with*
+     * `--force`, because it cannot validate what it is being asked to delete,
+     * and the husk would be unremovable by the package that made it.
+     *
+     * `worktree repair` is Git's own answer to that: given a path, it rewrites
+     * the `.git` file in the workspace and the `gitdir` file in
+     * `.git/worktrees/<id>` to point at each other again. It creates and
+     * deletes nothing else, which is why it is the one other writing command
+     * this class issues.
+     *
+     * Its exit status is deliberately **not** consulted. Repair reports the
+     * breakage it found and can exit non-zero having repaired enough for the
+     * removal to succeed, and the authority on whether that happened is the
+     * removal itself, which is attempted once more either way. It is also
+     * newer than {@see \Celyes\RalphPhp\Ralph::MINIMUM_GIT_VERSION} — Git
+     * 2.30 — so on an older Git this is an unknown subcommand and the step
+     * simply contributes nothing, leaving the workspace kept with Git's own
+     * refusal for a person to clear up. That is the documented limit of what
+     * cleanup can finish by itself.
+     */
+    private function relink(string $path): void
+    {
+        $this->repository()->runWithin(
+            self::REMOVAL_TIMEOUT_SECONDS,
             'worktree',
-            'remove',
+            'repair',
             '--end-of-options',
             $path,
         );
     }
 
     /**
-     * Stop the row pointing at a directory that is no longer there.
+     * Whether Git still has a worktree registered at the path.
+     *
+     * Asked again rather than taken from {@see self::assess()}, because the
+     * answer decides whether there is a command to run at all: a path Git has
+     * no record of has nothing for `worktree remove` to act on, and asking it
+     * anyway would turn the last step of a recovered cleanup — clearing the row
+     * — into a Git failure. Null for "no record", which is also the reading of
+     * a list that cannot be read: the command is skipped, and
+     * {@see self::unconfirmed()} is then the thing that refuses to call the
+     * cleanup finished.
+     */
+    private function isRegistered(string $path): ?RegisteredWorktree
+    {
+        try {
+            return $this->worktrees->registered()->at($path);
+        } catch (WorktreeException) {
+            return null;
+        }
+    }
+
+    /**
+     * Why the workspace cannot be called gone, or null when it is.
+     *
+     * The check PROJECT.md section K, item 7 asks for in as many words: a zero
+     * exit status is Git's account of what it did, and what is recorded is
+     * checked against the repository and the filesystem instead. Both have to
+     * agree — `worktree list` no longer mentioning the path, and no directory
+     * there — because they fail in different ways: a deletion the filesystem
+     * refused part of leaves the directory, and a concurrent `worktree add`, or
+     * a `remove` that reported success while leaving its administrative record,
+     * leaves the registration.
+     *
+     * A list that cannot be read is not a confirmation either. Unconfirmed is
+     * the safe direction in every case: the row goes on naming the workspace,
+     * so the next run tries again, and nothing has been lost but a directory
+     * that is still there.
+     */
+    private function unconfirmed(string $path): ?string
+    {
+        if (is_dir($path)) {
+            return sprintf('%s is still there after the removal ran', $path);
+        }
+
+        try {
+            $registered = $this->worktrees->registered()->at($path);
+        } catch (WorktreeException $failure) {
+            return sprintf(
+                'whether Git still has %s registered could not be established: %s',
+                $path,
+                $failure->getMessage(),
+            );
+        }
+
+        if ($registered !== null) {
+            return sprintf('"git worktree list" still reports %s after the removal ran', $path);
+        }
+
+        return null;
+    }
+
+    /**
+     * Stop the row pointing at a directory that is no longer there, and record
+     * that the cleanup finished.
      *
      * The branch, the commit SHA, the push result and the verification evidence
      * all stay: they are what a finished pass is reviewed from. Only the
-     * workspace columns are cleared, and only after Git has confirmed the
-     * removal, so a row that still names a path always means a directory that
-     * still exists.
+     * workspace columns are cleared, they are cleared in the same statement
+     * that marks the cleanup complete, and both happen only after Git and the
+     * filesystem have confirmed the removal — so a row that still names a path
+     * means either a directory that still exists or a removal that is being
+     * retried, and a row marked complete never names one at all.
      *
      * @throws StateException when the row is gone
      */
     private function forget(GenerationRecord $generation): void
     {
-        $this->generations->recordWorktree($generation, WorktreeOwnership::none());
+        $this->generations->finishWorktreeCleanup($generation);
     }
 
     /**

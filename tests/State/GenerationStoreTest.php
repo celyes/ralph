@@ -8,6 +8,7 @@ use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\Blocker;
+use Celyes\RalphPhp\State\CleanupState;
 use Celyes\RalphPhp\State\Database;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\GenerationStore;
@@ -48,6 +49,7 @@ use PHPUnit\Framework\TestCase;
  */
 #[CoversClass(GenerationStore::class)]
 #[CoversClass(GenerationRecord::class)]
+#[CoversClass(CleanupState::class)]
 final class GenerationStoreTest extends TestCase
 {
     private Database $database;
@@ -480,6 +482,117 @@ final class GenerationStoreTest extends TestCase
         );
 
         self::assertTrue($adopted->worktree()->mustBePreserved());
+    }
+
+    /**
+     * The mark that makes an interrupted cleanup recoverable: written before
+     * the removal is issued, and idempotent so that a retry does not have to
+     * remember whether it got this far (PROJECT.md section K, item 7).
+     */
+    #[Test]
+    public function a_workspace_cleanup_is_marked_before_it_is_attempted(): void
+    {
+        $generation = $this->start($this->record('Add a --dry-run option'));
+        $prepared = $this->generations->recordWorktree(
+            $generation,
+            WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
+        );
+
+        self::assertNull($prepared->cleanup());
+        self::assertFalse($prepared->cleanupIsUnfinished());
+        self::assertFalse($prepared->cleanupIsFinished());
+
+        $removing = $this->generations->beginWorktreeCleanup($prepared);
+
+        self::assertSame(CleanupState::Removing, $removing->cleanup());
+        self::assertTrue($removing->cleanupIsUnfinished());
+        self::assertFalse($removing->cleanupIsFinished());
+
+        // The workspace is still named: nothing has been confirmed yet, and the
+        // path is what a resumed cleanup needs in order to finish.
+        self::assertSame('/repo/.ralph/runtime/worktrees/g1', $removing->worktree()->path());
+
+        $this->clock->advance(60);
+
+        self::assertSame(
+            $removing->updatedAt()->value(),
+            $this->generations->beginWorktreeCleanup($removing)->updatedAt()->value(),
+            'Marking a removal that is already marked is not a write.',
+        );
+    }
+
+    /**
+     * Finishing a cleanup clears the workspace and marks it complete in one
+     * statement, so no crash can leave a row that both names a directory and
+     * claims to have removed it.
+     */
+    #[Test]
+    public function a_finished_workspace_cleanup_forgets_the_workspace_and_keeps_the_evidence(): void
+    {
+        $generation = $this->start($this->record('Add a --dry-run option'));
+        $committed = $this->generations->recordCommit(
+            $this->generations->recordWorktree(
+                $generation,
+                WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
+            ),
+            'f1e2d3c4b5a6',
+        );
+
+        $cleaned = $this->generations->finishWorktreeCleanup(
+            $this->generations->beginWorktreeCleanup($committed),
+        );
+
+        self::assertSame(CleanupState::Removed, $cleaned->cleanup());
+        self::assertTrue($cleaned->cleanupIsFinished());
+        self::assertFalse($cleaned->cleanupIsUnfinished());
+        self::assertNull($cleaned->worktree()->path());
+        self::assertFalse($cleaned->worktree()->isOwned());
+
+        // What the pass is reviewed from is untouched.
+        self::assertSame('f1e2d3c4b5a6', $cleaned->commitSha());
+    }
+
+    /**
+     * A fresh workspace is a workspace no removal has been issued against, so
+     * recording one clears the mark left by the last.
+     */
+    #[Test]
+    public function recording_a_workspace_clears_an_earlier_cleanup_mark(): void
+    {
+        $generation = $this->start($this->record('Add a --dry-run option'));
+        $cleaned = $this->generations->finishWorktreeCleanup(
+            $this->generations->beginWorktreeCleanup(
+                $this->generations->recordWorktree(
+                    $generation,
+                    WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
+                ),
+            ),
+        );
+
+        $prepared = $this->generations->recordWorktree(
+            $cleaned,
+            WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
+        );
+
+        self::assertNull($prepared->cleanup());
+        self::assertSame('/repo/.ralph/runtime/worktrees/g1', $prepared->worktree()->path());
+    }
+
+    /**
+     * The column refuses a state this build does not know, so a database and a
+     * build cannot quietly disagree about whether a workspace was removed.
+     */
+    #[Test]
+    public function the_cleanup_column_refuses_a_state_the_package_never_writes(): void
+    {
+        $generation = $this->start($this->record('Add a --dry-run option'));
+
+        $this->expectException(StateException::class);
+
+        $this->database->execute(
+            'UPDATE generations SET cleanup_state = ? WHERE id = ?',
+            ['halfway', $generation->rowId()],
+        );
     }
 
     #[Test]

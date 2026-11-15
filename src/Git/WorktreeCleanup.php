@@ -59,12 +59,19 @@ final class WorktreeCleanup
     }
 
     /**
-     * Only Git's record of a workspace whose directory had already gone was
-     * cleared.
+     * The record of a workspace whose directory had already gone was cleared.
      *
      * Nothing was deleted. A missing directory cannot hold work, which is what
      * makes this the one case cleanup acts on without reading the workspace
      * first — there is nothing there to read.
+     *
+     * The record is Git's registration, this package's row, or both, and the
+     * message does not distinguish them on purpose. All three combinations
+     * arise and they mean the same thing to a reader: a workspace that is not
+     * there any more has stopped being referred to as though it were. The
+     * row-only case is the one PROJECT.md section K, item 7 adds — a removal
+     * Git confirmed and a crash that stopped the state store hearing about it,
+     * finished off by a later run.
      *
      * @throws InvalidArgumentException when the decision did not allow it
      */
@@ -184,7 +191,7 @@ final class WorktreeCleanup
 
         return match (true) {
             $this->registrationOnly => sprintf(
-                '%s had already gone; Git\'s record of it was cleared',
+                '%s had already gone; the record of it was cleared',
                 $path ?? 'the workspace',
             ),
             $this->removed => sprintf('removed %s', $path ?? 'the workspace'),

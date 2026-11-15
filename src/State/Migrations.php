@@ -68,7 +68,13 @@ final class Migrations
      */
     public static function all(): array
     {
-        return [self::initial(), self::stopAction(), self::sharedBranch(), self::sharedBranchPasses()];
+        return [
+            self::initial(),
+            self::stopAction(),
+            self::sharedBranch(),
+            self::sharedBranchPasses(),
+            self::workspaceCleanup(),
+        ];
     }
 
     /**
@@ -197,6 +203,46 @@ final class Migrations
             'DROP INDEX generations_branch',
             'CREATE UNIQUE INDEX generations_branch
                 ON generations (branch) WHERE branch IS NOT NULL AND branch_shared = 0',
+        ]);
+    }
+
+    /**
+     * Version 5: how far cleanup of a pass's workspace got.
+     *
+     * PROJECT.md section K, item 7 asks for cleanup that is idempotent, that
+     * finishes itself after an interruption, and that is not called complete
+     * until Git confirms the worktree has gone. The first and the third are
+     * code; the second needs a fact that survives the process, because the
+     * question a resumed run has to answer — *was a removal already issued
+     * against this directory?* — cannot be answered by looking at the
+     * directory. A part-deleted workspace and a workspace somebody has been
+     * editing look the same from outside, and the difference decides whether
+     * cleanup finishes the job or protects the files.
+     *
+     * So the column is written **before** the Git command and completed only
+     * after Git and the filesystem agree
+     * ({@see \Celyes\RalphPhp\Git\WorktreeCleaner}), which makes the two
+     * halves of the invariant hold together: `removing` means a command was
+     * issued and never confirmed, and `removed` is written by the same
+     * statement that clears `worktree_path`, so a row can never both name a
+     * directory and claim to have removed it.
+     *
+     * Nullable, and no backfill. A row written before this column existed had
+     * no removal issued against it that anybody recorded, and null is exactly
+     * that: cleanup has not been started. A pass whose workspace an earlier
+     * build removed is left saying nothing about it rather than being credited
+     * with a confirmation nobody made; the row's empty `worktree_path` is still
+     * the fact that matters, and {@see \Celyes\RalphPhp\Git\WorktreeCleaner}
+     * reads it the same way it always did.
+     */
+    private static function workspaceCleanup(): Migration
+    {
+        return new Migration(5, 'how far a workspace cleanup got', [
+            sprintf(
+                'ALTER TABLE generations ADD COLUMN cleanup_state TEXT '
+                    . 'CHECK (cleanup_state IS NULL OR cleanup_state IN (%s))',
+                Schema::literals(Schema::cleanupStates()),
+            ),
         ]);
     }
 

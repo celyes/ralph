@@ -39,6 +39,7 @@ final class WorkspaceRetention
         private readonly string $label,
         private readonly ?string $path,
         private readonly array $reasons,
+        private readonly bool $cleaned = false,
     ) {
     }
 
@@ -51,6 +52,22 @@ final class WorkspaceRetention
     public static function absent(string $label, ?string $path = null): self
     {
         return new self(RetentionVerdict::Absent, self::named($label), self::location($path), []);
+    }
+
+    /**
+     * The workspace has already been removed, and the removal was confirmed
+     * and written down.
+     *
+     * Absent, like a pass that never had a workspace, and kept apart from it
+     * for the only consumer that cares: the line a person reads. "No workspace
+     * prepared" and "its workspace has already been removed" are different
+     * facts about a finished task, and a run sweeping its own history reports
+     * the second far more often than the first
+     * ({@see \Celyes\RalphPhp\State\CleanupState::Removed}).
+     */
+    public static function cleaned(string $label): self
+    {
+        return new self(RetentionVerdict::Absent, self::named($label), null, [], true);
     }
 
     /**
@@ -161,6 +178,14 @@ final class WorkspaceRetention
     }
 
     /**
+     * Whether the workspace is absent because cleanup finished it off.
+     */
+    public function wasAlreadyCleaned(): bool
+    {
+        return $this->cleaned;
+    }
+
+    /**
      * Whether the workspace is being kept for a person to look at, rather than
      * because cleanup was not entitled to touch it.
      */
@@ -208,7 +233,9 @@ final class WorkspaceRetention
     public function describe(): string
     {
         if ($this->path === null) {
-            return sprintf('%s: no workspace prepared', $this->label);
+            return $this->cleaned
+                ? sprintf('%s: its workspace has already been removed', $this->label)
+                : sprintf('%s: no workspace prepared', $this->label);
         }
 
         if ($this->verdict === RetentionVerdict::Absent) {

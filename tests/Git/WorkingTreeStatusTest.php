@@ -147,6 +147,42 @@ final class WorkingTreeStatusTest extends TestCase
         }
     }
 
+    /**
+     * The one difference a part-way `git worktree remove` can produce, told
+     * apart from everything else.
+     *
+     * {@see WorktreeCleaner} finishes a removal it recorded issuing, and this
+     * is how it decides that what is left of the workspace is the removal's own
+     * work rather than somebody's: a tracked file that has gone, staged or not,
+     * and nothing else.
+     */
+    #[Test]
+    public function a_vanished_tracked_file_is_told_apart_from_every_other_change(): void
+    {
+        $gone = WorkingTreeStatus::parse(self::records(' D unstaged.php', 'D  staged.php', 'DD both.php'));
+
+        self::assertTrue($gone->changes()[0]->isDeletion());
+        self::assertTrue($gone->changes()[1]->isDeletion());
+        self::assertFalse($gone->changes()[2]->isDeletion(), 'a conflict is not a file that has simply gone');
+
+        $kept = WorkingTreeStatus::parse(self::records(
+            ' M modified.php',
+            'M  staged.php',
+            'A  added.php',
+            'MD deleted-after-staging.php',
+            '?? notes.txt',
+            'R  moved.php',
+            'was.php',
+        ));
+
+        foreach ($kept->changes() as $change) {
+            self::assertFalse(
+                $change->isDeletion(),
+                $change->code() . ' is not only a deletion, so it is work to protect',
+            );
+        }
+    }
+
     #[Test]
     public function every_shape_of_conflict_is_recognised_as_unmerged(): void
     {
