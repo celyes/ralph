@@ -923,7 +923,10 @@ final class WorktreeCleanerTest extends TestCase
             WorkspaceRetention::removable('TASK-ABCD1234/1', '/tmp/w'),
         );
 
-        self::assertSame('cleanup: removed /tmp/w', $cleanup->describe());
+        // No prefix of its own: the caller supplies the context, so the same
+        // phrase reads as `cleanup: …` in a log and as `workspace: …` beside a
+        // completion's commit and push.
+        self::assertSame('removed /tmp/w', $cleanup->describe());
         self::assertSame('TASK-ABCD1234/1', $cleanup->label());
         self::assertSame([], $cleanup->hints());
         self::assertSame(

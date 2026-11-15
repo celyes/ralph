@@ -762,6 +762,14 @@ alone, without re-running the agent or making a second commit.
 **Unexpected Git activity is reconciled, not accepted.** A worker that created
 its own commits or moved a branch stops the pass with its work preserved.
 
+**Cleanup is the last step of a completed task.** A task's worktree and its
+`git worktree` registration are removed after — never before — its commit, any
+required push, its row in the state store and the tick in your checklist are
+all durable. So a removal that fails costs nothing: the work is on the branch,
+and the directory is no longer the only copy of anything. The outcome is
+recorded with the rest of the completion evidence, which is where you read
+where a workspace went.
+
 **Cleanup is biased towards leaving things alone.** A failed or interrupted
 pass's worktree is kept, because it is the evidence. A worktree is removed only
 when every one of these holds:

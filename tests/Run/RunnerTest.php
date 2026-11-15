@@ -1312,16 +1312,153 @@ final class RunnerTest extends TestCase
         self::assertTrue($completed->isCompleted());
         self::assertTrue($failed->isFailure());
 
+        // The completed pass's workspace is named by the cleanup it recorded,
+        // not by its row: cleanup clears the row's path, so reading it back
+        // afterwards gives nothing and asserts nothing.
+        $removed = (string) $completed->completion()?->cleanup()?->path();
+        self::assertNotSame('', $removed);
+        self::assertDirectoryDoesNotExist($removed);
+        self::assertNotContains($removed, $this->registeredWorktrees());
+
         $journal = $this->journal();
-        self::assertDirectoryDoesNotExist(
-            (string) $journal->generations()->get($completed->generation())->worktree()->path(),
-        );
-        self::assertDirectoryExists(
-            (string) $journal->generations()->get($failed->generation())->worktree()->path(),
-        );
+        self::assertNull($journal->generations()->get($completed->generation())->worktree()->path());
+
+        $kept = (string) $journal->generations()->get($failed->generation())->worktree()->path();
+        self::assertNotSame('', $kept);
+        self::assertDirectoryExists($kept);
+        self::assertContains($kept, $this->registeredWorktrees());
 
         // The completed pass's branch and commit survive the workspace.
         self::assertSame($completed->commitSha(), $this->tipOf((string) $completed->branch()));
+    }
+
+    /**
+     * The workspace is removed as the last step of a completion, after
+     * everything the task's work depends on is durable (PROJECT.md section K,
+     * item 6).
+     *
+     * The order is the guarantee, so the case is built so that every step
+     * before the removal really happens: a real bare remote, so the push is a
+     * real `git push` that really has to succeed, and the box really written in
+     * the user's file. Only then is the directory asserted gone — and gone from
+     * `git worktree list` as well as from the disk, because the registration
+     * Git keeps is the half that makes `git worktree add` refuse the path next
+     * time.
+     *
+     * What survives it is asserted beside it: the branch, the commit, the
+     * commit on the remote, and the row — which keeps the commit, the branch
+     * and the publication and stops naming a directory that is no longer there.
+     */
+    #[Test]
+    public function a_completed_passs_workspace_goes_once_the_commit_the_push_and_the_tick_are_durable(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+        $remote = $this->givenABareRemote();
+
+        $result = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'))->results()[0];
+
+        // Everything the removal had to wait for.
+        self::assertTrue($result->isCompleted());
+        self::assertTrue($result->wasChecked());
+        self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
+        self::assertSame($result->commitSha(), $this->remoteTipOf($remote, (string) $result->branch()));
+
+        // The workspace, named by the cleanup the completion recorded rather
+        // than by a path reconstructed here.
+        $cleanup = $result->completion()?->cleanup();
+        self::assertNotNull($cleanup, 'A completed pass records what became of its workspace.');
+        self::assertTrue($cleanup->wasRemoved());
+
+        $workspace = (string) $cleanup->path();
+        self::assertStringStartsWith($this->project->path('.ralph/runtime/worktrees'), $workspace);
+        self::assertDirectoryDoesNotExist($workspace);
+        self::assertNotContains($workspace, $this->registeredWorktrees(), 'Git still has the worktree.');
+
+        // The row keeps what a reviewer needs and stops pointing at a
+        // directory that has gone.
+        $pass = $this->journal()->generations()->get($result->generation());
+        self::assertSame(LifecycleState::Completed, $pass->state());
+        self::assertNull($pass->worktree()->path());
+        self::assertFalse($pass->worktree()->isOwned());
+        self::assertSame($result->commitSha(), $pass->commitSha());
+        self::assertSame(PushState::Published, $pass->push()->state());
+
+        // And the work is still where the record says it is.
+        self::assertSame($result->commitSha(), $this->tipOf((string) $result->branch()));
+    }
+
+    /**
+     * A pass that still owes its publication keeps its workspace, and loses it
+     * when the publication lands.
+     *
+     * The ordering of section K, item 6 read from the other direction: the
+     * removal is part of a *completion*, so a pass that got as far as the
+     * commit and no further has nothing removed. The second run finishes the
+     * same pass by retrying only the push ({@see
+     * self::a_pass_owing_a_publication_is_finished_by_retrying_only_the_push()}),
+     * and the workspace goes then — a pass finished on a resume owes its
+     * workspace no differently for having been finished a run later.
+     */
+    #[Test]
+    public function a_pass_owing_a_publication_keeps_its_workspace_until_the_push_lands(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        // `origin` is configured and absent, so the push fails after the commit.
+        $failed = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'))->results()[0];
+
+        self::assertFalse($failed->isCompleted());
+
+        $pass = $this->journal()->generations()->get($failed->generation());
+        $workspace = (string) $pass->worktree()->path();
+
+        self::assertTrue($pass->awaitsPublication());
+        self::assertDirectoryExists($workspace, 'An unfinished pass keeps its workspace.');
+        self::assertContains($workspace, $this->registeredWorktrees());
+
+        // The user adds the remote, and the resume finishes the pass.
+        $remote = $this->givenABareRemote();
+        $result = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'))->results()[0];
+
+        self::assertTrue($result->isCompleted());
+        self::assertTrue($result->wasChecked());
+        self::assertSame($failed->commitSha(), $this->remoteTipOf($remote, (string) $result->branch()));
+
+        // The same directory, now that the completion is durable.
+        self::assertDirectoryDoesNotExist($workspace);
+        self::assertNotContains($workspace, $this->registeredWorktrees());
+        self::assertNull(
+            $this->journal()->generations()->get($result->generation())->worktree()->path(),
+        );
+    }
+
+    /**
+     * The record of the tick says where the workspace went.
+     *
+     * The completion record is what `ralph logs` sends a reader to, and after
+     * this item it is also the answer to "where is the checkout the work was
+     * written in". A reviewer who goes looking for it should find the removal
+     * stated as a step that was taken on purpose, after the commit, with the
+     * commit named as the place the work is now.
+     */
+    #[Test]
+    public function the_record_of_the_tick_says_where_the_workspace_went(): void
+    {
+        $this->givenTasks([self::FIRST]);
+        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
+
+        $result = $this->loopOver(ScriptedVerifier::passing())->results()[0];
+        $record = (string) $result->completion()?->recordPath();
+
+        self::assertFileExists($record);
+        $written = (string) file_get_contents($record);
+
+        self::assertStringContainsString('## The workspace', $written);
+        self::assertStringContainsString((string) $result->completion()?->cleanup()?->path(), $written);
+        self::assertStringContainsString('was removed', $written);
+        self::assertStringContainsString((string) $result->branch(), $written);
     }
 
     /**
@@ -2745,6 +2882,29 @@ final class RunnerTest extends TestCase
         sort($paths);
 
         return array_map('trim', $paths);
+    }
+
+    /**
+     * The worktrees Git itself has registered for this repository.
+     *
+     * The half of a removal that is not visible on the filesystem: an
+     * administrative record left behind is what makes `git worktree add` refuse
+     * the path the next time a task wants it, so cleanup is only finished when
+     * this no longer names the directory (PROJECT.md section K, item 6).
+     *
+     * @return list<string>
+     */
+    private function registeredWorktrees(): array
+    {
+        $paths = [];
+
+        foreach (Git::run($this->project->root(), 'worktree', 'list', '--porcelain')->standardOutputLines() as $line) {
+            if (str_starts_with($line, 'worktree ')) {
+                $paths[] = substr($line, strlen('worktree '));
+            }
+        }
+
+        return $paths;
     }
 
     private function tipOf(string $branch): ?string

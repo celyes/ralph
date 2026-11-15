@@ -170,7 +170,13 @@ final class WorktreeCleanup
     }
 
     /**
-     * One line for the attempt's log and the terminal.
+     * One line saying what happened, with no prefix of its own.
+     *
+     * The caller supplies the context: {@see WorktreeCleaner::report()} writes
+     * it to a log under `cleanup:`, and
+     * {@see \Celyes\RalphPhp\Run\CompletionEvidence} lists it beside the commit
+     * and the push under `workspace:`. Carrying a prefix here would make one of
+     * the two read `cleanup: cleanup: …`, which is what it used to do.
      */
     public function describe(): string
     {
@@ -178,11 +184,11 @@ final class WorktreeCleanup
 
         return match (true) {
             $this->registrationOnly => sprintf(
-                'cleanup: %s had already gone; Git\'s record of it was cleared',
+                '%s had already gone; Git\'s record of it was cleared',
                 $path ?? 'the workspace',
             ),
-            $this->removed => sprintf('cleanup: removed %s', $path ?? 'the workspace'),
-            default => 'cleanup: ' . $this->retention->describe(),
+            $this->removed => sprintf('removed %s', $path ?? 'the workspace'),
+            default => $this->retention->describe(),
         };
     }
 

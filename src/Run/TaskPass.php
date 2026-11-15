@@ -27,6 +27,7 @@ use Celyes\RalphPhp\Git\StagedChanges;
 use Celyes\RalphPhp\Git\TaskBranch;
 use Celyes\RalphPhp\Git\TaskPublisher;
 use Celyes\RalphPhp\Git\TaskWorktree;
+use Celyes\RalphPhp\Git\WorktreeCleanup;
 use Celyes\RalphPhp\Log\AttemptLog;
 use Celyes\RalphPhp\Memory\AttemptContext;
 use Celyes\RalphPhp\Memory\AttemptSummary;
@@ -123,6 +124,24 @@ use InvalidArgumentException;
  */
 final class TaskPass
 {
+    /**
+     * The generation whose workspace is already gone.
+     *
+     * The only mutable state on a pass, and it exists because cleanup is
+     * reached from two directions: {@see self::finalize()} runs it as the last
+     * ordered step of a completion, and the `finally` blocks run it for every
+     * outcome that never gets there. Both must be present — a pass that
+     * completed must not leave a checkout behind, and a pass that failed,
+     * blocked or was interrupted must still have its workspace *assessed* so
+     * the reason it is being kept reaches the log — and without this they would
+     * both run for the same successful pass and report it twice.
+     *
+     * Set only when there is nothing left at the path, never when a workspace
+     * was kept: a pass whose first attempt failed keeps its checkout on
+     * purpose, and the attempt that then passes removes that same directory.
+     */
+    private ?string $cleaned = null;
+
     /**
      * @param VerificationSnapshot $checks the run's frozen checks, read off the
      *        run's row rather than out of the configuration, so that a worker's
@@ -690,7 +709,7 @@ final class TaskPass
             return $this->refused($task, $record, $attempt, $verification, $refusal, $log);
         } finally {
             $this->remember($record, $attempt);
-            $this->sweep($record, $log);
+            $this->cleanUp($record, $log);
         }
     }
 
@@ -909,6 +928,21 @@ final class TaskPass
             $result->exitCode(),
             $this->milliseconds($result),
         );
+
+        // The last ordered step of a completion, and it is here rather than in
+        // the `finally` for the reason section K, item 6 gives: the commit, any
+        // required push, this pass's row and the user's checklist are all
+        // durable above this line, so the checkout the work was done in is no
+        // longer the only copy of anything and removing it is the finish of the
+        // task rather than a risk to it. Its outcome goes into the evidence,
+        // which is what makes a record of a ticked box also a record of where
+        // the workspace went.
+        $cleanup = $this->cleanUp($record, $log);
+        $record = $this->journal->generations()->find($record->generation()) ?? $record;
+
+        if ($cleanup !== null) {
+            $evidence = $evidence->cleanedUp($cleanup);
+        }
 
         return TaskResult::of(
             $task,
@@ -1208,7 +1242,7 @@ final class TaskPass
                 $log,
             );
         } finally {
-            $this->sweep($record, $log);
+            $this->cleanUp($record, $log);
             $log->close();
         }
     }
@@ -1291,7 +1325,7 @@ final class TaskPass
                 $log,
             );
         } finally {
-            $this->sweep($record, $log);
+            $this->cleanUp($record, $log);
             $log->close();
         }
     }
@@ -1358,10 +1392,18 @@ final class TaskPass
         }
 
         $this->journal->tasks()->markVerified($task->id());
+        $record = $this->journal->generations()->complete($record);
+
+        // The same last step, in the same place in the order, as a first-time
+        // finalization ({@see self::finalize()}): a pass finished on a resume
+        // owes its workspace no differently for having been finished a run
+        // later, and leaving it to the `finally` would make the one guarantee
+        // section K, item 6 asks for hold on one path and not the other.
+        $this->cleanUp($record, $log);
 
         return TaskResult::of(
             $task,
-            $this->journal->generations()->complete($record),
+            $this->journal->generations()->find($record->generation()) ?? $record,
             $attempt,
             $verification,
             true,
@@ -2101,23 +2143,59 @@ final class TaskPass
     /**
      * Remove the workspace, or say why it is being kept.
      *
-     * The cleaner decides, and it is handed the pass's final row: a completed
-     * pass's workspace goes, and a failed, blocked or interrupted one stays
-     * with its reason noted, which is the documented half of PROJECT.md
-     * section F, item 10.
+     * The cleaner decides, and it is handed the pass's row **as the store now
+     * holds it** rather than the copy the caller has: whether a workspace may
+     * be removed turns on the pass being closed, and the row is where that
+     * became true. A completed pass's workspace goes, together with its
+     * `git worktree` registration; a failed, blocked or interrupted one stays
+     * with its reason noted (PROJECT.md section F, item 10).
+     *
+     * **Ordering, which is the guarantee of section K, item 6.** Every caller
+     * reaches this after the pass's outcome is durable — {@see self::finalize()}
+     * after the commit, any required push, `complete()` and the write to the
+     * user's checklist, and the `finally` blocks after whatever outcome was
+     * recorded instead. So a removal that fails, or Git refusing one, can cost
+     * a task nothing: there is nothing left that the directory is the only copy
+     * of, which is also why it is safe for this to swallow its failures.
+     *
+     * Runs at most once per pass. Whichever caller gets here first does the
+     * work, and the other finds it done ({@see self::$cleaned}).
+     *
+     * @return WorktreeCleanup|null what was decided, or null when this pass's
+     *         workspace had already been dealt with or the decision could not
+     *         be reached at all
      */
-    private function sweep(GenerationRecord $record, AttemptLog $log): void
+    private function cleanUp(GenerationRecord $record, AttemptLog $log): ?WorktreeCleanup
     {
+        $generation = $record->generation();
+
+        if ($this->cleaned === $generation->slug()) {
+            return null;
+        }
+
         try {
-            $final = $this->journal->generations()->find($record->generation());
+            $final = $this->journal->generations()->find($generation);
 
             if ($final === null) {
-                return;
+                return null;
             }
 
-            $log->note('workspace: ' . $this->workbench->cleaner()->clean($final, $log)->describe());
+            $cleanup = $this->workbench->cleaner()->clean($final, $log);
+
+            if (!$cleanup->wasKept()) {
+                // Latched only once there is nothing left at the path. A
+                // workspace that was *kept* must stay askable: a pass whose
+                // first attempt failed keeps its checkout on purpose, and the
+                // attempt that then passes has to be able to remove the same
+                // directory the earlier one was told to leave alone.
+                $this->cleaned = $generation->slug();
+            }
+
+            return $cleanup;
         } catch (RalphException $failure) {
             $log->note('the workspace could not be cleaned up: ' . $failure->getMessage());
+
+            return null;
         }
     }
 

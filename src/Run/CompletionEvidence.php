@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Run;
 
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\StagedChanges;
+use Celyes\RalphPhp\Git\WorktreeCleanup;
 use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\FailureEvidence;
 use Celyes\RalphPhp\State\GenerationRecord;
@@ -77,6 +78,11 @@ final class CompletionEvidence
      *        row whose columns this evidence is about
      * @param CheckboxEdit|null $edit the checklist write, once it has landed;
      *        null while the condition is still being asked
+     * @param WorktreeCleanup|null $cleanup what became of the task's
+     *        workspace, once finalization has got that far; null while the
+     *        conditions are still being asked, and for a completion that was
+     *        refused — a pass that earned no tick keeps its workspace, and
+     *        saying so under "what this rests on" would read as a step taken
      * @param string|null $recordPath where this was written for a person to
      *        read, when it was
      */
@@ -91,6 +97,7 @@ final class CompletionEvidence
         private readonly UnverifiedText $claim,
         private readonly string $checklistPath,
         private readonly ?CheckboxEdit $edit,
+        private readonly ?WorktreeCleanup $cleanup,
         private readonly ?string $recordPath,
     ) {
     }
@@ -129,6 +136,7 @@ final class CompletionEvidence
             $checklistPath,
             null,
             null,
+            null,
         );
     }
 
@@ -151,6 +159,37 @@ final class CompletionEvidence
             $this->claim,
             $this->checklistPath,
             $edit,
+            $this->cleanup,
+            $this->recordPath,
+        );
+    }
+
+    /**
+     * The same evidence, with what finalization did to the task's workspace.
+     *
+     * The last of the ordered steps and the last thing added here, because the
+     * order is the guarantee: the commit, any required push, the pass's own row
+     * and the user's checklist are all durable before the workspace is touched,
+     * so nothing a removal could go wrong with can cost a task its work
+     * (PROJECT.md section K, item 6). Folding the outcome into the evidence is
+     * what makes the step part of the completion rather than a tidy-up beside
+     * it — a record that says a box was ticked also says whether the checkout
+     * the work was done in is still on disk, and where it is when it is.
+     */
+    public function cleanedUp(WorktreeCleanup $cleanup): self
+    {
+        return new self(
+            $this->record,
+            $this->description,
+            $this->attempt,
+            $this->base,
+            $this->verification,
+            $this->staged,
+            $this->satisfaction,
+            $this->claim,
+            $this->checklistPath,
+            $this->edit,
+            $cleanup,
             $this->recordPath,
         );
     }
@@ -171,6 +210,7 @@ final class CompletionEvidence
             $this->claim,
             $this->checklistPath,
             $this->edit,
+            $this->cleanup,
             $recordPath,
         );
     }
@@ -292,6 +332,25 @@ final class CompletionEvidence
     public function wasChecked(): bool
     {
         return $this->edit !== null;
+    }
+
+    /**
+     * What became of the task's workspace, once finalization reached it.
+     */
+    public function cleanup(): ?WorktreeCleanup
+    {
+        return $this->cleanup;
+    }
+
+    /**
+     * Whether the task's workspace is gone from the filesystem and from Git.
+     *
+     * False while cleanup has not run, which is not the same as a workspace
+     * that stayed — {@see self::cleanup()} tells those apart.
+     */
+    public function workspaceWasRemoved(): bool
+    {
+        return $this->cleanup?->wasRemoved() === true;
     }
 
     /**
@@ -425,6 +484,13 @@ final class CompletionEvidence
             $this->edit === null ? ' — not written yet' : sprintf(' line %d, now checked', $this->edit->line()),
         );
 
+        // Last, as it happened last. A line only once cleanup has run, so that
+        // the record of a refused completion does not list a step the pass
+        // never reached.
+        if ($this->cleanup !== null) {
+            $details[] = 'workspace: ' . $this->cleanup->describe();
+        }
+
         return $details;
     }
 
@@ -513,6 +579,10 @@ final class CompletionEvidence
             $this->checklistSection(),
         ];
 
+        if ($this->cleanup !== null) {
+            $sections[] = $this->workspaceSection();
+        }
+
         if (!$this->claim->isEmpty()) {
             $sections[] = $this->claimSection();
         }
@@ -543,6 +613,7 @@ final class CompletionEvidence
             'no_change' => $this->isNoChange(),
             'staged' => $this->staged->toArray(),
             'push' => $this->push()->toColumns(),
+            'workspace' => $this->cleanup?->toArray(),
             'verification' => $this->verification->toArray(),
             'satisfaction' => $this->satisfaction?->toArray(),
             'claim' => $this->claim->toStorage(),
@@ -757,6 +828,68 @@ final class CompletionEvidence
                 $this->edit->line(),
             ),
         ]);
+    }
+
+    /**
+     * What finalization did to the checkout the work was done in.
+     *
+     * Written after the Git and checklist sections because that is the order
+     * the steps happened in, and a reader following the record down is reading
+     * the sequence the guarantee rests on: by the time this section's step was
+     * taken, everything above it was already durable.
+     */
+    private function workspaceSection(): string
+    {
+        $cleanup = $this->cleanup;
+
+        if ($cleanup === null) {
+            // Unreachable: the section is only assembled when there is one.
+            return '';
+        }
+
+        $lines = ['## The workspace', ''];
+
+        if ($cleanup->wasRemoved()) {
+            $lines[] = $cleanup->clearedRegistrationOnly()
+                ? sprintf(
+                    'The task\'s workspace at `%s` had already gone, and Git\'s record of it was '
+                        . 'cleared. Nothing was deleted by this run.',
+                    (string) $cleanup->path(),
+                )
+                : sprintf(
+                    'The task\'s workspace at `%s` was removed, along with its `git worktree` '
+                        . 'registration. It was removed only after the commit, any required push, '
+                        . 'this pass\'s row and the checklist write above were durable, so none of '
+                        . 'them depends on it.',
+                    (string) $cleanup->path(),
+                );
+
+            if (!$this->isNoChange()) {
+                $lines[] = '';
+                $lines[] = sprintf(
+                    'The work is on `%s` as commit %s; the checkout it was written in is not needed '
+                        . 'to read, review or merge it.',
+                    $this->record->branch() ?? 'its branch',
+                    $this->shortCommit(),
+                );
+            }
+
+            return implode("\n", $lines);
+        }
+
+        $lines[] = sprintf(
+            'The workspace at `%s` is still on disk: %s',
+            $cleanup->path() ?? 'its recorded path',
+            $cleanup->describe() . '.',
+        );
+
+        $lines[] = '';
+
+        foreach ([...$cleanup->details(), ...$cleanup->hints()] as $line) {
+            $lines[] = '- ' . $line;
+        }
+
+        return implode("\n", $lines);
     }
 
     private function claimSection(): string

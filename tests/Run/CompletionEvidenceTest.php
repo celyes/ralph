@@ -8,9 +8,12 @@ use Celyes\RalphPhp\Config\VerificationCommand;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\ExcludedChange;
 use Celyes\RalphPhp\Git\ExclusionReason;
+use Celyes\RalphPhp\Git\RetentionReason;
 use Celyes\RalphPhp\Git\StagedChanges;
 use Celyes\RalphPhp\Git\WorkingTreeChange;
+use Celyes\RalphPhp\Git\WorkspaceRetention;
 use Celyes\RalphPhp\Git\WorkspaceState;
+use Celyes\RalphPhp\Git\WorktreeCleanup;
 use Celyes\RalphPhp\Run\CompletionEvidence;
 use Celyes\RalphPhp\Run\CompletionRecorder;
 use Celyes\RalphPhp\State\GenerationRecord;
@@ -503,6 +506,127 @@ final class CompletionEvidenceTest extends TestCase
         self::assertNull($kept->recordPath());
         self::assertStringContainsString('completed: verified and committed', implode("\n", $sink->notes));
         self::assertStringNotContainsString('kept at', implode("\n", $sink->notes));
+    }
+
+    /**
+     * Cleanup is the last of the ordered steps, and what it did becomes part
+     * of what the tick rests on (PROJECT.md section K, item 6).
+     *
+     * A record that says a box was ticked should also say whether the checkout
+     * the work was written in is still on disk, because the two questions are
+     * asked together: a reviewer who cannot find the workspace needs to be told
+     * it was removed on purpose, and told where the work went instead.
+     */
+    #[Test]
+    public function a_completion_carries_what_became_of_the_workspace(): void
+    {
+        $evidence = $this->evidence()->cleanedUp($this->removal());
+
+        self::assertTrue($evidence->workspaceWasRemoved());
+        self::assertNotNull($evidence->cleanup());
+        self::assertSame($this->directory, $evidence->cleanup()?->path());
+
+        // Beside the commit and the publication, and last, because it happened
+        // last: everything above it was durable before the directory went.
+        $details = $evidence->details();
+        self::assertStringContainsString('workspace: removed ' . $this->directory, end($details));
+    }
+
+    /**
+     * Until cleanup has run there is nothing to say about the workspace, and
+     * the record says nothing rather than guessing.
+     */
+    #[Test]
+    public function a_completion_that_has_not_reached_cleanup_says_nothing_about_the_workspace(): void
+    {
+        $evidence = $this->evidence();
+
+        self::assertNull($evidence->cleanup());
+        self::assertFalse($evidence->workspaceWasRemoved());
+        self::assertStringNotContainsString('workspace:', implode("\n", $evidence->details()));
+        self::assertStringNotContainsString('## The workspace', $evidence->toMarkdown());
+        self::assertNull($evidence->toArray()['workspace']);
+    }
+
+    /**
+     * A workspace that was kept is not a workspace that was removed, and the
+     * record is the place a person is told where to find it.
+     */
+    #[Test]
+    public function a_kept_workspace_is_reported_as_kept_with_the_reason(): void
+    {
+        $evidence = $this->evidence()->cleanedUp(WorktreeCleanup::kept(WorkspaceRetention::preserved(
+            'TASK-1A2B3C4D/1',
+            $this->directory,
+            [RetentionReason::UncommittedWork->value => 'src/Thing.php was modified'],
+        )));
+
+        self::assertFalse($evidence->workspaceWasRemoved());
+
+        $markdown = $evidence->toMarkdown();
+        self::assertStringContainsString('## The workspace', $markdown);
+        self::assertStringContainsString('is still on disk', $markdown);
+        self::assertStringContainsString('src/Thing.php was modified', $markdown);
+    }
+
+    /**
+     * The section a reviewer reads: the directory is gone on purpose, and the
+     * commit is where the work is now.
+     */
+    #[Test]
+    public function the_record_says_the_workspace_went_and_where_the_work_is(): void
+    {
+        $markdown = $this->evidence()->cleanedUp($this->removal())->toMarkdown();
+
+        self::assertStringContainsString('## The workspace', $markdown);
+        self::assertStringContainsString($this->directory . '` was removed', $markdown);
+        self::assertStringContainsString('git worktree` registration', $markdown);
+        self::assertStringContainsString('were durable', $markdown);
+        self::assertStringContainsString('ralph/task-1a2b3c4d', $markdown);
+        self::assertStringContainsString('9f8e7d6c5b4a', $markdown);
+    }
+
+    /**
+     * A directory somebody else had already deleted is not something this run
+     * deleted, and the record does not claim it was.
+     */
+    #[Test]
+    public function a_cleared_registration_is_not_reported_as_deleted_files(): void
+    {
+        $markdown = $this->evidence()
+            ->cleanedUp(WorktreeCleanup::cleared(
+                WorkspaceRetention::removable('TASK-1A2B3C4D/1', $this->directory),
+            ))
+            ->toMarkdown();
+
+        self::assertStringContainsString('had already gone', $markdown);
+        self::assertStringContainsString('Nothing was deleted by this run', $markdown);
+    }
+
+    /**
+     * The structured form carries it too, so `status --json` and the events can
+     * answer the same question as the Markdown.
+     */
+    #[Test]
+    public function the_structured_form_carries_the_workspace_outcome(): void
+    {
+        $workspace = $this->evidence()->cleanedUp($this->removal())->toArray()['workspace'];
+
+        self::assertIsArray($workspace);
+        self::assertTrue($workspace['removed']);
+        self::assertFalse($workspace['registration_only']);
+        self::assertSame($this->directory, $workspace['retention']['path']);
+        self::assertSame('removable', $workspace['retention']['verdict']);
+    }
+
+    /**
+     * What a successful removal looks like when the cleaner reports one.
+     */
+    private function removal(): WorktreeCleanup
+    {
+        return WorktreeCleanup::removed(
+            WorkspaceRetention::removable('TASK-1A2B3C4D/1', $this->directory),
+        );
     }
 
     /**

@@ -566,6 +566,10 @@ final class WorktreeCleaner
 
     /**
      * Note what happened, and why when it is worth saying.
+     *
+     * The one place the outcome reaches a log, which is why the caller is not
+     * expected to note it as well: a pass that both let the cleaner write here
+     * and wrote its own line said everything twice.
      */
     private function report(WorktreeCleanup $cleanup, ?OutputSink $sink): WorktreeCleanup
     {
@@ -573,7 +577,7 @@ final class WorktreeCleaner
             return $cleanup;
         }
 
-        $sink->note($cleanup->describe());
+        $sink->note('cleanup: ' . $cleanup->describe());
 
         foreach ($cleanup->details() as $detail) {
             $sink->note('cleanup: ' . $detail);
