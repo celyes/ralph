@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Console;
 
+use Celyes\RalphPhp\Console\Command\CleanCommand;
 use Celyes\RalphPhp\Console\Command\HelpCommand;
 use Celyes\RalphPhp\Console\Command\InitCommand;
 use Celyes\RalphPhp\Console\Command\LogsCommand;
@@ -71,7 +72,7 @@ final class Application
 
         // Registered in the order `ralph help` lists them, which is the order
         // a user meets them in: set the project up, check the environment, run
-        // the loop, then read and continue what it did.
+        // the loop, then read and continue what it did, then clear up after it.
         $registry->add(new InitCommand());
         $registry->add(new PreflightCommand());
         $registry->add(new RunCommand());
@@ -79,6 +80,7 @@ final class Application
         $registry->add(new LogsCommand());
         $registry->add(new ResumeCommand());
         $registry->add(new RetryCommand());
+        $registry->add(new CleanCommand());
 
         $registry->add($help);
         $registry->add(new VersionCommand());

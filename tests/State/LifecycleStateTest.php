@@ -244,6 +244,39 @@ final class LifecycleStateTest extends TestCase
         self::assertSame($state->isOpen() && !$state->isRunning(), $state->isRetryable());
     }
 
+    /**
+     * The three states PROJECT.md section K, item 7 names together, and the
+     * line that decides whose workspace `ralph clean TASK-ID` may remove.
+     *
+     * Narrower than {@see LifecycleState::isRetryable()} on purpose: a pending
+     * pass is retryable and has stopped at nothing.
+     */
+    #[Test]
+    #[DataProvider('states')]
+    public function only_a_pass_that_got_part_way_and_gave_up_has_stopped(LifecycleState $state): void
+    {
+        $stopped = [LifecycleState::Blocked, LifecycleState::Failed, LifecycleState::Interrupted];
+
+        self::assertSame(
+            in_array($state, $stopped, true),
+            $state->hasStopped(),
+            sprintf('%s was reported as a pass that stopped part way.', $state->value),
+        );
+
+        // Every stopped state is also an open one, since a pass that gave up is
+        // still the task's current pass.
+        if ($state->hasStopped()) {
+            self::assertTrue($state->isOpen());
+        }
+    }
+
+    #[Test]
+    public function a_pending_pass_is_retryable_without_having_stopped(): void
+    {
+        self::assertTrue(LifecycleState::Pending->isRetryable());
+        self::assertFalse(LifecycleState::Pending->hasStopped());
+    }
+
     #[Test]
     public function completed_is_the_one_state_that_earns_a_checkbox(): void
     {

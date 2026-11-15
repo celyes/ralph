@@ -10,6 +10,7 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\BaseResolver;
 use Celyes\RalphPhp\Git\BranchNamer;
+use Celyes\RalphPhp\Git\CleanupRequest;
 use Celyes\RalphPhp\Git\CommitMessage;
 use Celyes\RalphPhp\Git\RetentionReason;
 use Celyes\RalphPhp\Git\RetentionVerdict;
@@ -29,6 +30,7 @@ use Celyes\RalphPhp\State\CleanupState;
 use Celyes\RalphPhp\State\Database;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\GenerationStore;
+use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\State\TaskStore;
 use Celyes\RalphPhp\State\WorktreeOwnership;
@@ -67,10 +69,13 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(RetentionReason::class)]
 #[CoversClass(RetentionVerdict::class)]
 #[CoversClass(CleanupState::class)]
+#[CoversClass(CleanupRequest::class)]
 #[CoversClass(WorkingTreeChange::class)]
 final class WorktreeCleanerTest extends TestCase
 {
     private const string DESCRIPTION = 'Add a greeting command';
+
+    private const string OTHER = 'Document the greeting command';
 
     private const string WORK = "<?php\n\n// the implementation\n";
 
@@ -287,7 +292,11 @@ final class WorktreeCleanerTest extends TestCase
 
         self::assertStringContainsString('failed', $cleanup->describe());
         self::assertContains('cleanup: The pass has not finished, so its workspace is kept for inspection: the pass is failed (stopped after an unsuccessful attempt)', $sink->notes);
-        self::assertContains('Run `ralph logs TASK-ID` to read what happened, or `ralph retry TASK-ID` to continue in it.', $cleanup->hints());
+        self::assertContains(
+            'Run `ralph logs TASK-ID` to read what happened, `ralph retry TASK-ID` to continue in it, '
+                . 'or `ralph clean TASK-ID` to remove it once you are done looking.',
+            $cleanup->hints(),
+        );
     }
 
     /**
@@ -344,6 +353,186 @@ final class WorktreeCleanerTest extends TestCase
             $retention->observationFor(RetentionReason::PassUnfinished),
         );
         self::assertDirectoryExists($workspace->path());
+    }
+
+    // ------------------------------------------------- the explicit request
+
+    /**
+     * The other half of PROJECT.md section K, item 7: once a person has looked
+     * at a failure, they can ask for its workspace and get it removed.
+     */
+    #[Test]
+    public function an_explicit_request_removes_a_stopped_passs_clean_workspace(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->generations->fail($pass);
+
+        // The default is unchanged by the existence of the request: a sweep
+        // during a run still keeps it.
+        self::assertTrue($this->cleaner()->assess($pass)->isPreserved());
+
+        $cleanup = $this->cleaner()->clean($pass, null, CleanupRequest::Explicit);
+
+        self::assertTrue($cleanup->wasRemoved());
+        self::assertDirectoryDoesNotExist($workspace->path());
+        self::assertNull($this->registrationAt($workspace->path()));
+
+        // The pass itself is untouched by the directory going: it is still a
+        // failure, with its attempts and its blocker, and still retryable.
+        $record = $this->recordOf($pass);
+        self::assertSame(LifecycleState::Failed, $record->state());
+        self::assertNull($record->worktree()->path());
+    }
+
+    /**
+     * Blocked and interrupted are the item's other two states, and they behave
+     * the same way.
+     */
+    #[Test]
+    public function an_explicit_request_removes_a_blocked_or_interrupted_passs_workspace(): void
+    {
+        $blocked = $this->givenAPass();
+        $blockedWorkspace = $this->givenAWorkspace($blocked);
+        $blocked = $this->generations->block(
+            $blocked,
+            Blocker::raised('The agent asked a question.', 'Answer it, then retry the task.'),
+        );
+
+        $interrupted = $this->givenAPass(self::OTHER);
+        $interruptedWorkspace = $this->givenAWorkspace($interrupted);
+        $interrupted = $this->generations->interrupt($interrupted);
+
+        $outcomes = $this->cleaner()->sweep([$blocked, $interrupted], null, CleanupRequest::Explicit);
+
+        self::assertTrue($outcomes[0]->wasRemoved());
+        self::assertTrue($outcomes[1]->wasRemoved());
+        self::assertDirectoryDoesNotExist($blockedWorkspace->path());
+        self::assertDirectoryDoesNotExist($interruptedWorkspace->path());
+    }
+
+    /**
+     * The protection the item asks for by name, and the one an explicit request
+     * must not be able to buy: a half-written implementation is not deleted
+     * because somebody typed a task identifier.
+     */
+    #[Test]
+    public function an_explicit_request_still_refuses_a_workspace_holding_uncommitted_work(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $this->inWorkspace($workspace, 'src/Greeting.php', self::WORK);
+        $pass = $this->generations->fail($pass);
+
+        $cleanup = $this->cleaner()->clean($pass, null, CleanupRequest::Explicit);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertFalse($cleanup->wasRemoved());
+        self::assertTrue($cleanup->retention()->hasReason(RetentionReason::UncommittedWork));
+        self::assertFalse(
+            $cleanup->retention()->hasReason(RetentionReason::PassUnfinished),
+            'The waived reason is gone; the one that protects the work is what kept it.',
+        );
+
+        self::assertDirectoryExists($workspace->path());
+        self::assertSame(self::WORK, file_get_contents($workspace->path() . '/src/Greeting.php'));
+        self::assertSame($workspace->path(), $this->recordOf($pass)->worktree()->path());
+    }
+
+    /**
+     * A commit nothing but the worktree refers to is the other thing that would
+     * be lost, and it stops an explicit request too.
+     */
+    #[Test]
+    public function an_explicit_request_still_refuses_a_workspace_holding_an_unrecorded_commit(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $this->inWorkspace($workspace, 'src/Greeting.php', self::WORK);
+        Git::run($workspace->path(), 'add', 'src/Greeting.php');
+        Git::run($workspace->path(), 'commit', '-m', 'The worker committed this itself');
+        $pass = $this->generations->fail($this->recordOf($pass));
+
+        $cleanup = $this->cleaner()->clean($pass, null, CleanupRequest::Explicit);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertTrue($cleanup->retention()->hasReason(RetentionReason::UnrecordedCommit));
+        self::assertDirectoryExists($workspace->path());
+    }
+
+    /**
+     * An explicit request is about a pass that has *stopped*. A workspace a
+     * runner is holding right now is not one anybody can ask to have deleted
+     * from another terminal.
+     */
+    #[Test]
+    public function an_explicit_request_does_not_touch_a_running_passs_workspace(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+
+        $retention = $this->cleaner()->assess($this->recordOf($pass), CleanupRequest::Explicit);
+
+        self::assertTrue($retention->isPreserved());
+        self::assertTrue($retention->hasReason(RetentionReason::PassUnfinished));
+        self::assertDirectoryExists($workspace->path());
+    }
+
+    /**
+     * Nor one that was never begun: a workspace recorded against a pending pass
+     * is a reconciliation question, not a directory to clear up.
+     */
+    #[Test]
+    public function an_explicit_request_does_not_touch_a_pending_passs_workspace(): void
+    {
+        $pass = $this->givenAPass(started: false);
+        $workspace = $this->givenAWorkspace($pass);
+
+        $retention = $this->cleaner()->assess($this->recordOf($pass), CleanupRequest::Explicit);
+
+        self::assertTrue($retention->isPreserved());
+        self::assertTrue($retention->hasReason(RetentionReason::PassUnfinished));
+        self::assertDirectoryExists($workspace->path());
+    }
+
+    /**
+     * Ownership is not something a request can waive either: the directory this
+     * pass adopted is still somebody else's.
+     */
+    #[Test]
+    public function an_explicit_request_still_refuses_an_adopted_workspace(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $this->generations->recordWorktree($pass, WorktreeOwnership::adopted($workspace->path()));
+        $pass = $this->generations->fail($this->recordOf($pass));
+
+        $cleanup = $this->cleaner()->clean($pass, null, CleanupRequest::Explicit);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertTrue($cleanup->retention()->hasReason(RetentionReason::NotOwned));
+        self::assertDirectoryExists($workspace->path());
+    }
+
+    /**
+     * A completed pass's workspace is removable either way, so the request
+     * changes nothing about the run's own housekeeping.
+     */
+    #[Test]
+    public function an_explicit_request_decides_a_finished_pass_exactly_as_a_run_would(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $this->inWorkspace($workspace, 'notes.txt', "looked at this\n");
+        $pass = $this->generations->complete($pass);
+
+        $automatic = $this->cleaner()->assess($pass);
+        $explicit = $this->cleaner()->assess($pass, CleanupRequest::Explicit);
+
+        self::assertTrue($automatic->isPreserved());
+        self::assertTrue($explicit->isPreserved());
+        self::assertSame($automatic->reasons(), $explicit->reasons());
     }
 
     // ------------------------------------------------------------- ownership

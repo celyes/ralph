@@ -304,6 +304,29 @@ enum LifecycleState: string
     }
 
     /**
+     * Whether the pass stopped part way and nothing is working on it.
+     *
+     * The three states PROJECT.md section K, item 7 names together: failed,
+     * blocked and interrupted. What they share is that work happened, it did
+     * not finish, and no runner is holding it — which is what makes their
+     * workspaces both *evidence worth keeping* and the only ones a person can
+     * be allowed to ask Ralph PHP to remove
+     * ({@see \Celyes\RalphPhp\Git\CleanupRequest::Explicit}).
+     *
+     * Narrower than {@see self::isRetryable()}, which also admits a pending
+     * pass. A pass that has not begun has stopped at nothing, and a workspace
+     * recorded against one is a reconciliation question rather than a directory
+     * to clear up.
+     */
+    public function hasStopped(): bool
+    {
+        return match ($this) {
+            self::Blocked, self::Failed, self::Interrupted => true,
+            self::Pending, self::Running, self::Completed, self::Skipped => false,
+        };
+    }
+
+    /**
      * Whether another attempt at this same pass is allowed.
      *
      * Open and not already running. Says nothing about whether an attempt is

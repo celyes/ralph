@@ -48,6 +48,20 @@ use InvalidArgumentException;
  *    ({@see self::relink()}), which rewrites the two files linking a workspace
  *    to its repository and deletes nothing.
  *
+ * **A person can ask anyway** (PROJECT.md section K, item 7). Preserving a
+ * failed workspace for inspection is only half of what the item asks for; the
+ * other half is a way to clear one up once it has been inspected, so that the
+ * answer to a full `.ralph/runtime/worktrees/` is not `rm -rf`. That is
+ * `ralph clean TASK-ID`, which reaches this class as
+ * {@see CleanupRequest::Explicit} and buys exactly one thing: the "pass has not
+ * finished" reason is waived, for a pass that has **stopped** — failed, blocked
+ * or interrupted, never one a runner is working on. Every other reason above
+ * stands, so the explicit action removes a clean preserved workspace and
+ * refuses one holding uncommitted work just as firmly as the automatic one
+ * does. There is no flag anywhere in the package that overrides that refusal:
+ * a person who has decided those changes are expendable discards them with
+ * their own Git, which is a deletion they can see the extent of.
+ *
  * **Cleanup is idempotent, and finishes itself** (PROJECT.md section K,
  * item 7). Every decision is taken afresh from the row and the repository, the
  * row is marked before the removal is issued and completed only once Git and
@@ -187,9 +201,20 @@ final class WorktreeCleaner
      * ({@see self::writtenSinceTheRemoval()}). A modification or an untracked
      * file is somebody's work, and keeps the directory exactly as it would have
      * on the first attempt.
+     *
+     * @param CleanupRequest $request who is asking. The default is a run's own
+     *        housekeeping, which never removes an unfinished pass's workspace;
+     *        {@see CleanupRequest::Explicit} is `ralph clean TASK-ID` and
+     *        waives {@see RetentionReason::PassUnfinished} for a pass that has
+     *        stopped — and nothing else, so an explicit request is still
+     *        refused by uncommitted work, an unrecorded commit, a commit its
+     *        branch does not hold, a locked worktree or a directory that is not
+     *        this package's
      */
-    public function assess(GenerationRecord $generation): WorkspaceRetention
-    {
+    public function assess(
+        GenerationRecord $generation,
+        CleanupRequest $request = CleanupRequest::Finalization,
+    ): WorkspaceRetention {
         $label = $generation->generation()->label();
         $ownership = $generation->worktree();
         $path = $ownership->path();
@@ -210,7 +235,11 @@ final class WorktreeCleaner
             );
         }
 
-        if ($generation->isOpen()) {
+        // The one reason an explicit request waives, and only for a pass that
+        // has stopped (PROJECT.md section K, item 7). A run's own cleanup never
+        // gets here with anything but Finalization, so the default behaviour is
+        // unchanged: an unfinished pass keeps its workspace.
+        if ($generation->isOpen() && !$request->waivesPreservation($generation->state())) {
             $reasons[RetentionReason::PassUnfinished->value] = sprintf(
                 'the pass is %s (%s)',
                 $generation->state()->value,
@@ -361,14 +390,20 @@ final class WorktreeCleaner
      * @param OutputSink|null $sink where the decision is noted as it is made —
      *        the attempt's log and the terminal. Never closed here: the caller
      *        that opened the log owns it.
+     * @param CleanupRequest  $request who is asking; see {@see self::assess()},
+     *        which is where the one difference between a run's housekeeping and
+     *        the action a person asked for is made
      *
      * @throws StateException when the state store will not record the start or
      *                        the end of a removal, which would leave a row that
      *                        cannot be reconciled with the directory
      */
-    public function clean(GenerationRecord $generation, ?OutputSink $sink = null): WorktreeCleanup
-    {
-        $retention = $this->assess($generation);
+    public function clean(
+        GenerationRecord $generation,
+        ?OutputSink $sink = null,
+        CleanupRequest $request = CleanupRequest::Finalization,
+    ): WorktreeCleanup {
+        $retention = $this->assess($generation, $request);
 
         if ($retention->isAbsent()) {
             return $this->report(WorktreeCleanup::nothing($retention), $sink);
@@ -440,6 +475,9 @@ final class WorktreeCleaner
      * this safe to call with a run's whole history.
      *
      * @param list<GenerationRecord> $generations
+     * @param CleanupRequest         $request who is asking, applied to each of
+     *        them alike; `ralph clean --all` is this with
+     *        {@see CleanupRequest::Explicit}
      *
      * @return list<WorktreeCleanup> one outcome per pass, including the passes
      *         that had no workspace, so that a caller reporting a sweep can
@@ -447,12 +485,15 @@ final class WorktreeCleaner
      *
      * @throws StateException when a removal cannot be recorded
      */
-    public function sweep(array $generations, ?OutputSink $sink = null): array
-    {
+    public function sweep(
+        array $generations,
+        ?OutputSink $sink = null,
+        CleanupRequest $request = CleanupRequest::Finalization,
+    ): array {
         $outcomes = [];
 
         foreach ($generations as $generation) {
-            $outcomes[] = $this->clean($generation, $sink);
+            $outcomes[] = $this->clean($generation, $sink, $request);
         }
 
         return $outcomes;

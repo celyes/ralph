@@ -217,6 +217,39 @@ final class GenerationStoreTest extends TestCase
         );
     }
 
+    /**
+     * What a sweep over the whole project reads: every pass, with the columns a
+     * cleanup decision is made from, including the passes whose tasks are no
+     * longer in the checklist.
+     */
+    #[Test]
+    public function every_recorded_pass_is_read_back_with_its_workspace(): void
+    {
+        $first = $this->start($this->record('Add a --dry-run option'));
+        $second = $this->start($this->record('Document the import command'));
+        $this->generations->recordWorktree($first, WorktreeOwnership::created('/tmp/ralph/first'));
+
+        $all = $this->generations->all();
+
+        // Ordered by the task row, which is the order the tasks were recorded
+        // in, so a sweep works through a project's history front to back.
+        self::assertCount(2, $all);
+        self::assertSame(
+            [$first->task()->value(), $second->task()->value()],
+            array_map(static fn (GenerationRecord $record): string => $record->task()->value(), $all),
+        );
+        self::assertSame(
+            ['/tmp/ralph/first', null],
+            array_map(static fn (GenerationRecord $record): ?string => $record->worktree()->path(), $all),
+        );
+    }
+
+    #[Test]
+    public function a_project_with_no_passes_reads_back_as_no_passes(): void
+    {
+        self::assertSame([], $this->generations->all());
+    }
+
     #[Test]
     public function a_pass_that_was_never_recorded_is_not_found(): void
     {

@@ -243,6 +243,32 @@ final class GenerationStore
     }
 
     /**
+     * Every pass this project has recorded, oldest task first.
+     *
+     * What a sweep over the project's whole history needs: `ralph clean` has to
+     * account for every workspace a row names, including the passes of tasks
+     * that have since been reworded or deleted out of the checklist — their
+     * directories are on disk whether or not the item that produced them is
+     * still there.
+     *
+     * The rows, not {@see self::history()}'s reading of them. That reading is
+     * for the checklist layer and drops exactly the columns a cleanup decision
+     * is made from: the recorded workspace, its ownership and how far a
+     * previous removal got.
+     *
+     * @return list<GenerationRecord>
+     *
+     * @throws StateException when the rows cannot be read
+     */
+    public function all(): array
+    {
+        return array_map(
+            static fn (array $row): GenerationRecord => GenerationRecord::fromRow($row),
+            $this->database->query('SELECT * FROM generations ORDER BY task_id, number'),
+        );
+    }
+
+    /**
      * The pass that produced a commit, when this project recorded one.
      *
      * What tells a commit this package made from a commit somebody made by

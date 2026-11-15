@@ -295,6 +295,7 @@ checkout and that branch and those commits would be made here.
 | [`ralph logs TASK-ID`](#ralph-logs-task-id) | Read what the agent and the checks actually produced for one task. |
 | [`ralph resume`](#ralph-resume---agent-name---bail--no-bail) | Continue an interrupted run from the phase it stopped in. |
 | [`ralph retry TASK-ID`](#ralph-retry-task-id) | Have another go at one failed or blocked task, keeping its history. |
+| [`ralph clean`](#ralph-clean-task-id---all) | See the task workspaces being kept, and remove the ones you are finished with. |
 | [`ralph help`](#ralph-help-command-ralph-version) | Read the usage for the application or one command. |
 
 Every command takes `-h`/`--help` for its own usage, and `-v`/`--verbose` to
@@ -384,6 +385,59 @@ from where it stopped rather than attempting it again. For a task that was
 checked off, untick the item and run `ralph run`: the work is taken on as a new
 pass with a commit of its own, and the finished one keeps its commit and
 evidence.
+
+### `ralph clean [TASK-ID] [--all]`
+
+Reports the task worktrees the project is holding under
+`.ralph/runtime/worktrees/`, and removes the ones you name.
+
+A pass that failed, was blocked or was interrupted keeps its worktree, because
+that directory is the evidence and what `ralph retry` carries on in
+([Git behaviour](#git-behaviour)). That is the right default and it accumulates:
+a project worked on for a week can hold a checkout per stopped task, each with
+its own `vendor/`. This is how you clear one up once you have read it, instead
+of `rm -rf`, which takes Git's registration with it and leaves `git worktree
+add` refusing the path afterwards.
+
+```console
+$ ralph clean                      # list; removes nothing
+$ ralph clean TASK-1A2B3C4D        # remove that task's kept worktrees
+$ ralph clean --all                # the same for every stopped pass
+```
+
+With no arguments it changes nothing at all: it lists each recorded workspace,
+says whether it could be removed and gives the reason for each one that could
+not. That is the opposite of most `clean` commands, deliberately — these
+directories can hold the only copy of something — and it is the only form that
+is safe to run during a run. The acting forms take the repository lock, so they
+refuse to start while another Ralph PHP is working here.
+
+**Uncommitted changes are never deleted, and no option overrides that.** The
+command does exactly one thing the run's own cleanup will not: it removes the
+worktree of a pass that *stopped*, which cleanup keeps for inspection. Every
+other protection stands — modified, staged or untracked files, a commit no
+record names, a commit its branch does not hold, a worktree Git has locked, a
+directory Ralph PHP did not create. A workspace kept for one of those is
+reported with the reason and the full path, and it is yours to clear up:
+
+```console
+$ git -C .ralph/runtime/worktrees/TASK-1A2B3C4D status   # decide what is wanted
+$ git -C .ralph/runtime/worktrees/TASK-1A2B3C4D reset --hard
+$ git -C .ralph/runtime/worktrees/TASK-1A2B3C4D clean -fd
+$ ralph clean TASK-1A2B3C4D
+```
+
+There is no `--force`, because it would be one word that deleted an unknown
+amount of your work.
+
+Cleaning a workspace deletes a directory, not the record of the work. The
+task's branch, its commit, its attempts, its logs and its verification results
+all stay exactly where they were, the item stays unticked, and `ralph retry
+TASK-ID` prepares a fresh workspace from the recorded base commit.
+
+Exits 0 when the listing printed or everything you asked about is gone, 75 when
+a workspace you asked about was kept — clearing it is then waiting on you — and
+78 when the project has nothing recorded or another runner holds it.
 
 ### `ralph help [COMMAND]`, `ralph version`
 
@@ -784,6 +838,14 @@ when every one of these holds:
 
 Anything else is kept, with the reason stated. Cleanup never withdraws work that
 has already been earned.
+
+**Clearing up a kept worktree is yours to ask for.** `ralph clean` lists what is
+being held and why, and `ralph clean TASK-ID` or `ralph clean --all` removes the
+worktrees of passes that failed, were blocked or were interrupted — the one
+reason a run's own cleanup will not override. It overrides nothing else: a
+worktree holding uncommitted changes, a commit nothing recorded, or a commit its
+branch does not hold is still kept, by both forms, with no flag that says
+otherwise. See [`ralph clean`](#ralph-clean-task-id---all).
 
 **A removal is not recorded until Git confirms it, and an interrupted one is
 finished later.** `git worktree remove` exiting zero is not taken as proof:

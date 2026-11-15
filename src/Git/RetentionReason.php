@@ -46,6 +46,14 @@ enum RetentionReason: string
      * Read from {@see \Celyes\RalphPhp\State\LifecycleState::isOpen()}, so it
      * covers a pass that is *running* too: a workspace a runner is holding is
      * no more removable than one it abandoned.
+     *
+     * The one reason a person can waive, which is the other half of PROJECT.md
+     * section K, item 7: `ralph clean TASK-ID` asks for a stopped pass's
+     * workspace by name and this reason does not apply to it
+     * ({@see \Celyes\RalphPhp\Git\CleanupRequest::Explicit}). Nothing waives it
+     * for a pass that is running or has not begun, and nothing waives any of
+     * the reasons below — so an explicit cleanup still cannot take uncommitted
+     * work.
      */
     case PassUnfinished = 'pass-unfinished';
 
@@ -233,7 +241,7 @@ enum RetentionReason: string
     public function hint(): string
     {
         return match ($this) {
-            self::PassUnfinished => 'Run `ralph logs TASK-ID` to read what happened, or `ralph retry TASK-ID` to continue in it.',
+            self::PassUnfinished => 'Run `ralph logs TASK-ID` to read what happened, `ralph retry TASK-ID` to continue in it, or `ralph clean TASK-ID` to remove it once you are done looking.',
             self::NotOwned => 'Remove it yourself once you are sure nothing in it is wanted.',
             self::NotOurPath => 'Nothing was removed. Report this: a workspace row should only ever name a directory under the runtime worktrees path.',
             self::NotRegistered => 'Check what is in it, then move or remove it yourself; Ralph PHP will not delete a directory Git has no record of.',
