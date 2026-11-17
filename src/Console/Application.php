@@ -115,6 +115,12 @@ final class Application
         } catch (Throwable $exception) {
             return $this->report($exception, ExitCode::SOFTWARE, $verbose);
         } finally {
+            // The last write of the process, and the reason a shell prompt
+            // never lands halfway along a line: a worker's final chunk, or a
+            // log file printed by `ralph logs`, can end without a newline, and
+            // only the output knows whether one is still owed (PROJECT.md
+            // section K, item 13).
+            $this->output->finishLine();
             $restoreErrorHandler();
         }
     }

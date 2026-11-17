@@ -117,6 +117,217 @@ final class OutputTest extends TestCase
     }
 
     /**
+     * PROJECT.md section K, item 13: a line this package writes ends a line,
+     * and does not end it twice.
+     *
+     * The second half is what makes the guarantee safe to apply everywhere.
+     * Callers print strings they composed, strings they read out of a file and
+     * strings another layer handed back, and a rule that blindly appended
+     * would put a blank line after every one of the latter.
+     */
+    #[Test]
+    public function a_line_is_ended_once_whether_or_not_it_arrived_ended(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->line('composed here');
+        $capture->output()->line("read from somewhere else\n");
+        $capture->output()->line("and from a file written on Windows\r\n");
+        $capture->output()->diagnosticLine("ralph: that did not work\n");
+
+        self::assertSame(
+            'composed here' . PHP_EOL
+                . 'read from somewhere else' . PHP_EOL
+                . 'and from a file written on Windows' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+        self::assertSame('ralph: that did not work' . PHP_EOL, $capture->errorOutput());
+    }
+
+    /**
+     * A caller that composed its own blank line keeps it.
+     *
+     * Only one ending is taken off before one is put on, so "a paragraph\n\n"
+     * is a paragraph and the blank line the caller asked for — the normalising
+     * is of the ending, not of the caller's spacing.
+     */
+    #[Test]
+    public function a_blank_line_the_caller_composed_survives(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->line("a paragraph\n\n");
+        $capture->output()->line('the next one');
+
+        self::assertSame(
+            'a paragraph' . PHP_EOL . PHP_EOL . 'the next one' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
+     * An empty call is a blank line, and nothing else is added around it.
+     */
+    #[Test]
+    public function an_empty_line_is_a_single_blank_one(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->line('above');
+        $capture->output()->line();
+        $capture->output()->line('below');
+
+        self::assertSame(
+            'above' . PHP_EOL . PHP_EOL . 'below' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
+     * The case the passthrough creates: a worker's chunk ends mid-line, and
+     * the next thing the package prints must not be glued onto the end of it.
+     *
+     * The chunk itself is still written the moment it arrives — holding it
+     * back until its newline turned up is what would stop a progress
+     * indicator from ever appearing — so the newline it is owed is written
+     * when something else needs the line.
+     */
+    #[Test]
+    public function a_package_line_after_an_unfinished_chunk_starts_on_its_own(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->text('thinking...');
+        $capture->output()->line('ralph: the agent was stopped after 60 seconds');
+
+        self::assertSame(
+            'thinking...' . PHP_EOL . 'ralph: the agent was stopped after 60 seconds' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
+     * And the duplicate that rule could produce: closing an unfinished line is
+     * a newline, a deliberate blank line is a newline, and asking for the
+     * blank line while one is open must not write both.
+     */
+    #[Test]
+    public function closing_an_unfinished_line_is_not_also_a_blank_line(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->text('no trailing newline');
+        $capture->output()->line();
+        $capture->output()->line('after');
+
+        self::assertSame(
+            'no trailing newline' . PHP_EOL . 'after' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
+     * A chunk that ended its own line leaves nothing owed.
+     */
+    #[Test]
+    public function a_chunk_that_ended_its_line_is_not_given_a_second_ending(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->text("done\n");
+        $capture->output()->line('ralph: the agent exited with status 0');
+
+        self::assertSame(
+            "done\n" . 'ralph: the agent exited with status 0' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
+     * The last write of a command, so the shell prompt does not land halfway
+     * along a line a worker or a printed log file left open.
+     *
+     * Idempotent, and a no-op in the ordinary case: it is called at the end of
+     * every run, and most runs end with a line that ended itself.
+     */
+    #[Test]
+    public function an_unfinished_line_is_closed_on_the_way_out(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->text('a log file that ends without one');
+        $capture->output()->diagnosticText('and a complaint that does too');
+
+        $capture->output()->finishLine();
+        $capture->output()->finishLine();
+
+        self::assertSame('a log file that ends without one' . PHP_EOL, $capture->standardOutput());
+        self::assertSame('and a complaint that does too' . PHP_EOL, $capture->errorOutput());
+    }
+
+    #[Test]
+    public function finishing_adds_nothing_when_every_line_ended_itself(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->line('a complete line');
+        $capture->output()->finishLine();
+
+        self::assertSame('a complete line' . PHP_EOL, $capture->standardOutput());
+        self::assertSame('', $capture->errorOutput());
+    }
+
+    /**
+     * Streams redirected apart have a cursor each.
+     *
+     * `ralph run > out.log 2> err.log` is two files, and a newline owed by one
+     * of them must not be written into the other — which would both corrupt
+     * the file that received it and leave the line that was open still open.
+     */
+    #[Test]
+    public function a_line_left_open_on_one_stream_is_not_closed_on_the_other(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->diagnosticText('a worker complaint with no newline');
+        $capture->output()->line('ralph: carrying on');
+
+        self::assertSame('ralph: carrying on' . PHP_EOL, $capture->standardOutput());
+        self::assertSame('a worker complaint with no newline', $capture->errorOutput());
+
+        $capture->output()->finishLine();
+
+        self::assertSame('a worker complaint with no newline' . PHP_EOL, $capture->errorOutput());
+    }
+
+    /**
+     * Streams that reach the same place share one cursor.
+     *
+     * The common case on a terminal, where the worker's standard error and the
+     * package's own notes are on the same screen: a half-written progress line
+     * from one is still under the cursor when the other prints, and the note
+     * has to start a line. Asserted through a single handle given as both
+     * streams, which is also `ralph run 2>&1`.
+     */
+    #[Test]
+    public function one_destination_given_as_both_streams_keeps_one_cursor(): void
+    {
+        $stream = fopen('php://memory', 'rb+');
+        self::assertIsResource($stream);
+
+        $output = new Output($stream, $stream);
+
+        $output->diagnosticText('authenticating...');
+        $output->line('ralph: the agent is working');
+
+        rewind($stream);
+        self::assertSame(
+            'authenticating...' . PHP_EOL . 'ralph: the agent is working' . PHP_EOL,
+            (string) stream_get_contents($stream),
+        );
+    }
+
+    /**
      * The same split as the redaction above, in the other direction: the
      * package's own lines may be coloured, and a worker's bytes go through as
      * they came.

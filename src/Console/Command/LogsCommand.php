@@ -347,13 +347,11 @@ final class LogsCommand extends ProjectCommand
         $output->line('    ' . $style->label(sprintf('worker log %s (%d bytes):', $path, strlen($contents))));
 
         // As bytes, with nothing added: see the class note. A log that does not
-        // end in a newline gets one, so the next line of this report starts
-        // where it should.
+        // end in a newline leaves the line open, and the next line of this
+        // report — or the end of the command — closes it
+        // ({@see \Celyes\RalphPhp\Console\Output::finishLine()}), so the
+        // report reads correctly without a second copy of that rule here.
         $output->text($contents);
-
-        if ($contents !== '' && !str_ends_with($contents, "\n")) {
-            $output->line();
-        }
     }
 
     /**

@@ -392,6 +392,57 @@ final class LogsCommandTest extends TestCase
     }
 
     /**
+     * A log that ends without a newline does not take the rest of the report
+     * with it (PROJECT.md section K, item 13).
+     *
+     * The command prints the file as bytes, which is the promise it makes
+     * about a worker's output, so the missing ending is real and has to come
+     * from the output rather than from the file. Driven through the real
+     * binary because that is where the two halves meet: the line left open by
+     * the passthrough, and the next line of the report, which closes it
+     * without also leaving a blank one behind.
+     */
+    #[Test]
+    public function a_report_ending_in_a_log_with_no_newline_still_ends_a_line(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK])
+            ->withConfiguration();
+
+        self::assertSame(ExitCode::SUCCESS, $this->project->ralph(['run'])->exitCode);
+
+        $task = $this->taskId();
+        $log = $this->project->path(sprintf('.ralph/runtime/logs/%s/attempt-01-agent.log', $task));
+
+        self::assertFileExists($log);
+        file_put_contents($log, 'the agent stopped mid-sentence');
+
+        $result = $this->project->ralph(['logs', $task]);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+
+        // The bytes, unchanged, and then an ending the file did not have — so
+        // the line of the report that follows them starts where it should
+        // rather than on the end of the agent's last sentence.
+        self::assertStringContainsString(
+            'the agent stopped mid-sentence' . PHP_EOL . '    checks:',
+            $result->standardOutput,
+            $result->describe(),
+        );
+
+        // One ending, not two, here and at the end of the whole report: a
+        // blank line is the package saying something it was not asked to say.
+        self::assertStringNotContainsString(
+            'the agent stopped mid-sentence' . PHP_EOL . PHP_EOL,
+            $result->standardOutput,
+            $result->describe(),
+        );
+        self::assertStringEndsWith(PHP_EOL, $result->standardOutput, $result->describe());
+        self::assertStringEndsNotWith(PHP_EOL . PHP_EOL, $result->standardOutput, $result->describe());
+    }
+
+    /**
      * The identifier of the project's only task.
      *
      * Generated from the task's own words, as the package generates it

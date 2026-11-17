@@ -58,6 +58,35 @@ final class Output
     private array $closed = [];
 
     /**
+     * Destinations left part-way along a line, keyed by {@see
+     * self::destinationOf()}.
+     *
+     * A chunk handed to {@see self::text()} ends wherever the worker it came
+     * from happened to be, so this is how the package knows whether the next
+     * thing it prints would start a line or land on the end of somebody
+     * else's. Entries exist only while a line is open: absence means the
+     * cursor is at the start of one, which is also its state before anything
+     * has been written.
+     *
+     * @var array<int,true>
+     */
+    private array $unfinished = [];
+
+    /**
+     * Whether the two streams reach the same place, once asked.
+     *
+     * The cursor belongs to the destination rather than to the handle: a
+     * worker's half-written progress line on standard error is still on the
+     * screen when the next note goes to standard output, and on a terminal
+     * that note has to start a line. Redirected apart — `ralph run > out.log
+     * 2> err.log` — they are two files with two cursors and neither may be
+     * given a newline the other one owed.
+     *
+     * @var ?bool
+     */
+    private ?bool $sharedDestination = null;
+
+    /**
      * Whether this output may colour the lines it composes.
      *
      * Not readonly, for the same reason the secrets are not: the streams exist
@@ -158,10 +187,15 @@ final class Output
 
     /**
      * Write a line of ordinary output.
+     *
+     * Ends where a line should end, whatever the caller handed over: text that
+     * already carries a trailing newline is not given a second one, and an
+     * unfinished line left on the stream by {@see self::text()} is closed
+     * before this line is started rather than being written onto.
      */
     public function line(string $text = ''): void
     {
-        $this->write($this->standard, $this->secrets->redact($text) . PHP_EOL);
+        $this->writeLine($this->standard, $text);
     }
 
     /**
@@ -184,6 +218,10 @@ final class Output
      * A chunk off a pipe begins and ends wherever the worker happened to be, so
      * anything appended here would insert a line break into the middle of the
      * worker's own line.
+     *
+     * The newline such a chunk is still owed is not lost, only deferred: the
+     * stream remembers that it is mid-line, and the next line this package
+     * writes — or {@see self::finishLine()} on the way out — closes it.
      *
      * Not redacted, for the reason the class description gives: a chunk can end
      * in the middle of a value, so replacing inside one would catch some
@@ -208,7 +246,94 @@ final class Output
      */
     public function diagnosticLine(string $text = ''): void
     {
-        $this->write($this->diagnostic, $this->secrets->redact($text) . PHP_EOL);
+        $this->writeLine($this->diagnostic, $text);
+    }
+
+    /**
+     * Close an unfinished line on either stream, if one was left open.
+     *
+     * The last thing {@see Application::run()} does, so that a command cannot
+     * hand the shell a prompt halfway along a line — which is what a worker
+     * whose final chunk had no newline, or a log file that ends without one,
+     * would otherwise leave behind. Idempotent, and a no-op in the ordinary
+     * case where everything written ended its own line.
+     */
+    public function finishLine(): void
+    {
+        if (!$this->atLineStart($this->standard)) {
+            $this->line();
+        }
+
+        if (!$this->atLineStart($this->diagnostic)) {
+            $this->diagnosticLine();
+        }
+    }
+
+    /**
+     * Whether the next byte written to this stream would start a line.
+     *
+     * True before anything has been written, and false only while a chunk
+     * handed to {@see self::text()} has left the cursor part-way along one.
+     *
+     * @param resource $stream
+     */
+    private function atLineStart(mixed $stream): bool
+    {
+        return !isset($this->unfinished[$this->destinationOf($stream)]);
+    }
+
+    /**
+     * Write one of this package's own lines, ending it exactly once.
+     *
+     * Three things happen here, and they are here rather than in each of the
+     * forty places that print something (PROJECT.md section K, item 13):
+     *
+     *  - an unfinished line is closed first, so a note never lands on the end
+     *    of a worker's half-printed progress indicator;
+     *  - the text is ended, whether or not it arrived ended, so that a caller
+     *    passing a string it read from somewhere else cannot produce a line
+     *    with no ending or a stray blank one after it;
+     *  - an empty line is written as the single newline it is. That is both a
+     *    deliberate blank line and the way an unfinished one is closed, and the
+     *    two must not combine into two newlines where the caller asked for one
+     *    blank line.
+     *
+     * @param resource $stream
+     */
+    private function writeLine(mixed $stream, string $text): void
+    {
+        $text = $this->secrets->redact($text);
+
+        if ($text === '') {
+            $this->write($stream, PHP_EOL);
+
+            return;
+        }
+
+        $prefix = $this->atLineStart($stream) ? '' : PHP_EOL;
+
+        $this->write($stream, $prefix . self::ended($text));
+    }
+
+    /**
+     * The text with exactly one line ending on the end of it.
+     *
+     * One ending is removed before one is added, rather than all of them: a
+     * caller that composed "a paragraph\n\n" asked for the blank line after it
+     * and keeps it, while a caller that passed a single trailing newline — or
+     * none — gets the same single ending either way.
+     */
+    private static function ended(string $text): string
+    {
+        if (str_ends_with($text, "\n")) {
+            $text = substr($text, 0, -1);
+
+            if (str_ends_with($text, "\r")) {
+                $text = substr($text, 0, -1);
+            }
+        }
+
+        return $text . PHP_EOL;
     }
 
     /**
@@ -244,6 +369,18 @@ final class Output
             return;
         }
 
+        // Recorded before the write rather than after it: a write that fails
+        // part-way has put some of these bytes on the screen, and a stream
+        // that is gone is never written to again, so the pessimistic answer is
+        // the safe one in both directions.
+        $destination = $this->destinationOf($stream);
+
+        if (str_ends_with($text, "\n")) {
+            unset($this->unfinished[$destination]);
+        } else {
+            $this->unfinished[$destination] = true;
+        }
+
         $remaining = $text;
 
         while ($remaining !== '') {
@@ -257,5 +394,29 @@ final class Output
 
             $remaining = substr($remaining, $written);
         }
+    }
+
+    /**
+     * The cursor a stream writes against.
+     *
+     * Streams that reach the same place share one, so that a line opened on
+     * either of them is closed by the next thing written to either. Resolved
+     * once: `stream_isatty()` is a syscall, and this is asked on every write.
+     *
+     * @param resource $stream
+     */
+    private function destinationOf(mixed $stream): int
+    {
+        $this->sharedDestination ??= $this->standard === $this->diagnostic
+            || (is_resource($this->standard)
+                && is_resource($this->diagnostic)
+                && @stream_isatty($this->standard)
+                && @stream_isatty($this->diagnostic));
+
+        if ($this->sharedDestination) {
+            return 0;
+        }
+
+        return get_resource_id($stream);
     }
 }

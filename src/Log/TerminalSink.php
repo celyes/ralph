@@ -23,6 +23,13 @@ use Celyes\RalphPhp\Console\Style;
  * output is marked up ({@see LogFile}) — on a terminal it should look like the
  * agent was run directly.
  *
+ * **The last line is still finished.** A worker whose final chunk had no
+ * newline would leave whatever the CLI prints next glued onto the end of it, so
+ * {@see self::close()} closes the line. Which line is open is the output's own
+ * bookkeeping rather than this sink's ({@see Output::finishLine()}): the same
+ * question is asked by every note, by an error report, and by the end of the
+ * command, and one answer kept in one place cannot disagree with itself.
+ *
  * **Each stream keeps its destination.** The worker's standard output goes to
  * ours and its error output to ours, so that redirecting a run's output
  * separates the two exactly as running the agent by hand would.
@@ -34,15 +41,6 @@ use Celyes\RalphPhp\Console\Style;
  */
 final class TerminalSink implements OutputSink
 {
-    /**
-     * Whether the last thing written ended a line.
-     *
-     * Tracked so that {@see self::close()} can finish an unterminated one. A
-     * worker whose last output has no trailing newline would otherwise leave
-     * the next thing the CLI prints glued onto the end of it.
-     */
-    private bool $atLineStart = true;
-
     public function __construct(private readonly Output $output)
     {
     }
@@ -58,8 +56,6 @@ final class TerminalSink implements OutputSink
         } else {
             $this->output->text($chunk);
         }
-
-        $this->atLineStart = str_ends_with($chunk, "\n");
     }
 
     /**
@@ -79,8 +75,6 @@ final class TerminalSink implements OutputSink
      */
     public function note(string $line): void
     {
-        $this->startLine();
-
         $style = $this->output->style();
 
         $this->output->line($style->muted(LogFile::NOTE_PREFIX) . $this->subject($line, $style));
@@ -113,19 +107,6 @@ final class TerminalSink implements OutputSink
 
     public function close(): void
     {
-        $this->startLine();
-    }
-
-    /**
-     * End the worker's unterminated line, if it left one.
-     */
-    private function startLine(): void
-    {
-        if ($this->atLineStart) {
-            return;
-        }
-
-        $this->output->line();
-        $this->atLineStart = true;
+        $this->output->finishLine();
     }
 }

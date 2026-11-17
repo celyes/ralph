@@ -164,6 +164,27 @@ final class TerminalSinkTest extends TestCase
         self::assertSame("done\n", $this->terminal->standardOutput());
     }
 
+    /**
+     * And it is finished where it was left.
+     *
+     * Redirected apart — `ralph run > out.log 2> err.log` — the newline a
+     * half-written complaint is owed belongs to the stream the complaint went
+     * to; writing it to the other one would corrupt that file and leave the
+     * open line still open.
+     */
+    #[Test]
+    public function an_unfinished_line_is_finished_on_the_stream_it_was_left_on(): void
+    {
+        $this->sink->write(OutputStream::Error, 'warning: the key is about to expire');
+        $this->sink->close();
+
+        self::assertSame('', $this->terminal->standardOutput());
+        self::assertSame(
+            'warning: the key is about to expire' . PHP_EOL,
+            $this->terminal->errorOutput(),
+        );
+    }
+
     #[Test]
     public function an_empty_chunk_changes_nothing(): void
     {
