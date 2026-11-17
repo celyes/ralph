@@ -244,6 +244,51 @@ final class OutputTest extends TestCase
     }
 
     /**
+     * A worker's line ending split between two reads is written as the worker
+     * sent it.
+     *
+     * A pipe read can fall between the `\r` and the `\n` of a `\r\n`, which
+     * leaves this class looking at a chunk that ends on a carriage return
+     * (PROJECT.md section K, item 14). Both chunks go through untouched and the
+     * line is finished by the worker's own second byte, so nothing is owed
+     * afterwards.
+     */
+    #[Test]
+    public function a_line_ending_split_between_two_chunks_is_left_alone(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->text("first line\r");
+        $capture->output()->text("\nsecond line\r\n");
+        $capture->output()->finishLine();
+
+        self::assertSame("first line\r\nsecond line\r\n", $capture->standardOutput());
+    }
+
+    /**
+     * And the half of that split the package can be asked to print across: a
+     * chunk that ended on a carriage return has not ended its line.
+     *
+     * The cursor is back at the start of the line but the worker's text is
+     * still on it — a progress indicator is written exactly this way — so a
+     * note has to start a line rather than overwrite one.
+     */
+    #[Test]
+    public function a_chunk_that_ended_on_a_carriage_return_is_still_mid_line(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->text('tests: 12/40');
+        $capture->output()->text("\r");
+        $capture->output()->line('ralph: the agent was stopped after 60 seconds');
+
+        self::assertSame(
+            "tests: 12/40\r" . PHP_EOL . 'ralph: the agent was stopped after 60 seconds' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
      * The last write of a command, so the shell prompt does not land halfway
      * along a line a worker or a printed log file left open.
      *

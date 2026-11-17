@@ -119,6 +119,31 @@ final class LogFileTest extends TestCase
     }
 
     /**
+     * And the split that falls inside a line ending: the `\r` in one chunk, its
+     * `\n` in the next.
+     *
+     * The chunk ending on a carriage return has not ended its line, so the
+     * worker's own next byte finishes it and closing the log adds nothing
+     * (PROJECT.md section K, item 14). A log that counted the `\r` as the
+     * ending would have `\r\n\n` on disk where the worker wrote one ending.
+     */
+    #[Test]
+    public function a_line_ending_split_between_two_chunks_is_one_ending_on_disk(): void
+    {
+        $log = LogFile::appendTo($this->path());
+
+        $log->write(OutputStream::Standard, "the quick brown fox\r");
+        $log->write(OutputStream::Standard, "\n");
+        $log->close();
+
+        self::assertSame(
+            LogFile::NOTE_PREFIX . "stdout\n" . "the quick brown fox\r\n",
+            (string) file_get_contents($this->path()),
+        );
+        self::assertSame(21, $log->bytes());
+    }
+
+    /**
      * A log is a copy of the output, not a rendering of it: a worker may print
      * terminal escapes, carriage returns and bytes that are not valid UTF-8 at
      * all, and a reader looking for what the agent printed must get what the

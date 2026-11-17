@@ -40,6 +40,22 @@ use JsonException;
  * but both are this format's, and keeping them in one class is what stops the
  * two from drifting into disagreeing about it.
  *
+ * **The chunks are not the lines.** A read off the pipe begins and ends
+ * wherever the worker happened to be, so a line of the feed arrives in pieces
+ * and a piece can hold the end of one line and the start of the next. What this
+ * class promises about that (PROJECT.md section K, item 14) is that the output
+ * does not depend on where the reads fell: an event is held until its line is
+ * whole and then rendered once, a line that is not an event is written through
+ * exactly as it came, and whether a line *is* an event is decided from its
+ * first non-blank byte rather than from the piece that byte arrived in. Within
+ * standard output nothing is reordered — the pieces of a line go out in
+ * arrival order or not at all — and nothing is inserted into a worker's line or
+ * taken out of it. The one ordering this cannot promise is between the two
+ * pipes: a line of standard output that is still incomplete is held, so an
+ * error the CLI printed meanwhile appears first. Holding it is the point, since
+ * the alternative is half a JSON envelope on the terminal, and the operating
+ * system does not interleave two pipes exactly either.
+ *
  * **Plain text, no colour.** What a filter writes reaches both of an attempt's
  * destinations ({@see StreamFilter}), and one of them is a log file somebody
  * will grep. The glyphs are `loop.sh`'s so that a reader of both sees one
@@ -65,15 +81,26 @@ use JsonException;
 final class ClaudeStream implements StreamFilter
 {
     /**
-     * How much output may be held waiting for a newline.
+     * How much of a line that could still be an event may be held.
      *
      * A whole event is one line, and a tool result inside one can be large, so
-     * the limit is generous. Past it the bytes are written through as they are:
-     * text this size with no newline in it is not this format, and holding on
-     * to it would be a renderer that silently swallowed a worker's output
-     * instead of showing it.
+     * the limit is generous. Past it the line is given up on and the rest of it
+     * is written through as it arrives ({@see self::passThrough()}): text this
+     * size with no newline in it is not this format, and holding on to it would
+     * be a renderer that silently swallowed a worker's output instead of
+     * showing it.
      */
     private const int LINE_LIMIT = 8 * 1024 * 1024;
+
+    /**
+     * The whitespace a line may begin with and still be an event.
+     *
+     * `trim()`'s own set, because {@see self::decode()} trims before it looks
+     * at the first character, and the two have to agree about which byte that
+     * is. Used with `strspn()` rather than `ltrim()`: this is asked of every
+     * chunk of an undecided line and must not copy one.
+     */
+    private const string BLANK = " \t\n\r\0\x0B";
 
     /**
      * How much of a tool call's subject is shown.
@@ -116,8 +143,30 @@ final class ClaudeStream implements StreamFilter
 
     /**
      * Bytes read off standard output that have no newline after them yet.
+     *
+     * Always empty while {@see self::$passingThrough}: a line this filter has
+     * given up on holds nothing back.
      */
     private string $pending = '';
+
+    /**
+     * Whether the line being read could still be an event: null until its first
+     * non-blank byte says.
+     *
+     * Decided once per line, from whichever chunk that byte arrives in, so that
+     * the answer cannot depend on where the reads happened to fall.
+     */
+    private ?bool $couldBeEvent = null;
+
+    /**
+     * Whether the rest of the current line goes straight through.
+     *
+     * Set when a line turns out not to be an event, or outgrows
+     * {@see self::LINE_LIMIT}, and cleared by that line's newline. While it is
+     * set the bytes are written as they arrive — the worker's own line, in its
+     * own pieces, with nothing added to it and nothing taken away.
+     */
+    private bool $passingThrough = false;
 
     /**
      * Whether what has been written out ends a line.
@@ -142,12 +191,26 @@ final class ClaudeStream implements StreamFilter
     }
 
     /**
-     * Take a chunk of the session, and write out every event it completed.
+     * Take a chunk of the session, and write out everything it completed.
+     *
+     * A chunk begins and ends wherever the pipe read fell, which is the whole
+     * difficulty here (PROJECT.md section K, item 14): an event arrives in
+     * pieces and must not be shown until it is whole, while the bytes of a line
+     * that is *not* an event are the worker's own and must reach the terminal as
+     * they came. So the chunk is taken a line at a time, each piece joins the
+     * line it belongs to, and the one decision — is this line an event — is made
+     * from its first non-blank byte rather than from the piece it arrived in.
+     * Two reads or twenty produce the same output.
      *
      * Standard output only. The CLI's error output is not this format — it is
      * warnings and, when a session fails before it starts, the failure itself —
      * so it goes through untouched, on its own stream, exactly as any other
-     * worker's would.
+     * worker's would. The line this filter may be part-way through is ended
+     * first: both streams reach one terminal in the ordinary case, and a warning
+     * glued onto the end of a half-written sentence is unreadable. Nothing is
+     * inserted into the error bytes themselves, and the log file would have
+     * started the line for its own stream marker anyway ({@see
+     * \Celyes\RalphPhp\Log\LogFile}).
      */
     public function write(OutputStream $stream, string $chunk): void
     {
@@ -156,26 +219,116 @@ final class ClaudeStream implements StreamFilter
         }
 
         if ($stream->isError()) {
+            $this->endLine();
             $this->sink->write($stream, $chunk);
 
             return;
         }
 
-        $this->pending .= $chunk;
+        while ($chunk !== '') {
+            $break = strpos($chunk, "\n");
 
-        while (($break = strpos($this->pending, "\n")) !== false) {
-            $line = substr($this->pending, 0, $break);
-            $this->pending = substr($this->pending, $break + 1);
+            if ($break === false) {
+                $this->take($chunk, complete: false);
 
+                return;
+            }
+
+            $this->take(substr($chunk, 0, $break + 1), complete: true);
+            $chunk = substr($chunk, $break + 1);
+        }
+    }
+
+    /**
+     * Take one piece of the line being read, and write out what can be.
+     *
+     * @param string $piece bytes belonging to the current line, ending with its
+     *        newline when the line is complete
+     * @param bool $complete whether that newline is on the end of this piece
+     */
+    private function take(string $piece, bool $complete): void
+    {
+        if ($this->passingThrough) {
+            $this->writeOut($piece);
+
+            if ($complete) {
+                $this->startLine();
+            }
+
+            return;
+        }
+
+        $this->pending .= $piece;
+
+        if ($complete) {
+            $line = $this->pending;
+            $this->startLine();
             $this->renderLine($line);
+
+            return;
         }
 
-        // A line longer than anything this format produces. Written through
-        // rather than held: see the constant.
-        if (strlen($this->pending) > self::LINE_LIMIT) {
-            $this->writeOut($this->pending);
-            $this->pending = '';
+        $this->couldBeEvent ??= self::opensAnEvent($piece);
+
+        // Either this line is not an event, or it is longer than one of this
+        // format's: both mean there is nothing left to wait for, and waiting is
+        // how a renderer swallows a worker's output.
+        if ($this->couldBeEvent === false || strlen($this->pending) > self::LINE_LIMIT) {
+            $this->passThrough();
         }
+    }
+
+    /**
+     * Give up on the current line and write out what is held, as it came.
+     *
+     * The rest of it follows byte for byte as it arrives. Our own rendering is
+     * ended first, so the worker's line starts on a line of its own rather than
+     * on the end of a sentence the agent was part-way through.
+     */
+    private function passThrough(): void
+    {
+        $this->passingThrough = true;
+
+        $held = $this->pending;
+        $this->pending = '';
+
+        if ($held !== '') {
+            $this->endLine();
+            $this->writeOut($held);
+        }
+    }
+
+    /**
+     * Begin reading a new line of the feed, the one before it being finished.
+     */
+    private function startLine(): void
+    {
+        $this->pending = '';
+        $this->couldBeEvent = null;
+        $this->passingThrough = false;
+    }
+
+    /**
+     * Whether a line beginning with these bytes could still be an event, or
+     * null while it is all blank and has not said yet.
+     *
+     * The same precondition {@see self::decode()} applies, asked of a fragment:
+     * an event is a JSON object, so a line whose first non-blank byte is not an
+     * opening brace is something the CLI printed and can be let through at once
+     * rather than held until its newline. That matters for a session a project
+     * pointed at `--output-format text`, where the output is prose and holding a
+     * line back is the difference between watching an agent work and watching
+     * nothing.
+     */
+    private static function opensAnEvent(string $piece): ?bool
+    {
+        $start = strspn($piece, self::BLANK);
+
+        if ($start === strlen($piece)) {
+            return null;
+        }
+
+        return $piece[$start] === '{';
     }
 
     /**
@@ -201,11 +354,12 @@ final class ClaudeStream implements StreamFilter
     {
         if ($this->pending !== '') {
             $line = $this->pending;
-            $this->pending = '';
+            $this->startLine();
 
             $this->renderLine($line);
         }
 
+        $this->startLine();
         $this->endLine();
     }
 
@@ -299,17 +453,26 @@ final class ClaudeStream implements StreamFilter
     }
 
     /**
-     * Show one line of the feed: an event rendered, or the line itself.
+     * Show one whole line of the feed: an event rendered, or the line itself.
+     *
+     * A line that is not an event is written as it came, ending and all, which
+     * is the same thing {@see self::passThrough()} does with the line it gave up
+     * on. One rule for both, because otherwise a prose line the CLI printed
+     * would look different depending on whether the read that carried it
+     * happened to include its newline.
+     *
+     * @param string $line the line as it arrived, carrying its own ending unless
+     *        the session stopped before it had one
      */
     private function renderLine(string $line): void
     {
-        $line = rtrim($line, "\r");
         $event = self::decode($line);
 
         if ($event === null) {
             // Blank lines between events are the format's, not the CLI's.
             if (trim($line) !== '') {
-                $this->writeLine($line);
+                $this->endLine();
+                $this->writeOut($line);
             }
 
             return;

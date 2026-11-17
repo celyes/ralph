@@ -365,6 +365,175 @@ final class ClaudeStreamTest extends TestCase
     }
 
     /**
+     * A line given up on for its length keeps its remaining bytes.
+     *
+     * The hard case of PROJECT.md section K, item 14. Once the bytes held back
+     * have been written through there is no going back on them, so the rest of
+     * that line has to follow as it arrives: rendering its tail as though it
+     * were a line of its own would put a newline in the middle of the worker's
+     * line, drop the carriage return of a `\r\n` the worker sent, and hide a
+     * tail that happened to be whitespace.
+     */
+    #[Test]
+    public function the_rest_of_a_line_given_up_on_is_written_through_as_it_came(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        // Opens like an event, so it is held rather than let straight through,
+        // and outgrows what this format's lines can be.
+        $head = '{"type":"assistant","x":"' . str_repeat('a', 9 * 1024 * 1024);
+
+        $stream->write(OutputStream::Standard, $head);
+        $stream->write(OutputStream::Standard, 'TAIL');
+        $stream->write(OutputStream::Standard, "\r\n");
+        $stream->write(OutputStream::Standard, self::line(['type' => 'result', 'num_turns' => 1, 'duration_ms' => 1000]));
+
+        $shown = $sink->textOf(OutputStream::Standard);
+
+        self::assertSame(strlen($head) + strlen("TAIL\r\n") + strlen("✓ done · 1 turns · 1.0s\n"), strlen($shown));
+        self::assertStringEndsWith("aTAIL\r\n✓ done · 1 turns · 1.0s\n", $shown);
+
+        // The worker's line ending and the rendered event's, and nothing else:
+        // what was written through carries no ending this filter invented.
+        self::assertSame(2, substr_count($shown, "\n"));
+    }
+
+    /**
+     * A line that cannot be an event is let through before its newline.
+     *
+     * The first non-blank byte of a line is enough to know: an event is a JSON
+     * object, so anything else is the CLI's own output and there is nothing to
+     * wait for. It matters for a session a project pointed at
+     * `--output-format text`, where every line is prose — holding each one back
+     * until its newline would be streaming in the letter and a terminal a line
+     * behind in practice.
+     */
+    #[Test]
+    public function a_line_that_cannot_be_an_event_is_shown_before_its_newline(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, 'Claude usage limit reac');
+
+        self::assertSame('Claude usage limit reac', $sink->textOf(OutputStream::Standard));
+
+        $stream->write(OutputStream::Standard, "hed|1793500000\n");
+
+        self::assertSame("Claude usage limit reached|1793500000\n", $sink->textOf(OutputStream::Standard));
+    }
+
+    /**
+     * The same bytes, read in any number of pieces, produce the same output.
+     *
+     * The whole of PROJECT.md section K, item 14 in one assertion. A pipe read
+     * ends wherever the worker happened to be — mid-event, between a `\r` and
+     * its `\n`, between two lines — and none of that is the session. So the
+     * feed below is rendered once as a single chunk and then again one byte at a
+     * time, which is every split there is, and the two readings have to agree.
+     */
+    #[Test]
+    public function the_rendering_does_not_depend_on_where_the_chunks_fell(): void
+    {
+        $feed = self::line(['type' => 'system', 'subtype' => 'init', 'model' => 'claude-opus-5', 'session_id' => '0123456789abcdef'])
+            . self::line([
+                'type' => 'stream_event',
+                'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => 'Reading the test']],
+            ])
+            . self::line(['type' => 'stream_event', 'event' => ['type' => 'content_block_stop']])
+            . "a line the cli printed\r\n"
+            . "\n"
+            . '{"outcome":"candidate"}' . "\n"
+            . self::line(['type' => 'result', 'num_turns' => 2, 'duration_ms' => 1500]);
+
+        $whole = new RecordingSink();
+        $stream = ClaudeStream::rendering($whole);
+        $stream->write(OutputStream::Standard, $feed);
+        $stream->flush();
+
+        $byByte = new RecordingSink();
+        $stream = ClaudeStream::rendering($byByte);
+
+        foreach (str_split($feed) as $byte) {
+            $stream->write(OutputStream::Standard, $byte);
+        }
+
+        $stream->flush();
+
+        self::assertSame(
+            $whole->textOf(OutputStream::Standard),
+            $byByte->textOf(OutputStream::Standard),
+        );
+
+        // And it is the rendering, not two identically broken ones.
+        self::assertSame(
+            "claude claude-opus-5 · session 01234567\n"
+            . "Reading the test\n"
+            . "a line the cli printed\r\n"
+            . '{"outcome":"candidate"}' . "\n"
+            . "✓ done · 2 turns · 1.5s\n",
+            $whole->textOf(OutputStream::Standard),
+        );
+    }
+
+    /**
+     * A line ending split between two reads stays one line ending.
+     *
+     * The `\r` arrives in one chunk and its `\n` in the next, which for an event
+     * means the line is not whole yet and must not be rendered twice, and for
+     * the worker's own output means the two bytes go through as the worker sent
+     * them.
+     */
+    #[Test]
+    public function a_line_ending_split_between_two_reads_is_still_one_ending(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $event = self::event(['type' => 'system', 'subtype' => 'init', 'model' => 'claude-opus-5', 'session_id' => 'abcdefgh']);
+
+        $stream->write(OutputStream::Standard, $event . "\r");
+
+        self::assertSame('', $sink->textOf(OutputStream::Standard));
+
+        $stream->write(OutputStream::Standard, "\n");
+        $stream->write(OutputStream::Standard, 'prose');
+        $stream->write(OutputStream::Standard, "\r");
+        $stream->write(OutputStream::Standard, "\n");
+
+        self::assertSame(
+            "claude claude-opus-5 · session abcdefgh\nprose\r\n",
+            $sink->textOf(OutputStream::Standard),
+        );
+    }
+
+    /**
+     * Error output starts on a line of its own.
+     *
+     * Both streams reach one terminal in the ordinary case, so a warning handed
+     * over while the agent's sentence is half written would be read as part of
+     * that sentence. The error bytes themselves are untouched — the line that
+     * was open was this filter's own rendering, and it is the thing that gets
+     * ended.
+     */
+    #[Test]
+    public function an_error_chunk_does_not_land_on_the_end_of_an_open_line(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'stream_event',
+            'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => 'Reading the']],
+        ]));
+        $stream->write(OutputStream::Error, 'warning: a partial line');
+
+        self::assertSame("Reading the\n", $sink->textOf(OutputStream::Standard));
+        self::assertSame('warning: a partial line', $sink->textOf(OutputStream::Error));
+    }
+
+    /**
      * The reading of record: the attempt is read out of the session's final
      * message, which the stream carries as its own field — the same text
      * `--output-format text` would have printed on its own.
