@@ -612,6 +612,39 @@ final class GenerationStoreTest extends TestCase
     }
 
     /**
+     * The one fact the filesystem cannot supply afterwards: that a log is
+     * missing because the package deleted it on purpose (PROJECT.md section K,
+     * item 11). Written after the deletion, and only the first one counts — a
+     * second wipe deleted nothing, so moving the timestamp would date the
+     * removal to a run that did not make it.
+     */
+    #[Test]
+    public function a_wiped_log_is_dated_once_and_leaves_the_rest_of_the_row_alone(): void
+    {
+        $completed = $this->completed('Add a --dry-run option', 'ralph/dry-run');
+
+        self::assertNull($completed->logsWipedAt());
+        self::assertFalse($completed->logsWereWiped());
+
+        $wiped = $this->generations->recordLogWipe($completed);
+
+        self::assertTrue($wiped->logsWereWiped());
+        self::assertSame($this->clock->now()->format(DATE_ATOM), $wiped->logsWipedAt()?->value());
+
+        // Everything the pass is reviewed from outlives its logs.
+        self::assertSame('f1e2d3c4b5a6', $wiped->commitSha());
+        self::assertSame('ralph/dry-run', $wiped->branch());
+        self::assertSame(LifecycleState::Completed, $wiped->state());
+
+        $this->clock->advance(3600);
+
+        $again = $this->generations->recordLogWipe($wiped);
+
+        self::assertSame($wiped->logsWipedAt()->value(), $again->logsWipedAt()?->value());
+        self::assertSame($wiped->updatedAt()->value(), $again->updatedAt()->value());
+    }
+
+    /**
      * The column refuses a state this build does not know, so a database and a
      * build cannot quietly disagree about whether a workspace was removed.
      */

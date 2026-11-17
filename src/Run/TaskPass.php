@@ -29,6 +29,7 @@ use Celyes\RalphPhp\Git\TaskPublisher;
 use Celyes\RalphPhp\Git\TaskWorktree;
 use Celyes\RalphPhp\Git\WorktreeCleanup;
 use Celyes\RalphPhp\Log\AttemptLog;
+use Celyes\RalphPhp\Log\LogWipe;
 use Celyes\RalphPhp\Memory\AttemptContext;
 use Celyes\RalphPhp\Memory\AttemptSummary;
 use Celyes\RalphPhp\Process\Interruptions;
@@ -269,7 +270,13 @@ final class TaskPass
             try {
                 $result = $this->carryOut($task, $recorded, $snapshot, $record, $budget, $log);
             } finally {
+                // Closed before the wipe, and the wipe after the close: the
+                // file a successful task's logs are deleted from is the one
+                // this handle is open on, and a deletion under an open handle
+                // would send the rest of the attempt's notes to an inode
+                // nothing can read ({@see self::wipeLogs()}).
                 $log->close();
+                $this->wipeLogs($record);
             }
 
             if (!$result->invitesAnotherAttempt()) {
@@ -1244,6 +1251,7 @@ final class TaskPass
         } finally {
             $this->cleanUp($record, $log);
             $log->close();
+            $this->wipeLogs($record);
         }
     }
 
@@ -1327,6 +1335,7 @@ final class TaskPass
         } finally {
             $this->cleanUp($record, $log);
             $log->close();
+            $this->wipeLogs($record);
         }
     }
 
@@ -2194,6 +2203,49 @@ final class TaskPass
             return $cleanup;
         } catch (RalphException $failure) {
             $log->note('the workspace could not be cleaned up: ' . $failure->getMessage());
+
+            return null;
+        }
+    }
+
+    /**
+     * Delete this pass's own logs, when the project has asked for that.
+     *
+     * PROJECT.md section K, item 11. The decision belongs to
+     * {@see \Celyes\RalphPhp\Log\LogWiper} — which pass is eligible, which
+     * files are, and when the deletion may be written down — and the only thing
+     * decided here is *when it is asked*, which is the part the item makes a
+     * precondition: after the attempt's log has been closed, and so after the
+     * commit, any required push, the pass's row and the write to the user's
+     * checklist are all durable. A pass that ended any other way is refused by
+     * the wiper, so this is safe to call from the ordinary end of an attempt as
+     * well as from the two resumptions.
+     *
+     * The row is re-read rather than taken from the caller, for the same reason
+     * {@see self::cleanUp()} re-reads it: whether a pass's logs may go turns on
+     * the pass being completed, and the row is where that became true.
+     *
+     * Nothing is noted on the attempt's log, which is closed by now and is
+     * usually one of the files being deleted; the terminal is where a user sees
+     * what went. A wipe that cannot be carried out is reported and changes
+     * nothing else about the task — the work is earned and kept either way, and
+     * the files that were not deleted are deleted by the next run that looks.
+     *
+     * @return LogWipe|null what was decided, or null when the pass's row could
+     *         no longer be read or the wipe could not be carried out at all
+     */
+    private function wipeLogs(GenerationRecord $record): ?LogWipe
+    {
+        try {
+            $final = $this->journal->generations()->find($record->generation());
+
+            if ($final === null) {
+                return null;
+            }
+
+            return $this->workbench->wiper()->wipe($final, AttemptLog::toTerminal($this->terminal));
+        } catch (RalphException $failure) {
+            $this->terminal?->line('the logs could not be wiped: ' . $failure->getMessage());
 
             return null;
         }

@@ -54,6 +54,7 @@ final class GenerationRecord
         private readonly PushResult $push,
         private readonly WorktreeOwnership $worktree,
         private readonly ?CleanupState $cleanup,
+        private readonly ?Timestamp $logsWipedAt,
         private readonly ?Blocker $blocker,
         private readonly Timestamp $startedAt,
         private readonly Timestamp $updatedAt,
@@ -108,6 +109,7 @@ final class GenerationRecord
                 self::boolean($row, 'owns_worktree'),
             ),
             CleanupState::recorded(self::nullableString($row, 'cleanup_state')),
+            Timestamp::recorded(self::nullableString($row, 'logs_wiped_at')),
             Blocker::recorded(self::nullableString($row, 'blocker')),
             Timestamp::fromStorage(self::string($row, 'started_at')),
             Timestamp::fromStorage(self::string($row, 'updated_at')),
@@ -343,6 +345,35 @@ final class GenerationRecord
     public function cleanupIsFinished(): bool
     {
         return $this->cleanup?->isFinished() ?? false;
+    }
+
+    /**
+     * When this pass's own log files were deleted on purpose, or null when they
+     * were not.
+     *
+     * Only a project with `logs.wipe_on_success` turned on ever writes it, and
+     * only a pass that succeeded ({@see \Celyes\RalphPhp\Log\LogWiper}). It
+     * is the fact the filesystem cannot supply afterwards: a log that is not
+     * there because the package removed it and a log that is not there because
+     * something went wrong look identical from outside, and this is what tells
+     * a reader which they have.
+     */
+    public function logsWipedAt(): ?Timestamp
+    {
+        return $this->logsWipedAt;
+    }
+
+    /**
+     * Whether this pass's eligible logs have been wiped and the wipe finished.
+     *
+     * False while a wipe is outstanding as well as when none was ever wanted,
+     * because the column is written only once no eligible log is left: a wipe
+     * an interruption cut short leaves this false and the remaining files on
+     * disk, which is what makes the retry safe.
+     */
+    public function logsWereWiped(): bool
+    {
+        return $this->logsWipedAt !== null;
     }
 
     /**

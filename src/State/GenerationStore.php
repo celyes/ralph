@@ -662,6 +662,36 @@ final class GenerationStore
     }
 
     /**
+     * Record that this pass's own log files have been deleted on purpose.
+     *
+     * Written **after** the deletion and only once no eligible log is left, so
+     * the column means what it says: a row with a timestamp has nothing of its
+     * own left to delete, and a row without one either never wanted a wipe or
+     * had one interrupted — and both of those are answered by looking again
+     * ({@see \Celyes\RalphPhp\Log\LogWiper}). That is the whole of what makes
+     * the deletion safe to retry, and it is why there is no "wiping" state to
+     * match `cleanup_state`: a log file left in a part-wiped directory is still
+     * a log file, with nothing about it to misread.
+     *
+     * Idempotent, and the first time is the time that is kept. A second wipe of
+     * a pass whose logs have already gone deleted nothing, so moving the
+     * timestamp would date the removal to a run that did not make it.
+     *
+     * Nothing else on the row is touched. The commit, the branch, the push
+     * result, the verification evidence and the completion record all outlive
+     * the logs by design — the setting trades the output of a successful task
+     * for disk, not the account of what it did.
+     */
+    public function recordLogWipe(GenerationRecord $generation): GenerationRecord
+    {
+        if ($generation->logsWereWiped()) {
+            return $generation;
+        }
+
+        return $this->write($generation, ['logs_wiped_at' => Timestamp::now($this->clock)->value()]);
+    }
+
+    /**
      * Record the commit this pass produced.
      *
      * Writing this row is the point at which a commit stops being something

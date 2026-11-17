@@ -16,6 +16,7 @@ use Celyes\RalphPhp\Git\WorkspacePreparer;
 use Celyes\RalphPhp\Git\WorkspaceStager;
 use Celyes\RalphPhp\Git\WorktreeCleaner;
 use Celyes\RalphPhp\Log\LogDirectory;
+use Celyes\RalphPhp\Log\LogWiper;
 use Celyes\RalphPhp\Memory\AttemptContextLoader;
 use Celyes\RalphPhp\Memory\MemoryWriter;
 use Celyes\RalphPhp\Process\ProcessRunner;
@@ -61,6 +62,7 @@ final class Workbench
         private readonly TaskPublisher $publisher,
         private readonly WorktreeCleaner $cleaner,
         private readonly LogDirectory $logs,
+        private readonly LogWiper $wiper,
         private readonly MemoryWriter $memory,
         private readonly AttemptContextLoader $context,
         private readonly ChecklistReader $checklist,
@@ -88,6 +90,11 @@ final class Workbench
     ): self {
         $generations = $journal->generations();
 
+        // The logs are told the run's known secrets so that the notes they
+        // write are redacted; the worker's own output is kept as it arrived
+        // (section I, item 6, and {@see \Celyes\RalphPhp\Log\LogFile}).
+        $logs = LogDirectory::in($configuration->projectRoot(), $secrets);
+
         return new self(
             TaskWorktrees::forProject($configuration, $executable, $processes),
             TaskBranches::forProject($configuration, $executable, $processes),
@@ -102,10 +109,10 @@ final class Workbench
             TaskCommitter::forProject($configuration, $generations, $executable, $processes),
             TaskPublisher::forProject($configuration, $generations, $executable, $processes),
             WorktreeCleaner::forProject($configuration, $generations, $executable, $processes),
-            // The logs are told the run's known secrets so that the notes they
-            // write are redacted; the worker's own output is kept as it arrived
-            // (section I, item 6, and {@see \Celyes\RalphPhp\Log\LogFile}).
-            LogDirectory::in($configuration->projectRoot(), $secrets),
+            $logs,
+            // The same directory the run writes into, so what a wipe is
+            // entitled to delete cannot drift from what was written.
+            new LogWiper($logs, $configuration->logs(), $generations),
             MemoryWriter::in($configuration->projectRoot(), $clock ?? new SystemClock()),
             new AttemptContextLoader(),
             new ChecklistReader(),
@@ -202,6 +209,15 @@ final class Workbench
     public function logs(): LogDirectory
     {
         return $this->logs;
+    }
+
+    /**
+     * What deletes a successful task's own logs, when the project has asked for
+     * that (PROJECT.md section K, item 11).
+     */
+    public function wiper(): LogWiper
+    {
+        return $this->wiper;
     }
 
     public function memory(): MemoryWriter

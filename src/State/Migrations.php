@@ -74,6 +74,7 @@ final class Migrations
             self::sharedBranch(),
             self::sharedBranchPasses(),
             self::workspaceCleanup(),
+            self::wipedLogs(),
         ];
     }
 
@@ -243,6 +244,40 @@ final class Migrations
                     . 'CHECK (cleanup_state IS NULL OR cleanup_state IN (%s))',
                 Schema::literals(Schema::cleanupStates()),
             ),
+        ]);
+    }
+
+    /**
+     * Version 6: when a successful pass's own logs were deleted on purpose.
+     *
+     * PROJECT.md section K, item 11. A project that has turned
+     * `logs.wipe_on_success` on deletes a task's agent and verification logs
+     * once its completion is durable, and the one fact that cannot be recovered
+     * from the filesystem afterwards is *why* they are not there. An absent log
+     * is otherwise indistinguishable from one a user removed by hand, a full
+     * disk that stopped it being written, or a bug — and item 12 asks
+     * `ralph logs TASK-ID` to tell a reader which of those it is looking at.
+     * The timestamp is kept rather than a flag because the answer a person
+     * wants is usually "when", and a column that holds a time answers both.
+     *
+     * Written **after** the deletion rather than before it, which is the
+     * opposite of `cleanup_state` and deliberately so. A part-removed worktree
+     * cannot be told apart from a workspace somebody has been editing, so that
+     * removal needs a mark before the command; a part-wiped log directory is
+     * not ambiguous at all — every file left in it is a log, and deleting a log
+     * twice is the same as deleting it once. So the column records only the
+     * finished state, and a pass whose wipe was interrupted is a pass with this
+     * column still null and some eligible files left, which is exactly the
+     * state a retry handles ({@see \Celyes\RalphPhp\Log\LogWiper}).
+     *
+     * Nullable, and no backfill. Every row written before this column existed
+     * belongs to a build that never deleted a log, and null is precisely that:
+     * nothing was wiped.
+     */
+    private static function wipedLogs(): Migration
+    {
+        return new Migration(6, 'when a successful pass had its logs wiped', [
+            'ALTER TABLE generations ADD COLUMN logs_wiped_at TEXT',
         ]);
     }
 
