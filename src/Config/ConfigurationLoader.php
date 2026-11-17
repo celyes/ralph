@@ -43,6 +43,7 @@ final class ConfigurationLoader
         'workspace',
         'git',
         'limits',
+        'logs',
     ];
 
     /**
@@ -146,6 +147,7 @@ final class ConfigurationLoader
             WorkspaceSettings::fromRaw($raw->section('workspace')),
             GitSettings::fromRaw($raw->section('git')),
             Limits::fromRaw($raw->section('limits')),
+            LogSettings::fromRaw($raw->section('logs')),
         ));
     }
 

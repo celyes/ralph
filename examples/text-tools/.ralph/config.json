@@ -58,5 +58,8 @@
         "task_timeout": 1200,
         "run_timeout": 3600,
         "bail_on_failure": false
+    },
+    "logs": {
+        "wipe_on_success": false
     }
 }

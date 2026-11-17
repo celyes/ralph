@@ -11,6 +11,7 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Config\GitSettings;
 use Celyes\RalphPhp\Config\Limits;
+use Celyes\RalphPhp\Config\LogSettings;
 use Celyes\RalphPhp\Config\PushSettings;
 use Celyes\RalphPhp\Config\RawConfiguration;
 use Celyes\RalphPhp\Config\VerificationCommand;
@@ -37,6 +38,7 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(GitSettings::class)]
 #[CoversClass(PushSettings::class)]
 #[CoversClass(Limits::class)]
+#[CoversClass(LogSettings::class)]
 #[CoversClass(Defaults::class)]
 final class ConfigurationLoaderTest extends TestCase
 {
@@ -77,6 +79,13 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(Defaults::TASK_TIMEOUT_SECONDS, $config->limits()->taskTimeout());
         self::assertSame(Defaults::RUN_TIMEOUT_SECONDS, $config->limits()->runTimeout());
         self::assertFalse($config->limits()->bailsOnFailure());
+
+        // Logs are kept. The option that removes a successful task's own
+        // output is off until a project asks for it, because a log is the only
+        // account of what an agent did that outlives the agent.
+        self::assertSame(Defaults::WIPE_LOGS_ON_SUCCESS, $config->logs()->wipesOnSuccess());
+        self::assertFalse($config->logs()->wipesOnSuccess());
+        self::assertTrue($config->logs()->retainsEverything());
 
         // Nothing is assumed about how this project is verified or about what
         // a fresh worktree of it needs: a package that guessed `composer test`
@@ -156,6 +165,9 @@ final class ConfigurationLoaderTest extends TestCase
                 'run_timeout' => 3600,
                 'bail_on_failure' => true,
             ],
+            'logs' => [
+                'wipe_on_success' => true,
+            ],
         ]);
 
         $config = (new ConfigurationLoader())->load($this->project->root());
@@ -185,6 +197,9 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(900, $config->limits()->taskTimeout());
         self::assertSame(3600, $config->limits()->runTimeout());
         self::assertTrue($config->limits()->bailsOnFailure());
+
+        self::assertTrue($config->logs()->wipesOnSuccess());
+        self::assertFalse($config->logs()->retainsEverything());
 
         self::assertCount(2, $config->checks());
         self::assertSame('unit', $config->checks()[0]->name());
@@ -393,6 +408,30 @@ final class ConfigurationLoaderTest extends TestCase
             '"git.push.enabled" must be true or false, a string given.',
             $this->loadFailure()->getMessage(),
         );
+    }
+
+    #[Test]
+    public function a_log_wiping_flag_written_as_a_string_is_not_coerced(): void
+    {
+        // For the reason the push flag is not coerced: "false" is truthy, and a
+        // project that meant to keep its logs would find them deleted.
+        $this->project->writeConfigArray(['logs' => ['wipe_on_success' => 'false']]);
+
+        self::assertStringContainsString(
+            '"logs.wipe_on_success" must be true or false, a string given.',
+            $this->loadFailure()->getMessage(),
+        );
+    }
+
+    #[Test]
+    public function a_misspelled_log_setting_is_rejected_with_its_full_path(): void
+    {
+        $this->project->writeConfigArray(['logs' => ['wipe_on_sucess' => true]]);
+
+        $exception = $this->loadFailure();
+
+        self::assertStringContainsString('unknown setting "logs.wipe_on_sucess".', $exception->getMessage());
+        self::assertContains('Did you mean "wipe_on_success"?', $exception->hints());
     }
 
     #[Test]

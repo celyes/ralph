@@ -34,6 +34,7 @@ final class Configuration
         private readonly WorkspaceSettings $workspace,
         private readonly GitSettings $git,
         private readonly Limits $limits,
+        private readonly LogSettings $logs,
     ) {
     }
 
@@ -151,6 +152,14 @@ final class Configuration
     }
 
     /**
+     * How long a task's own output is kept.
+     */
+    public function logs(): LogSettings
+    {
+        return $this->logs;
+    }
+
+    /**
      * The effective configuration as plain data.
      *
      * This is what gets persisted with a run and shown by `status`: it is the
@@ -177,6 +186,7 @@ final class Configuration
             'workspace' => $this->workspace->toArray(),
             'git' => $this->git->toArray(),
             'limits' => $this->limits->toArray(),
+            'logs' => $this->logs->toArray(),
         ];
     }
 

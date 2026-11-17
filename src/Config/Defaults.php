@@ -190,6 +190,29 @@ final class Defaults
     public const bool BAIL_ON_FAILURE = false;
 
     /**
+     * Whether a task's own log files are removed once the task has succeeded.
+     *
+     * Off, so logs are kept. A log is the only account of what an agent did
+     * that survives the agent, and the moment it is most wanted is usually
+     * after the run that wrote it looked fine: a commit that passed the checks
+     * and still did the wrong thing is read backwards, from the ticked box to
+     * the output that produced it. Deleting that by default would make the
+     * package quietly lossy about its own work.
+     *
+     * What turning it on is for is the opposite case, and a real one: a long
+     * checklist on a project whose suite is loud leaves a runtime directory
+     * measured in hundreds of megabytes, nearly all of it the successful
+     * tasks nobody will reread. A project that would rather keep only the
+     * output of the passes that went wrong sets `logs.wipe_on_success` to
+     * true, and keeps everything else — the commit, the state, the completion
+     * evidence — because only the log files of a *successful* task are
+     * eligible.
+     *
+     * @see \Celyes\RalphPhp\Config\LogSettings for the section this belongs to
+     */
+    public const bool WIPE_LOGS_ON_SUCCESS = false;
+
+    /**
      * Seconds a single verification command may run.
      */
     public const int CHECK_TIMEOUT_SECONDS = 600;
@@ -327,6 +350,9 @@ final class Defaults
                 'task_timeout' => self::TASK_TIMEOUT_SECONDS,
                 'run_timeout' => self::RUN_TIMEOUT_SECONDS,
                 'bail_on_failure' => self::BAIL_ON_FAILURE,
+            ],
+            'logs' => [
+                'wipe_on_success' => self::WIPE_LOGS_ON_SUCCESS,
             ],
         ];
     }
