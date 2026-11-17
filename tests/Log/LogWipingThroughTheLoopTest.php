@@ -17,7 +17,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * `logs.wipe_on_success` driven through a real run (PROJECT.md section K,
- * item 11).
+ * items 11 and 12).
  *
  * {@see LogWiperTest} covers what the wiper deletes and refuses; what only a
  * run can answer is whether it is ever **asked**, and asked in the right place.
@@ -28,6 +28,12 @@ use PHPUnit\Framework\TestCase;
  * So each case here starts a real `ralph` subprocess against a real repository
  * and reads the answer off the filesystem afterwards: the log files, the
  * completion record beside them, the commit, and what the next command says.
+ *
+ * Item 12's half is the same question asked of the outcomes that are not a
+ * success. A failed, blocked or interrupted task keeps every byte it wrote
+ * whatever the setting says, and each of those three is produced here by
+ * really producing it — a failing check, an agent that asks for a decision, and
+ * a run stopped with a signal — rather than by writing the state into a row.
  */
 #[CoversClass(LogWiper::class)]
 final class LogWipingThroughTheLoopTest extends TestCase
@@ -122,6 +128,63 @@ final class LogWipingThroughTheLoopTest extends TestCase
 
         self::assertSame(ExitCode::SUCCESS, $logs->exitCode, $logs->describe());
         self::assertStringContainsString('worker log', $logs->standardOutput);
+    }
+
+    /**
+     * A task waiting on a person keeps its output too.
+     *
+     * The blocked case of section K, item 12, and the one where the logs are
+     * most obviously the point: the run stopped to ask something, and what it
+     * had got to before it asked is in the file.
+     */
+    #[Test]
+    public function a_blocked_tasks_logs_survive_a_run_that_wipes(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::blocking('the import format is ambiguous', 'say which format to read'))
+            ->withTasks([self::FIRST])
+            ->withConfiguration(['logs' => ['wipe_on_success' => true]]);
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::BLOCKED, $result->exitCode, $result->describe());
+        self::assertNotSame([], $this->logsOf(self::FIRST), 'A blocked task keeps every byte it wrote.');
+
+        $logs = $this->project->ralph(['logs', TaskId::fromDescription(self::FIRST)->value()]);
+
+        self::assertStringContainsString('worker log', $logs->standardOutput, $logs->describe());
+        self::assertStringNotContainsString('wiped', $logs->standardOutput, $logs->describe());
+    }
+
+    /**
+     * And a run somebody stopped with Ctrl+C.
+     *
+     * The third of the three states item 12 names, and the only one where the
+     * log is still being written when the decision not to delete it is made:
+     * the pass is left `interrupted`, the file is closed where the signal
+     * found it, and the next thing anyone does with this task is read it.
+     */
+    #[Test]
+    public function an_interrupted_tasks_logs_survive_a_run_that_wipes(): void
+    {
+        if (!extension_loaded('pcntl')) {
+            self::markTestSkipped('The pcntl extension is not installed, so a signalled run records nothing.');
+        }
+
+        $this->project
+            ->withWorker(FixtureStep::slow(30)->editing([self::EDITED => self::EDIT]))
+            ->withTasks([self::FIRST])
+            ->withConfiguration(['logs' => ['wipe_on_success' => true]]);
+
+        $result = $this->project->interrupt(['run'], ', mode slow');
+
+        self::assertSame(ExitCode::INTERRUPTED, $result->exitCode, $result->describe());
+        self::assertNotSame([], $this->logsOf(self::FIRST), 'An interrupted task keeps what it had written.');
+
+        $logs = $this->project->ralph(['logs', TaskId::fromDescription(self::FIRST)->value()]);
+
+        self::assertStringContainsString('worker log', $logs->standardOutput, $logs->describe());
+        self::assertStringNotContainsString('wiped', $logs->standardOutput, $logs->describe());
     }
 
     /**

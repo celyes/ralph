@@ -9,6 +9,7 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Input;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Config\LogSettings;
 use Celyes\RalphPhp\Console\Style;
 use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\Log\LogDirectory;
@@ -46,6 +47,18 @@ use Celyes\RalphPhp\Verification\CheckRun;
  * the record behind a ticked box all live beside the logs, and a reader sent to
  * the logs without being told they are there would not find them.
  *
+ * **A log that was wiped on purpose says so.** A project with
+ * `logs.wipe_on_success` turned on deletes a task's own output once its
+ * completion is durable ({@see \Celyes\RalphPhp\Log\LogWiper}), and from the
+ * filesystem afterwards that is indistinguishable from a log somebody deleted
+ * by hand or one a run never managed to write. The pass's row is what knows
+ * which of the three it is — it holds the moment the wipe finished — so the
+ * removal is read out of the row and reported as a removal rather than as a
+ * loss, and the pass is labelled once at the top so a reader is not left to
+ * infer it from a run of absent attempts. The logs of a failed, blocked or
+ * interrupted pass are never wiped (PROJECT.md section K, item 12), so an
+ * absent log on one of those is still the warning it has always been.
+ *
  * **Everything this command composes is redacted; the worker's log is not.**
  * PROJECT.md section I, item 6 asks for two different things and this command
  * is where they meet. The lines it writes — a pass's description, a blocker's
@@ -61,7 +74,7 @@ use Celyes\RalphPhp\Verification\CheckRun;
  * So the honest statement, which {@see self::help()} makes to the user: a raw
  * worker log holds whatever the agent printed. The files are created 0600 under
  * `.ralph/runtime/logs/`, which `ralph init` adds to the project's ignore
- * rules, and they stay there until the task's worktree is cleaned up or the
+ * rules, and they stay there until a successful task's wipe removes them or the
  * directory is deleted by hand. A secret the package was never told about — a
  * token in a remote URL, a key an agent read from a file — cannot be redacted
  * anywhere, by this command or by anything else in the package.
@@ -111,8 +124,15 @@ final class LogsCommand extends ProjectCommand
             '  Worker output is written to .ralph/runtime/logs/TASK-ID[-N]/, one file per',
             '  attempt, created readable only by you. "ralph init" adds the runtime',
             '  directory to this project\'s ignore rules, so nothing here is committed or',
-            '  pushed. The files stay until you delete them or the task\'s workspace is',
-            '  cleaned up; the package never trims or rotates them.',
+            '  pushed. Nothing trims or rotates them.',
+            '',
+            '  With "logs": {"wipe_on_success": true} in .ralph/config.json, a task\'s own',
+            '  log files are deleted once its commit, its required push, its state and its',
+            '  checklist write are all durable. A log removed that way is reported here as',
+            '  wiped, with the moment it went, rather than as a file that is missing. The',
+            '  logs of a failed, blocked or interrupted task are kept whatever that setting',
+            '  says, and so is everything a completion rests on: the commit, the check',
+            '  results above, a preserved diff and the completion evidence.',
             '',
             '  A log is a verbatim copy of what the agent printed, so it holds whatever the',
             '  agent chose to print — source code, file contents, and anything it echoed',
@@ -166,6 +186,7 @@ final class LogsCommand extends ProjectCommand
         }
 
         $logs = new LogDirectory(LogDirectory::directoryIn($configuration->projectRoot()), $secrets);
+        $retention = $configuration->logs();
 
         // Newest pass first: a task that was worked on again is being read
         // about because of what happened the last time.
@@ -174,7 +195,7 @@ final class LogsCommand extends ProjectCommand
                 $output->line();
             }
 
-            $this->reportPass($record, $journal, $logs, $output);
+            $this->reportPass($record, $journal, $logs, $retention, $output);
         }
 
         return ExitCode::SUCCESS;
@@ -206,6 +227,7 @@ final class LogsCommand extends ProjectCommand
         GenerationRecord $record,
         Journal $journal,
         LogDirectory $logs,
+        LogSettings $retention,
         Output $output,
     ): void {
         $style = $output->style();
@@ -218,6 +240,21 @@ final class LogsCommand extends ProjectCommand
                 ? 'commit ' . substr((string) $record->commitSha(), 0, 12)
                 : ($record->isNoChange() ? 'verified with no change needed' : 'no commit'),
         )));
+
+        $wipedAt = $record->logsWipedAt();
+
+        if ($wipedAt !== null) {
+            // Muted, not warned: nothing went wrong here. The line is what
+            // separates a log this package removed on purpose from one that
+            // went missing, and it is said once rather than once an attempt.
+            $output->line('  ' . $style->muted(sprintf(
+                'logs: wiped %s, after this task succeeded (logs.wipe_on_success).',
+                $wipedAt->describe(),
+            )));
+            $output->line('  ' . $style->muted(
+                '  the commit, the checks below and the completion evidence were kept.',
+            ));
+        }
 
         $blocker = $record->blocker();
 
@@ -236,7 +273,7 @@ final class LogsCommand extends ProjectCommand
 
         foreach ($attempts as $attempt) {
             $output->line();
-            $this->reportAttempt($record, $attempt, $journal, $logs, $output);
+            $this->reportAttempt($record, $attempt, $journal, $logs, $retention, $output);
         }
     }
 
@@ -248,6 +285,7 @@ final class LogsCommand extends ProjectCommand
         AttemptRecord $attempt,
         Journal $journal,
         LogDirectory $logs,
+        LogSettings $retention,
         Output $output,
     ): void {
         $style = $output->style();
@@ -268,7 +306,7 @@ final class LogsCommand extends ProjectCommand
             $output->line('    ' . $style->warn('the agent said (unverified):') . ' ' . $summary->text());
         }
 
-        $this->reportWorkerOutput($attempt, $output);
+        $this->reportWorkerOutput($record, $attempt, $retention, $output);
         $this->reportChecks($attempt, $journal, $output);
         $this->reportFiles($record, $attempt, $logs, $output);
     }
@@ -276,8 +314,12 @@ final class LogsCommand extends ProjectCommand
     /**
      * The worker's output, verbatim.
      */
-    private function reportWorkerOutput(AttemptRecord $attempt, Output $output): void
-    {
+    private function reportWorkerOutput(
+        GenerationRecord $record,
+        AttemptRecord $attempt,
+        LogSettings $retention,
+        Output $output,
+    ): void {
         $path = $attempt->logPath();
 
         $style = $output->style();
@@ -289,7 +331,7 @@ final class LogsCommand extends ProjectCommand
         }
 
         if (!is_file($path)) {
-            $output->line('    ' . $style->warn(sprintf('worker log %s is no longer there.', $path)));
+            $output->line('    ' . $this->absence($record, $retention, $path, $style));
 
             return;
         }
@@ -312,6 +354,50 @@ final class LogsCommand extends ProjectCommand
         if ($contents !== '' && !str_ends_with($contents, "\n")) {
             $output->line();
         }
+    }
+
+    /**
+     * What to say about a worker log that is not on disk.
+     *
+     * Two different facts, and the row is the only thing that tells them apart
+     * (PROJECT.md section K, item 12). A pass whose logs this package wiped
+     * carries the moment it did, so the line names the removal and is dimmed
+     * like the rest of what went to plan. A pass with no such moment — which is
+     * every failed, blocked and interrupted one, because those are never
+     * wiped — has lost a file it was supposed to still have, and that is a
+     * warning.
+     *
+     * The wipe is attributed per attempt as well as per pass. It covers the
+     * generation rather than one attempt, so an absent log under a wiped pass
+     * went with it; claiming less than that would put a warning under a line
+     * that has just explained the absence.
+     */
+    private function absence(
+        GenerationRecord $record,
+        LogSettings $retention,
+        string $path,
+        Style $style,
+    ): string {
+        $wipedAt = $record->logsWipedAt();
+
+        if ($wipedAt !== null) {
+            return $style->muted(sprintf('worker log %s was wiped %s.', $path, $wipedAt->describe()));
+        }
+
+        // A wipe writes the moment only once nothing eligible is left, so a
+        // pass that succeeded, in a project that wipes, and missing a log is
+        // one whose wipe was stopped part way — by a permission, usually — and
+        // which the next run will finish. Still not a warning: the file went
+        // where the user asked it to go, and the account of why it is absent
+        // belongs beside it rather than in whatever they go on to check next.
+        if ($retention->wipesOnSuccess() && $record->isComplete() && $record->isFinalizable()) {
+            return $style->muted(sprintf(
+                'worker log %s was wiped; this pass\'s wipe has not finished, and the next run completes it.',
+                $path,
+            ));
+        }
+
+        return $style->warn(sprintf('worker log %s is no longer there.', $path));
     }
 
     /**

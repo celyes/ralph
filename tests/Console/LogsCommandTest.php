@@ -234,6 +234,164 @@ final class LogsCommandTest extends TestCase
     }
 
     /**
+     * A log this package deleted on purpose is reported as deleted.
+     *
+     * PROJECT.md section K, item 12. With `logs.wipe_on_success` on, a
+     * successful task's own output goes once its completion is durable, and
+     * what is left for a reader to make of the absence is a decision this
+     * command makes for them: the row holds the moment the wipe finished, so
+     * the report says the log was wiped rather than warning that it is gone.
+     * Everything the completion rested on is still printed, which is the other
+     * half of the promise — the check results come out of the store and the
+     * completion evidence is still beside where the log was.
+     */
+    #[Test]
+    public function a_wiped_log_is_reported_as_wiped_rather_than_as_missing(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK])
+            ->withConfiguration(['logs' => ['wipe_on_success' => true]]);
+
+        self::assertSame(ExitCode::SUCCESS, $this->project->ralph(['run'])->exitCode);
+
+        $task = $this->taskId();
+        $log = $this->project->path(sprintf('.ralph/runtime/logs/%s/attempt-01-agent.log', $task));
+
+        self::assertFileDoesNotExist($log, 'The run was supposed to wipe it.');
+
+        $result = $this->project->ralph(['logs', $task]);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+
+        // Once under the pass, naming the setting that asked for it.
+        self::assertStringContainsString('logs: wiped ', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('logs.wipe_on_success', $result->standardOutput, $result->describe());
+
+        // And where the log itself would have been printed.
+        self::assertStringContainsString(
+            sprintf('worker log %s was wiped ', $log),
+            $result->standardOutput,
+            $result->describe(),
+        );
+        self::assertStringNotContainsString('is no longer there', $result->standardOutput, $result->describe());
+
+        // What the completion rested on outlives the output it was read from.
+        self::assertStringContainsString('checks:', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('php -v', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('completion evidence: ', $result->standardOutput, $result->describe());
+    }
+
+    /**
+     * The other half of item 12: a task that did not succeed keeps everything
+     * it wrote, in a project that has asked for its successful tasks' logs to
+     * go, and the command prints it whole.
+     */
+    #[Test]
+    public function a_failed_tasks_log_is_printed_whole_where_a_successful_ones_would_be_wiped(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::failure('the import command would not load'))
+            ->withTasks([self::TASK])
+            ->withConfiguration([
+                'logs' => ['wipe_on_success' => true],
+                'limits' => ['attempts_per_task' => 1],
+            ]);
+
+        self::assertSame(ExitCode::EXECUTION, $this->project->ralph(['run'])->exitCode);
+
+        $task = $this->taskId();
+        $log = $this->project->path(sprintf('.ralph/runtime/logs/%s/attempt-01-agent.log', $task));
+
+        self::assertFileExists($log, 'A failed task keeps every byte it wrote.');
+
+        $result = $this->project->ralph(['logs', $task]);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString(
+            sprintf('worker log %s (%d bytes):', $log, strlen((string) file_get_contents($log))),
+            $result->standardOutput,
+            $result->describe(),
+        );
+        self::assertStringContainsString((string) file_get_contents($log), $result->standardOutput);
+        self::assertStringNotContainsString('wiped', $result->standardOutput, $result->describe());
+    }
+
+    /**
+     * A log that went some other way is still a warning.
+     *
+     * The distinction is the whole point of the line: a project that keeps
+     * every log and is missing one has lost something, and dimming that into
+     * the language of a deliberate deletion would tell a reader their log was
+     * expendable when nothing had decided that.
+     */
+    #[Test]
+    public function a_log_that_was_not_wiped_is_still_reported_as_missing(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK])
+            ->withConfiguration();
+
+        self::assertSame(ExitCode::SUCCESS, $this->project->ralph(['run'])->exitCode);
+
+        $task = $this->taskId();
+        $log = $this->project->path(sprintf('.ralph/runtime/logs/%s/attempt-01-agent.log', $task));
+
+        self::assertFileExists($log);
+        unlink($log);
+
+        $result = $this->project->ralph(['logs', $task]);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString(
+            sprintf('worker log %s is no longer there.', $log),
+            $result->standardOutput,
+            $result->describe(),
+        );
+        self::assertStringNotContainsString('logs: wiped', $result->standardOutput, $result->describe());
+    }
+
+    /**
+     * A wipe an interruption or a permission cut short.
+     *
+     * The timestamp is written only once nothing eligible is left, so a
+     * completed pass in a wiping project can be missing a log and carry no
+     * moment. Simulated here by turning the setting on after a run that kept
+     * its logs and removing one, which is the state on disk either way. The
+     * report says the deletion was this package's and that the next run
+     * finishes it, rather than warning about a file nobody lost.
+     */
+    #[Test]
+    public function a_wipe_that_has_not_finished_is_reported_as_a_wipe_still_owed(): void
+    {
+        $this->project
+            ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
+            ->withTasks([self::TASK])
+            ->withConfiguration();
+
+        self::assertSame(ExitCode::SUCCESS, $this->project->ralph(['run'])->exitCode);
+
+        $task = $this->taskId();
+        $log = $this->project->path(sprintf('.ralph/runtime/logs/%s/attempt-01-agent.log', $task));
+
+        self::assertFileExists($log);
+        unlink($log);
+
+        $this->project->editConfiguration(['logs' => ['wipe_on_success' => true]]);
+
+        $result = $this->project->ralph(['logs', $task]);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString(
+            sprintf('worker log %s was wiped; this pass\'s wipe has not finished', $log),
+            $result->standardOutput,
+            $result->describe(),
+        );
+        self::assertStringNotContainsString('is no longer there', $result->standardOutput, $result->describe());
+    }
+
+    /**
      * The identifier of the project's only task.
      *
      * Generated from the task's own words, as the package generates it
