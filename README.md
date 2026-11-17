@@ -152,6 +152,7 @@ run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — e
 - [Limits](#limits)
 - [Recovery](#recovery)
 - [Logs and diagnostics](#logs-and-diagnostics)
+- [Console output](#console-output)
 - [Colour](#colour)
 - [Exit codes](#exit-codes)
 - [Limitations](#limitations)
@@ -359,7 +360,9 @@ Prints what was recorded for one task: each pass, newest first, and within a
 pass each attempt's worker output and the result of every check that ran. Files
 beside it are named rather than printed — the staged diff a stopped pass
 preserved, the evidence behind a no-change completion, the record behind a
-ticked box. See [Logs and diagnostics](#logs-and-diagnostics).
+ticked box. A log that `logs.wipe_on_success` removed is reported as wiped, with
+the moment it went, rather than as a file that is missing. See
+[Logs and diagnostics](#logs-and-diagnostics).
 
 ### `ralph resume [--agent NAME] [--bail|--no-bail]`
 
@@ -529,6 +532,9 @@ any work starts.
     "task_timeout": 1800,
     "run_timeout": 7200,
     "bail_on_failure": false
+  },
+  "logs": {
+    "wipe_on_success": false
   }
 }
 ```
@@ -549,11 +555,12 @@ any work starts.
 | `workspace.copy[]` | `[]` | files copied in from your checkout, such as a local `.env` |
 | `git.base` | `HEAD` | commit task branches start from |
 | `git.branch_prefix` | `ralph/` | prefix for generated branch names |
-| `git.strategy` | `shared` | `shared` commits every task of a run to one branch, in order; `per-task` gives every task its own branch |
+| `git.strategy` | `shared` | `shared` commits every task of a run to one branch, in order; `per-task` gives every task its own branch — see [Git behaviour](#git-behaviour) |
 | `git.shared_branch` | `null` | the branch `shared` commits to; `null` derives `<branch_prefix>shared`, so `ralph/shared` |
 | `git.push.enabled` | `false` | whether to push the branch a task committed to |
 | `git.push.remote` | `origin` | remote to push to |
 | `limits.*` | see above | see [Limits](#limits) |
+| `logs.wipe_on_success` | `false` | whether a successful task's own log files are deleted once its completion is durable; see [Log retention](#logs-and-diagnostics) |
 
 Commands are argument *arrays*, not shell strings: nothing is passed through a
 shell, so a task description cannot become part of a command line.
@@ -1058,8 +1065,59 @@ Worker output is streamed to your terminal and written to
 `.ralph/runtime/logs/TASK-ID/`, one file per attempt, readable only by you (a
 reopened task's pass logs into `TASK-ID-g2/`, beside the first pass's).
 `ralph init` ignores the runtime directory, so nothing here is committed or
-pushed. Files stay until you delete them or the task's workspace is cleaned up;
-the package never trims or rotates them.
+pushed. Nothing trims or rotates them, and clearing a task's workspace does not
+touch them: a log outlives the worktree it describes, so a cleaned-up task still
+has the account of what its agent did. Files stay until you delete them, or
+until `logs.wipe_on_success` does.
+
+**Log retention is off by default**, because a log is the only account of what
+an agent did that outlives the agent, and a commit that passed the checks and
+still did the wrong thing is read backwards from the ticked box to the output
+behind it. The cost of keeping everything is disk: a long checklist on a project
+with a loud test suite leaves a runtime directory measured in hundreds of
+megabytes, nearly all of it successful tasks nobody will open again.
+
+```json
+{"logs": {"wipe_on_success": true}}
+```
+
+turns the trade around — the passes that went wrong keep every byte, and the
+rest are let go.
+
+**What a wipe deletes.** Only that task's own log files, and only the ones this
+package wrote: `attempt-NN-kind.log` inside that pass's log directory, which is
+the agent's output and the output of each check that ran against it. A file with
+a name Ralph PHP did not compose is left alone whatever it is, because a
+directory it writes into is still somewhere a person may have put something.
+Nothing a completion rests on is eligible: the commit, the state row, the check
+results, the preserved staged diff (`attempt-NN-staged.diff`), the completion
+record (`attempt-NN-completed.md`) and the evidence behind a no-change
+completion (`attempt-NN-satisfied.md`) sit in the same directory untouched. The
+setting trades output for disk, not the record of what a task did.
+
+**When it runs, and what is never wiped.** A pass is eligible only once it is
+completed and its publication has settled — its commit, any required push, its
+row in the state store and the tick in your checklist all durable. A failed,
+blocked or interrupted pass keeps everything it wrote whatever the setting says;
+so does one still running, which owns an open handle on the log that would
+explain whatever happens next; and so does a completion whose push has not
+settled, because a resume still has work to do on it. A pass whose logs are
+kept prints nothing about it: a run only says what it deleted, or what it could
+not.
+
+**A stopped wipe is a retry, not a loss.** Deleting a log is idempotent and a
+half-wiped directory is unambiguous, so the deletion is recorded only once
+nothing eligible is left: a row with that timestamp has nothing of its own left
+to delete, and a row without one is looked at again by the next `ralph run` or
+`ralph resume`. A file that will not go away — a permission you changed, a file
+another process holds — is a line in the run's output saying what was left and
+why, and leaves the timestamp unwritten so the next pass over that generation
+tries again. It never fails the task.
+
+**A wiped log reads as wiped.** `ralph logs TASK-ID` reports an absent log with
+the moment it went and the setting that took it, rather than as a file that is
+missing — so a log this package removed on purpose cannot be mistaken for one
+that was lost.
 
 `.ralph/runtime/events.jsonl` is an append-only stream, one JSON object per
 line, for a supervising process to follow: `schema`, `id`, `seq`, `at`, `run`,
@@ -1094,6 +1152,36 @@ pager quit on the first screen, closes the thing the command was writing to.
 The remaining output is dropped — the logs and the event stream are unaffected,
 because they are files — and the run carries on to its last task and exits on
 its own terms.
+
+## Console output
+
+**Every line this package writes ends with exactly one newline.** A status
+table, a run's heading over each task, a progress note, an error, the JSON of
+`status --json` — each is ended where a line should end, whether or not the text
+handed over already carried an ending, and a deliberately blank line is written
+as the single newline it is. So output stays line-oriented for `grep`, `tee` and
+`head`, and no path through the package can produce a line with no ending or a
+stray blank one after it.
+
+**A worker's bytes are passed through as they came.** A chunk off a pipe begins
+and ends wherever the agent happened to be, so nothing is appended to it: an
+ending added there would insert a line break into the middle of the agent's own
+line, and would make your terminal disagree with the log it is a copy of.
+Chunks are written in the order they arrive, to the terminal and to the
+attempt's log, so output split across chunks is neither reordered nor broken up.
+
+**The newline such a chunk is owed is deferred, not lost.** The cursor is
+remembered, so the next line Ralph PHP composes closes the open line first
+instead of landing on the end of a half-printed progress indicator, and the last
+thing a command does before exiting closes one still open — which is why a
+worker whose final chunk had no newline, or a stored log that ends without one,
+never shares a row with your shell prompt.
+
+**The cursor belongs to the destination, not to the handle.** `ralph run 2>&1`
+sends both streams to one place and one cursor is tracked for it, so a note on
+standard output closes a half-written line from standard error.
+`ralph run > out.log 2> err.log` is two files with two cursors, and neither is
+given a newline the other one owed.
 
 ## Colour
 
@@ -1210,6 +1298,11 @@ Worth knowing before you rely on it.
 - **Claude Code attempts are not confined** to the workspace — see
   [Agent setup](#agent-setup).
 - **Raw worker logs are not fully redactable**, as described above.
+- **Wiped logs do not come back.** With `logs.wipe_on_success` enabled, a
+  successful task's agent and check output is deleted once its completion is
+  durable. The commit, the check results, the preserved diff and the completion
+  evidence stay, but the output behind them is gone and no later run can
+  reproduce it. Logs of stopped passes are never wiped.
 - **Weakened-verification detection is best-effort** and makes no completeness
   claim.
 - **Linux and WSL are the tested platforms.** macOS is likely to work and is not
