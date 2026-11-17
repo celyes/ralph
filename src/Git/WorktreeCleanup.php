@@ -34,6 +34,7 @@ final class WorktreeCleanup
         private readonly WorkspaceRetention $retention,
         private readonly bool $removed,
         private readonly bool $registrationOnly,
+        private readonly ?BranchRelease $release = null,
     ) {
     }
 
@@ -91,12 +92,20 @@ final class WorktreeCleanup
     /**
      * The workspace stays, for the reasons the decision carries.
      *
+     * @param BranchRelease|null $release what was done about the shared branch
+     *        the workspace was holding, when the mode is one where a kept
+     *        workspace would otherwise hold it against the next task
+     *        ({@see BranchRelease}); null in per-task mode and whenever there
+     *        was nothing attached to let go of
+     *
      * @throws InvalidArgumentException when the decision gave no reason to keep
      *                                 it, since a workspace cannot be kept for
      *                                 no stated reason
      */
-    public static function kept(WorkspaceRetention $retention): self
-    {
+    public static function kept(
+        WorkspaceRetention $retention,
+        ?BranchRelease $release = null,
+    ): self {
         if (!$retention->isPreserved()) {
             throw new InvalidArgumentException(sprintf(
                 'A workspace reported as kept must say why; %s was %s.',
@@ -105,7 +114,7 @@ final class WorktreeCleanup
             ));
         }
 
-        return new self($retention, false, false);
+        return new self($retention, false, false, $release);
     }
 
     /**
@@ -169,6 +178,18 @@ final class WorktreeCleanup
     }
 
     /**
+     * What was done about a shared branch the kept workspace was holding.
+     *
+     * {@see BranchRelease::unnecessary()} for every outcome but a kept one, and
+     * for a kept one in per-task mode: a removed workspace releases whatever it
+     * held by going, and a per-task branch is nobody else's to wait for.
+     */
+    public function release(): BranchRelease
+    {
+        return $this->release ?? BranchRelease::unnecessary();
+    }
+
+    /**
      * Whether a person is expected to look at what was left behind.
      */
     public function isForInspection(): bool
@@ -200,13 +221,18 @@ final class WorktreeCleanup
     }
 
     /**
-     * A line per reason the workspace was kept; empty when it was not.
+     * A line per reason the workspace was kept, and a last one for the shared
+     * branch it was let go of; empty when it was not kept.
      *
      * @return list<string>
      */
     public function details(): array
     {
-        return $this->retention->details();
+        $release = $this->release()->describe();
+
+        return $release === null
+            ? $this->retention->details()
+            : [...$this->retention->details(), ucfirst($release) . '.'];
     }
 
     /**
@@ -230,6 +256,7 @@ final class WorktreeCleanup
      *         for_inspection: bool,
      *         reasons: array<string, string>,
      *     },
+     *     release: array{branch: string|null, tip: string|null, released: bool, refusal: string|null},
      * }
      */
     public function toArray(): array
@@ -238,6 +265,7 @@ final class WorktreeCleanup
             'removed' => $this->removed,
             'registration_only' => $this->registrationOnly,
             'retention' => $this->retention->toArray(),
+            'release' => $this->release()->toArray(),
         ];
     }
 }

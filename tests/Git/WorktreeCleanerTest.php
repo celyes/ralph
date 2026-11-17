@@ -10,6 +10,7 @@ use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\Git\BaseResolver;
 use Celyes\RalphPhp\Git\BranchNamer;
+use Celyes\RalphPhp\Git\BranchRelease;
 use Celyes\RalphPhp\Git\CleanupRequest;
 use Celyes\RalphPhp\Git\CommitMessage;
 use Celyes\RalphPhp\Git\RetentionReason;
@@ -66,6 +67,7 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(WorktreeCleaner::class)]
 #[CoversClass(WorkspaceRetention::class)]
 #[CoversClass(WorktreeCleanup::class)]
+#[CoversClass(BranchRelease::class)]
 #[CoversClass(RetentionReason::class)]
 #[CoversClass(RetentionVerdict::class)]
 #[CoversClass(CleanupState::class)]
@@ -90,6 +92,19 @@ final class WorktreeCleanerTest extends TestCase
     private ?BaseCommit $base = null;
 
     private ?int $run = null;
+
+    /**
+     * Configuration overrides every helper here builds its objects from.
+     *
+     * Empty by default, which is shared-branch mode: that is what
+     * {@see \Celyes\RalphPhp\Config\Defaults::BRANCH_STRATEGY} makes a
+     * project that says nothing, so the cases below are in the mode a user is
+     * in unless they chose otherwise. {@see self::inPerTaskMode()} is the
+     * contrast.
+     *
+     * @var array<string, mixed>
+     */
+    private array $settings = [];
 
     protected function setUp(): void
     {
@@ -1252,6 +1267,263 @@ final class WorktreeCleanerTest extends TestCase
         self::assertFalse($this->recordOf($pass)->cleanupIsUnfinished());
     }
 
+    // ------------------------------------------------------- the shared branch
+
+    /**
+     * The case PROJECT.md section K, item 9 exists for.
+     *
+     * A pass that committed to the run's shared branch and whose workspace is
+     * then kept — here because the agent left a file in `.ralph/`, which
+     * staging excludes and which is therefore uncommitted when cleanup looks —
+     * would hold `ralph/shared` checked out, and Git lets one branch be checked
+     * out in one worktree at a time. The next task's commit stops on it.
+     *
+     * So cleanup detaches the workspace, and this asserts both halves of what
+     * that has to mean: the branch and its commit are untouched and now free,
+     * and **nothing in the kept workspace was lost** — which is the whole
+     * reason it was kept.
+     */
+    #[Test]
+    public function a_kept_workspace_lets_go_of_the_shared_branch_for_the_next_task(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $commit = (string) $pass->commitSha();
+        $branch = (string) $pass->branch();
+
+        self::assertSame('ralph/shared', $branch);
+        self::assertSame($branch, $this->attachedBranchIn($workspace->path()));
+
+        // What keeps the workspace: a file staging left out of the commit.
+        $this->inWorkspace($workspace, '.ralph/notes.md', "left behind\n");
+        $pass = $this->generations->complete($this->recordOf($pass));
+
+        $sink = new RecordingSink();
+        $cleanup = $this->cleaner()->clean($pass, $sink);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertTrue($cleanup->release()->happened());
+        self::assertFalse($cleanup->release()->wasRefused());
+        self::assertSame($branch, $cleanup->release()->branch());
+        self::assertSame($commit, $cleanup->release()->tip());
+
+        // The branch is where it was, and no worktree is using the name.
+        self::assertSame($commit, $this->tipOf($branch));
+        self::assertNull($this->attachedBranchIn($workspace->path()));
+        self::assertSame($commit, $this->headOf($workspace->path()));
+
+        // And the workspace is intact: the committed work, the uncommitted
+        // file that kept it, and Git's registration.
+        self::assertDirectoryExists($workspace->path());
+        self::assertSame(self::WORK, (string) file_get_contents($workspace->path() . '/src/Greeting.php'));
+        self::assertFileExists($workspace->path() . '/.ralph/notes.md');
+        self::assertSame($workspace->path(), $this->registrationAt($workspace->path()));
+
+        self::assertContains(
+            sprintf(
+                'cleanup: Released the shared branch %s, still at %s, for the next task.',
+                $branch,
+                substr($commit, 0, 12),
+            ),
+            $sink->notes,
+        );
+    }
+
+    /**
+     * Asking twice says nothing the second time.
+     *
+     * Cleanup runs again on a workspace it kept — a later run sweeping its
+     * history, a second attempt at the same task — and a workspace that has
+     * already let go of the branch has nothing left to release. The line is
+     * absent rather than repeated, and the branch is still free.
+     */
+    #[Test]
+    public function releasing_a_branch_twice_releases_it_once(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $branch = (string) $pass->branch();
+        $commit = (string) $pass->commitSha();
+
+        $this->inWorkspace($workspace, '.ralph/notes.md', "left behind\n");
+        $pass = $this->generations->complete($this->recordOf($pass));
+
+        $this->cleaner()->clean($pass);
+        $again = $this->cleaner()->clean($this->recordOf($pass));
+
+        self::assertTrue($again->wasKept());
+        self::assertFalse($again->release()->happened());
+        self::assertFalse($again->release()->wasRefused());
+        self::assertNull($again->release()->branch());
+        self::assertSame($commit, $this->tipOf($branch));
+        self::assertNull($this->attachedBranchIn($workspace->path()));
+    }
+
+    /**
+     * Per-task mode is left exactly as it was.
+     *
+     * The branch of a pass in per-task mode is the pass's own: no other task
+     * will ever commit to it, and a retry continuing in the kept directory is
+     * better off finding it attached. Detaching here would be a change nobody
+     * asked for, so the same situation as the case above is asserted to leave
+     * the workspace on its branch.
+     */
+    #[Test]
+    public function a_kept_workspace_in_per_task_mode_stays_on_its_own_branch(): void
+    {
+        $this->inPerTaskMode();
+
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $branch = (string) $pass->branch();
+
+        self::assertStringContainsString($pass->generation()->slug(), $branch);
+
+        $this->inWorkspace($workspace, '.ralph/notes.md', "left behind\n");
+        $pass = $this->generations->complete($this->recordOf($pass));
+
+        $cleanup = $this->cleaner()->clean($pass);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertFalse($cleanup->release()->happened());
+        self::assertSame([], array_filter(
+            $cleanup->details(),
+            static fn (string $detail): bool => str_contains($detail, 'shared branch'),
+        ));
+        self::assertSame($branch, $this->attachedBranchIn($workspace->path()));
+    }
+
+    /**
+     * A workspace somebody else moved onto a branch of their own is not this
+     * operation's business.
+     *
+     * The gate is the branch's **name**: only the one the project configures as
+     * shared is detached. A workspace sitting on anything else was moved by
+     * something this class cannot reason about, and is the reconciliation case
+     * rather than this one — so it is left on it, for a person to see.
+     */
+    #[Test]
+    public function a_kept_workspace_on_another_branch_is_left_on_it(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $commit = (string) $pass->commitSha();
+
+        Git::run($workspace->path(), 'switch', '--create', 'somebody/else');
+        $this->inWorkspace($workspace, '.ralph/notes.md', "left behind\n");
+        $pass = $this->generations->complete($this->recordOf($pass));
+
+        $cleanup = $this->cleaner()->clean($pass);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertFalse($cleanup->release()->happened());
+        self::assertSame('somebody/else', $this->attachedBranchIn($workspace->path()));
+
+        // And the shared branch still holds the commit it held.
+        self::assertSame($commit, $this->tipOf('ralph/shared'));
+    }
+
+    /**
+     * A failed pass has nothing to let go of.
+     *
+     * Its workspace is detached — a task workspace is created that way and only
+     * attached when there is a commit to put on a branch — so the preserved
+     * directory never held the shared branch, and cleanup says nothing about
+     * it rather than reporting a release that did not happen.
+     */
+    #[Test]
+    public function a_detached_workspace_reports_no_release(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->generations->fail($this->recordOf($pass));
+
+        $cleanup = $this->cleaner()->clean($pass);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertFalse($cleanup->release()->happened());
+        self::assertFalse($cleanup->release()->wasRefused());
+        self::assertNull($cleanup->release()->describe());
+        self::assertNull($this->attachedBranchIn($workspace->path()));
+    }
+
+    /**
+     * A detach Git refuses is reported, not raised.
+     *
+     * Cleanup runs after the pass has been verified, committed and published,
+     * so a workspace that could not be detached is a line in the log and a
+     * branch the next run will stop on — never a reason to withdraw finished
+     * work. The workspace and the branch are both left exactly as they were.
+     */
+    #[Test]
+    public function a_detach_git_refuses_is_reported_against_the_kept_workspace(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $branch = (string) $pass->branch();
+        $commit = (string) $pass->commitSha();
+
+        $this->inWorkspace($workspace, '.ralph/notes.md', "left behind\n");
+        $pass = $this->generations->complete($this->recordOf($pass));
+
+        $sink = new RecordingSink();
+        $cleanup = $this->cleanerUsing($this->givenAGitThatRefusesToDetach())->clean($pass, $sink);
+
+        self::assertTrue($cleanup->wasKept());
+        self::assertFalse($cleanup->release()->happened());
+        self::assertTrue($cleanup->release()->wasRefused());
+        self::assertSame($branch, $cleanup->release()->branch());
+        self::assertStringContainsString('no', (string) $cleanup->release()->refusal());
+
+        self::assertSame($branch, $this->attachedBranchIn($workspace->path()));
+        self::assertSame($commit, $this->tipOf($branch));
+        self::assertDirectoryExists($workspace->path());
+
+        self::assertNotSame([], array_filter(
+            $sink->notes,
+            static fn (string $note): bool => str_contains($note, 'still holds the shared branch'),
+        ));
+    }
+
+    /**
+     * Removal already releases the branch, and this says so.
+     *
+     * The asymmetry {@see \Celyes\RalphPhp\Git\BranchRelease} exists for:
+     * taking the worktree away takes Git's record of which worktree is using
+     * the name with it, so a removed workspace needs no detaching — and the
+     * commit, the branch and the tip all survive it, which is the half of
+     * item 9 that was already true and is worth keeping true.
+     */
+    #[Test]
+    public function removing_a_shared_workspace_frees_the_branch_without_detaching_it(): void
+    {
+        $pass = $this->givenAPass();
+        $workspace = $this->givenAWorkspace($pass);
+        $pass = $this->givenACommittedImplementation($pass, $workspace);
+        $commit = (string) $pass->commitSha();
+        $branch = (string) $pass->branch();
+        $pass = $this->generations->complete($this->recordOf($pass));
+
+        $cleanup = $this->cleaner()->clean($pass);
+
+        self::assertTrue($cleanup->wasRemoved());
+        self::assertFalse($cleanup->release()->happened());
+
+        // The branch kept its commit and is checked out nowhere.
+        self::assertSame($commit, $this->tipOf($branch));
+        self::assertTrue($this->commitExists($commit));
+        self::assertNull($this->registrationAt($workspace->path()));
+        self::assertStringNotContainsString(
+            $workspace->path(),
+            Git::run($this->project->root(), 'worktree', 'list')->standardOutput,
+        );
+    }
+
     // ------------------------------------------------------------------ sweep
 
     /**
@@ -1362,9 +1634,76 @@ final class WorktreeCleanerTest extends TestCase
                         RetentionReason::RemovalRefused->value => 'exited with 128: it is in use',
                     ],
                 ],
+                'release' => [
+                    'branch' => null,
+                    'tip' => null,
+                    'released' => false,
+                    'refusal' => null,
+                ],
             ],
             $cleanup->toArray(),
         );
+    }
+
+    #[Test]
+    public function a_release_reports_itself_for_a_log_and_for_json(): void
+    {
+        $release = BranchRelease::released('ralph/shared', 'b1946ac92492d2347c6235b4d2611184');
+
+        self::assertTrue($release->happened());
+        self::assertFalse($release->wasRefused());
+        self::assertSame('ralph/shared', $release->branch());
+        self::assertSame(
+            'released the shared branch ralph/shared, still at b1946ac92492, for the next task',
+            $release->describe(),
+        );
+        self::assertSame(
+            [
+                'branch' => 'ralph/shared',
+                'tip' => 'b1946ac92492d2347c6235b4d2611184',
+                'released' => true,
+                'refusal' => null,
+            ],
+            $release->toArray(),
+        );
+    }
+
+    #[Test]
+    public function a_refused_release_names_the_branch_and_what_stopped_it(): void
+    {
+        $release = BranchRelease::refused('ralph/shared', 'exited with 128: it is in use');
+
+        self::assertFalse($release->happened());
+        self::assertTrue($release->wasRefused());
+        self::assertNull($release->tip());
+        self::assertSame(
+            'the workspace still holds the shared branch ralph/shared: exited with 128: it is in use',
+            $release->describe(),
+        );
+    }
+
+    /**
+     * Nothing to release says nothing at all, which is what keeps per-task
+     * runs and removed workspaces reading exactly as they did.
+     */
+    #[Test]
+    public function a_release_that_was_unnecessary_says_nothing(): void
+    {
+        $release = BranchRelease::unnecessary();
+
+        self::assertFalse($release->happened());
+        self::assertFalse($release->wasRefused());
+        self::assertNull($release->branch());
+        self::assertNull($release->describe());
+    }
+
+    #[Test]
+    public function a_release_must_name_the_branch_it_is_about(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('must name the branch');
+
+        BranchRelease::released('   ', 'b1946ac92492d2347c6235b4d2611184');
     }
 
     #[Test]
@@ -1475,6 +1814,12 @@ final class WorktreeCleanerTest extends TestCase
                     'verdict' => 'removable',
                     'for_inspection' => false,
                     'reasons' => [],
+                ],
+                'release' => [
+                    'branch' => null,
+                    'tip' => null,
+                    'released' => false,
+                    'refusal' => null,
                 ],
             ],
             $cleanup->toArray(),
@@ -1674,6 +2019,45 @@ final class WorktreeCleanerTest extends TestCase
         return $path;
     }
 
+    /**
+     * A `git` that declines `switch --detach` and passes everything else
+     * through.
+     *
+     * The real Git answers every other question, so the assessment, the branch
+     * reading and the confirmation afterwards are all about the repository as
+     * it actually is; the only thing invented is the refusal being tested. A
+     * real one would be a worktree Git has administratively lost track of,
+     * which is awkward to arrange and no more informative.
+     *
+     * @return string the path to the executable
+     */
+    private function givenAGitThatRefusesToDetach(): string
+    {
+        $path = $this->project->root() . '/.ralph/runtime/git-that-will-not-detach';
+        $script = sprintf(
+            "#!%s\n<?php\n"
+                . "\$arguments = array_slice(\$argv, 1);\n"
+                . "if ((\$arguments[0] ?? '') === 'switch' && in_array('--detach', \$arguments, true)) {\n"
+                . "    fwrite(STDERR, \"fatal: no, not this one\\n\");\n"
+                . "    exit(128);\n"
+                . "}\n"
+                . "\$command = array_map('escapeshellarg', ['git', ...\$arguments]);\n"
+                . "passthru(implode(' ', \$command), \$status);\n"
+                . "exit(\$status);\n",
+            PHP_BINARY,
+        );
+
+        if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0o700, true) && !is_dir(dirname($path))) {
+            self::fail('Could not create ' . dirname($path));
+        }
+
+        if (file_put_contents($path, $script) === false || !chmod($path, 0o700)) {
+            self::fail('Could not install the git stub at ' . $path);
+        }
+
+        return $path;
+    }
+
     private function cleanerUsing(string $executable): WorktreeCleaner
     {
         return WorktreeCleaner::forProject($this->configuration(), $this->generations, $executable);
@@ -1708,7 +2092,37 @@ final class WorktreeCleanerTest extends TestCase
 
     private function configuration(): Configuration
     {
-        return (new ConfigurationLoader())->fromArray([], $this->project->root());
+        return (new ConfigurationLoader())->fromArray($this->settings, $this->project->root());
+    }
+
+    /**
+     * Put the project in per-task mode, before anything is built from its
+     * configuration.
+     *
+     * Every helper here reads {@see self::configuration()} afresh, so this
+     * changes the branch a pass is named onto, the branch it commits to and
+     * the branch the cleaner knows is shared, all at once — which is what makes
+     * the per-task contrast a one-line case rather than a parallel set of
+     * helpers.
+     */
+    private function inPerTaskMode(): void
+    {
+        $this->settings = ['git' => ['strategy' => 'per-task']];
+    }
+
+    /**
+     * The branch a workspace's HEAD is on, or null when it is detached.
+     */
+    private function attachedBranchIn(string $path): ?string
+    {
+        $result = Git::tryRun($path, 'symbolic-ref', '--quiet', '--short', 'HEAD');
+
+        return $result->exitCode === 0 ? trim($result->standardOutput) : null;
+    }
+
+    private function headOf(string $path): string
+    {
+        return trim(Git::run($path, 'rev-parse', '--verify', 'HEAD')->standardOutput);
     }
 
     private function base(): BaseCommit

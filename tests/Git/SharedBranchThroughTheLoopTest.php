@@ -297,6 +297,113 @@ final class SharedBranchThroughTheLoopTest extends TestCase
     }
 
     /**
+     * A workspace kept behind does not keep the branch with it (PROJECT.md
+     * section K, item 9).
+     *
+     * The first task here leaves a file in `.ralph/`, which staging excludes
+     * from the commit and which is therefore uncommitted work when cleanup
+     * looks — so its workspace is preserved, as a workspace holding anything
+     * uncommitted always is. In shared-branch mode that workspace is also
+     * sitting on `ralph/shared`, and Git lets one branch be checked out in one
+     * worktree at a time, so before this item the second task stopped on:
+     *
+     * ```
+     * ralph/shared is not the branch of TASK-… to use: it is checked out in
+     * …/worktrees/TASK-…, which is not the pass's workspace.
+     * ```
+     *
+     * Cleanup detaching the kept workspace is what turns that back into a run
+     * that finishes. The case asserts the whole of what has to remain true
+     * afterwards: both tasks commit, in order, on the one branch; the second
+     * is built on the first; and the kept workspace still holds the file it was
+     * kept for.
+     */
+    #[Test]
+    public function a_task_whose_workspace_is_kept_does_not_stop_the_next_task_on_the_branch(): void
+    {
+        $this->project
+            ->withWorker(
+                FixtureStep::success([
+                    self::EDITED => self::EDIT,
+                    // Ralph PHP's own directory: staged out of the commit, and
+                    // so still uncommitted when cleanup decides.
+                    '.ralph/notes.md' => "What the agent thought.\n",
+                ]),
+                FixtureStep::success(['README.md' => "# Project\n\nThe import command.\n"]),
+            )
+            ->withTasks([self::FIRST, self::SECOND])
+            ->withConfiguration(['git' => ['strategy' => 'shared']]);
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertStringContainsString('2 of 2 tasks completed', $result->allOutput());
+
+        // The first task's workspace was kept, and said so, and said what it
+        // did about the branch.
+        self::assertStringContainsString('uncommitted change(s): .ralph/notes.md', $result->allOutput());
+        self::assertStringContainsString(
+            sprintf('Released the shared branch %s', self::SHARED),
+            $result->allOutput(),
+            $result->describe(),
+        );
+
+        // One branch, two commits, in order, with the first task's edit inside
+        // the second task's commit.
+        self::assertSame([self::SHARED], $this->project->taskBranches());
+
+        $commits = $this->project->commitsOn(self::SHARED);
+
+        self::assertCount(2, $commits);
+        self::assertStringContainsString(self::SECOND, $commits[0]);
+        self::assertStringContainsString(self::FIRST, $commits[1]);
+        self::assertSame(
+            self::EDIT,
+            $this->contentOf($this->project->headOf(self::SHARED), self::EDITED),
+        );
+
+        // The kept workspace is still there, still holding what kept it, and
+        // no longer holding the branch.
+        $kept = $this->keptWorkspaces();
+
+        self::assertCount(1, $kept);
+        self::assertFileExists($kept[0] . '/.ralph/notes.md');
+        self::assertSame(
+            '',
+            trim(Git::tryRun($kept[0], 'symbolic-ref', '--quiet', '--short', 'HEAD')->standardOutput),
+        );
+
+        self::assertStringContainsString('- [x] ' . self::FIRST, $this->project->checklist());
+        self::assertStringContainsString('- [x] ' . self::SECOND, $this->project->checklist());
+    }
+
+    /**
+     * The task workspaces still registered with the repository, which after a
+     * run are the ones cleanup kept.
+     *
+     * @return list<string>
+     */
+    private function keptWorkspaces(): array
+    {
+        $root = $this->project->path('.ralph/runtime/worktrees');
+        $paths = [];
+
+        foreach (explode("\n", Git::run($this->project->root(), 'worktree', 'list', '--porcelain')->standardOutput) as $line) {
+            if (!str_starts_with($line, 'worktree ')) {
+                continue;
+            }
+
+            $path = trim(substr($line, strlen('worktree ')));
+
+            if (str_starts_with($path, $root)) {
+                $paths[] = $path;
+            }
+        }
+
+        return $paths;
+    }
+
+    /**
      * The commit a commit sits on.
      */
     private function parentOf(string $commit): string

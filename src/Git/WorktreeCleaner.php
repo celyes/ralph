@@ -134,12 +134,21 @@ final class WorktreeCleaner
      */
     private const int PATHS_IN_MESSAGE = 5;
 
+    /**
+     * @param string|null $sharedBranch the branch every task of a run commits
+     *        to, when the project is in {@see \Celyes\RalphPhp\Config\BranchStrategy::Shared};
+     *        null in per-task mode, where a kept workspace holds only a branch
+     *        of its own. It is the one name {@see self::release()} will detach
+     *        a workspace from, so a workspace sitting on anything else is left
+     *        exactly as it is
+     */
     public function __construct(
         private readonly TaskWorktrees $worktrees,
         private readonly GenerationStore $generations,
         private readonly string $projectRoot,
         private readonly string $executable = 'git',
         private readonly ProcessRunner $processes = new ProcessRunner(),
+        private readonly ?string $sharedBranch = null,
     ) {
     }
 
@@ -159,12 +168,15 @@ final class WorktreeCleaner
         string $executable = 'git',
         ProcessRunner $processes = new ProcessRunner(),
     ): self {
+        $git = $configuration->git();
+
         return new self(
             TaskWorktrees::forProject($configuration, $executable, $processes),
             $generations,
             $configuration->projectRoot(),
             $executable,
             $processes,
+            $git->strategy()->isShared() ? $git->sharedBranch() : null,
         );
     }
 
@@ -410,7 +422,7 @@ final class WorktreeCleaner
         }
 
         if ($retention->isPreserved()) {
-            return $this->report(WorktreeCleanup::kept($retention), $sink);
+            return $this->keeping($retention, $sink);
         }
 
         $path = (string) $retention->path();
@@ -437,11 +449,11 @@ final class WorktreeCleaner
             }
 
             if (!$removal->succeeded()) {
-                return $this->report(
-                    WorktreeCleanup::kept($retention->withReason(
+                return $this->keeping(
+                    $retention->withReason(
                         RetentionReason::RemovalRefused,
                         $removal->failureReason(),
-                    )),
+                    ),
                     $sink,
                 );
             }
@@ -450,11 +462,11 @@ final class WorktreeCleaner
         $unconfirmed = $this->unconfirmed($path);
 
         if ($unconfirmed !== null) {
-            return $this->report(
-                WorktreeCleanup::kept($retention->withReason(
+            return $this->keeping(
+                $retention->withReason(
                     RetentionReason::RemovalUnconfirmed,
                     $unconfirmed,
-                )),
+                ),
                 $sink,
             );
         }
@@ -940,6 +952,187 @@ final class WorktreeCleaner
     private function forget(GenerationRecord $generation): void
     {
         $this->generations->finishWorktreeCleanup($generation);
+    }
+
+    /**
+     * Keep the workspace, having first let go of the branch the next task
+     * needs (PROJECT.md section K, item 9).
+     *
+     * The one place a kept outcome is built, so that every way of reaching one
+     * — the decision to preserve, a removal Git refused, a removal that could
+     * not be confirmed — leaves the shared branch in the same state. All three
+     * end with a directory still on disk, and in shared-branch mode all three
+     * would otherwise end with that directory holding the run's branch.
+     */
+    private function keeping(WorkspaceRetention $retention, ?OutputSink $sink): WorktreeCleanup
+    {
+        return $this->report(
+            WorktreeCleanup::kept($retention, $this->release($retention)),
+            $sink,
+        );
+    }
+
+    /**
+     * Detach a kept workspace from the run's shared branch, leaving the branch
+     * and its commits where they are.
+     *
+     * The asymmetry this exists for: **removing** a workspace releases whatever
+     * it held as a matter of course, because the worktree Git was recording the
+     * name against has gone. **Keeping** one does not, and in shared-branch mode
+     * the thing it keeps hold of is the branch every later task has to commit
+     * to — so the next task stops on "it is checked out in …, which is not the
+     * pass's workspace" and the mode's whole purpose, carrying work forward,
+     * ends at the first task whose workspace was worth preserving.
+     *
+     * Detaching is the narrowest fix available and it loses nothing.
+     * `git switch --detach` with no start point moves HEAD from
+     * `refs/heads/<branch>` to the commit that branch already points at: no
+     * file in the working tree is written, nothing staged is dropped, and the
+     * reference keeps every commit on it. What the workspace gives up is
+     * exactly what it should not have been holding — Git's record that this
+     * worktree is the one using the name.
+     *
+     * **Four gates, and the branch is read before and after.**
+     *
+     *  1. Shared mode only. In per-task mode the branch is the pass's own and
+     *     no other task will ever want it, and a retry continuing in the kept
+     *     directory is better off finding it attached.
+     *  2. The workspace's HEAD must be attached to **that** branch by name. A
+     *     detached workspace has nothing to release; a workspace on some other
+     *     branch was moved by something this class cannot reason about, and is
+     *     the reconciliation case rather than this one.
+     *  3. The tip is read from the project's repository first and again
+     *     afterwards, and they must match. "The commits are preserved" is the
+     *     promise the item makes, and a promise checked only in the commentary
+     *     is not checked.
+     *  4. The workspace must actually be detached afterwards, asked of Git
+     *     rather than inferred from an exit status, for the same reason a
+     *     removal is confirmed rather than assumed.
+     *
+     * Anything that does not hold is a {@see BranchRelease::refused()} — a line
+     * in the log naming the branch and what stopped it, never an exception. The
+     * pass this runs after has already been verified, committed and published,
+     * and a workspace that could not be detached is a thing for the next run to
+     * report when it stops on the branch, not a reason to withdraw finished
+     * work.
+     *
+     * The name compared against is the **configured** shared branch, not one
+     * recorded against the run. A project that renames `git.shared_branch`
+     * between runs therefore leaves an older workspace holding the old name,
+     * which is the conservative reading: that workspace is holding a branch
+     * this configuration has nothing to say about, and the run that would
+     * collide with it is the one that reports it.
+     */
+    private function release(WorkspaceRetention $retention): BranchRelease
+    {
+        $branch = $this->sharedBranch;
+        $path = $retention->path();
+
+        if ($branch === null || $path === null || !is_dir($path)) {
+            return BranchRelease::unnecessary();
+        }
+
+        try {
+            $workspace = Repository::at($path, $this->executable, $this->processes);
+        } catch (InvalidArgumentException) {
+            return BranchRelease::unnecessary();
+        }
+
+        if ($this->attachedBranch($workspace) !== $branch) {
+            return BranchRelease::unnecessary();
+        }
+
+        $before = $this->tipOf($branch);
+
+        if ($before === null) {
+            return BranchRelease::refused(
+                $branch,
+                'the commit it points at could not be read, so letting go of it cannot be shown to be safe',
+            );
+        }
+
+        $detached = $workspace->run('switch', '--detach');
+
+        if (!$detached->succeeded()) {
+            return BranchRelease::refused($branch, $detached->failureReason());
+        }
+
+        $after = $this->tipOf($branch);
+
+        if ($after === null) {
+            return BranchRelease::refused($branch, sprintf(
+                'it was at %s and is no longer in the repository',
+                substr($before, 0, TaskCommit::SHORT_LENGTH),
+            ));
+        }
+
+        if ($after !== $before) {
+            return BranchRelease::refused($branch, sprintf(
+                'it was at %s before the workspace was detached and is at %s now',
+                substr($before, 0, TaskCommit::SHORT_LENGTH),
+                substr($after, 0, TaskCommit::SHORT_LENGTH),
+            ));
+        }
+
+        // Asked of Git directly rather than through self::attachedBranch(),
+        // and that is the point: what is being confirmed is the effect of the
+        // write that has just happened, so the question has to be put to the
+        // repository again and be seen to be.
+        $confirmation = $workspace->query('symbolic-ref', '--quiet', '--short', 'HEAD');
+
+        if ($confirmation->succeeded() && $confirmation->trimmedOutput() !== '') {
+            return BranchRelease::refused($branch, sprintf(
+                'the workspace is still on %s',
+                $confirmation->trimmedOutput(),
+            ));
+        }
+
+        return BranchRelease::released($branch, $after);
+    }
+
+    /**
+     * The branch a workspace's HEAD is on, or null when it is detached or
+     * cannot say.
+     *
+     * "Cannot say" and "detached" are deliberately the same answer here. Both
+     * mean this class has not established that the workspace is holding the
+     * shared branch, and the only thing it does with that establishment is
+     * issue a command — so an unreadable HEAD leaves the workspace alone, which
+     * is what every other unanswerable question in this class does.
+     */
+    private function attachedBranch(Repository $workspace): ?string
+    {
+        $result = $workspace->query('symbolic-ref', '--quiet', '--short', 'HEAD');
+
+        if (!$result->succeeded()) {
+            return null;
+        }
+
+        $branch = $result->trimmedOutput();
+
+        return $branch === '' ? null : $branch;
+    }
+
+    /**
+     * The commit a branch points at in the project's repository, or null when
+     * there is no such branch or Git could not say.
+     */
+    private function tipOf(string $branch): ?string
+    {
+        $result = $this->repository()->query(
+            'rev-parse',
+            '--verify',
+            '--end-of-options',
+            'refs/heads/' . $branch,
+        );
+
+        if (!$result->succeeded()) {
+            return null;
+        }
+
+        $sha = $result->trimmedOutput();
+
+        return $sha === '' ? null : $sha;
     }
 
     /**

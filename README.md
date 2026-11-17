@@ -839,6 +839,24 @@ when every one of these holds:
 Anything else is kept, with the reason stated. Cleanup never withdraws work that
 has already been earned.
 
+**A kept worktree lets go of the shared branch.** In shared-branch mode the
+branch belongs to the run, and Git lets one branch be checked out in one
+worktree at a time — so a worktree kept after its commit would be holding the
+branch the *next* task has to commit to, and that task would stop before it
+started. Cleanup therefore detaches a kept worktree from the shared branch:
+`git switch --detach` onto the commit it is already sitting on, which writes no
+file, drops nothing you have staged, and leaves the branch and every commit on
+it exactly where they are. What it gives up is only Git's record that this
+worktree is the one using the name. Only the configured shared branch is
+detached and only when the worktree is actually on it, and the branch's tip is
+read before and after so that "the commits survived" is checked rather than
+assumed. Under `per-task` nothing is detached — the branch is that pass's own,
+and a retry continuing in the kept directory is better off finding it attached.
+A removed worktree needs none of this: taking the worktree away takes the record
+of which worktree is using the name with it. A detach Git refuses is reported
+against the kept workspace and does not fail the task; the next run stops on the
+branch and tells you where it is held.
+
 **Clearing up a kept worktree is yours to ask for.** `ralph clean` lists what is
 being held and why, and `ralph clean TASK-ID` or `ralph clean --all` removes the
 worktrees of passes that failed, were blocked or were interrupted — the one
