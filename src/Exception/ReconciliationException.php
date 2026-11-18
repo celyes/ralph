@@ -13,14 +13,14 @@ use Celyes\RalphPhp\Tasks\TaskChange;
  *
  * Kept apart from {@see ChecklistException}, which reports a checklist that
  * cannot be read or understood before anything has run. This one is raised
- * *after* work has happened: an agent has been invoked, there may be a commit
- * on a task branch, and the message has to say so, because a user who reads
- * "the checklist no longer states this task" and assumes their work was thrown
- * away will go looking for it in the wrong place.
+ * *after* work has happened: an agent has been invoked, its changes are in the
+ * working tree, and the message has to say so, because a user who reads "the
+ * checklist no longer states this task" and assumes their work was thrown away
+ * will go looking for it in the wrong place.
  *
- * Nothing is undone when this is raised. The branch, the worktree and the logs
- * are left as they are, which is what makes restoring the old wording and
- * running again a complete remedy rather than a retry from scratch.
+ * Nothing is undone when this is raised. The agent's changes and the logs are
+ * left as they are, which is what makes restoring the old wording and running
+ * again a complete remedy rather than a retry from scratch.
  *
  * Reported with {@see ExitCode::BLOCKED}, the blocking status of PROJECT.md
  * section I, item 5. Restoring the old wording and running again is a complete

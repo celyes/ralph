@@ -8,17 +8,13 @@ use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Exception\StateException;
 use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\Blocker;
-use Celyes\RalphPhp\State\CleanupState;
 use Celyes\RalphPhp\State\Database;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\GenerationStore;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Phase;
-use Celyes\RalphPhp\State\PushResult;
-use Celyes\RalphPhp\State\PushState;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\State\TaskStore;
-use Celyes\RalphPhp\State\WorktreeOwnership;
 use Celyes\RalphPhp\Support\FrozenClock;
 use Celyes\RalphPhp\Tasks\ChecklistItem;
 use Celyes\RalphPhp\Tasks\Task;
@@ -49,7 +45,6 @@ use PHPUnit\Framework\TestCase;
  */
 #[CoversClass(GenerationStore::class)]
 #[CoversClass(GenerationRecord::class)]
-#[CoversClass(CleanupState::class)]
 final class GenerationStoreTest extends TestCase
 {
     private Database $database;
@@ -69,7 +64,7 @@ final class GenerationStoreTest extends TestCase
     }
 
     #[Test]
-    public function a_new_pass_records_the_task_the_agent_and_the_base_it_branched_from(): void
+    public function a_new_pass_records_the_task_and_the_agent(): void
     {
         $snapshot = $this->record('Add a --dry-run option');
 
@@ -78,8 +73,6 @@ final class GenerationStoreTest extends TestCase
         self::assertTrue($generation->task()->equals($snapshot->id()));
         self::assertSame(1, $generation->number());
         self::assertSame($snapshot->contentHash(), $generation->contentHash());
-        self::assertSame('main', $generation->baseReference());
-        self::assertSame('a1b2c3d4e5f6', $generation->baseSha());
         self::assertSame('codex', $generation->agent()->name());
         self::assertSame('codex', $generation->agent()->adapter());
     }
@@ -102,37 +95,6 @@ final class GenerationStoreTest extends TestCase
         self::assertFalse($generation->isComplete());
     }
 
-    #[Test]
-    public function a_new_pass_owns_nothing_yet(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        self::assertNull($generation->branch());
-        self::assertFalse($generation->hasBranch());
-        self::assertNull($generation->commitSha());
-        self::assertFalse($generation->hasCommit());
-        self::assertFalse($generation->isNoChange());
-        self::assertFalse($generation->worktree()->exists());
-        self::assertNull($generation->blocker());
-        self::assertNull($generation->finishedAt());
-    }
-
-    /**
-     * Publication is opt-in, so the default is a pass that owes nothing — and
-     * what it does owe comes from the run's frozen configuration rather than
-     * from re-reading a file.
-     */
-    #[Test]
-    public function what_publication_requires_is_recorded_when_the_pass_starts(): void
-    {
-        $off = $this->start($this->record('Pushes nothing'));
-        $on = $this->start($this->record('Pushes something'), push: PushResult::pending('origin'));
-
-        self::assertSame(PushState::NotRequired, $off->push()->state());
-        self::assertSame(PushState::Pending, $on->push()->state());
-        self::assertSame('origin', $on->push()->remote());
-    }
-
     /**
      * A pass at a task no reading ever saw is a mistake worth reporting as
      * one, rather than a foreign-key failure later.
@@ -145,13 +107,7 @@ final class GenerationStoreTest extends TestCase
         $this->expectException(StateException::class);
         $this->expectExceptionMessage('has no record of task');
 
-        $this->generations->start(
-            TaskGeneration::first($snapshot->id()),
-            $snapshot,
-            $this->agent(),
-            'main',
-            'a1b2c3d4e5f6',
-        );
+        $this->generations->start(TaskGeneration::first($snapshot->id()), $snapshot, $this->agent());
     }
 
     #[Test]
@@ -167,28 +123,6 @@ final class GenerationStoreTest extends TestCase
             TaskGeneration::first(TaskId::fromDescription('A different task')),
             $snapshot,
             $this->agent(),
-            'main',
-            'a1b2c3d4e5f6',
-        );
-    }
-
-    #[Test]
-    #[DataProvider('blankReferences')]
-    public function a_base_reference_and_a_base_commit_must_name_something(
-        string $reference,
-        string $sha,
-    ): void {
-        $snapshot = $this->record('Add a --dry-run option');
-
-        $this->expectException(StateException::class);
-        $this->expectExceptionMessage('must name something');
-
-        $this->generations->start(
-            TaskGeneration::first($snapshot->id()),
-            $snapshot,
-            $this->agent(),
-            $reference,
-            $sha,
         );
     }
 
@@ -214,33 +148,6 @@ final class GenerationStoreTest extends TestCase
         self::assertSame(
             $generation->rowId(),
             $this->generations->findBySlug($generation->slug())?->rowId(),
-        );
-    }
-
-    /**
-     * What a sweep over the whole project reads: every pass, with the columns a
-     * cleanup decision is made from, including the passes whose tasks are no
-     * longer in the checklist.
-     */
-    #[Test]
-    public function every_recorded_pass_is_read_back_with_its_workspace(): void
-    {
-        $first = $this->start($this->record('Add a --dry-run option'));
-        $second = $this->start($this->record('Document the import command'));
-        $this->generations->recordWorktree($first, WorktreeOwnership::created('/tmp/ralph/first'));
-
-        $all = $this->generations->all();
-
-        // Ordered by the task row, which is the order the tasks were recorded
-        // in, so a sweep works through a project's history front to back.
-        self::assertCount(2, $all);
-        self::assertSame(
-            [$first->task()->value(), $second->task()->value()],
-            array_map(static fn (GenerationRecord $record): string => $record->task()->value(), $all),
-        );
-        self::assertSame(
-            ['/tmp/ralph/first', null],
-            array_map(static fn (GenerationRecord $record): ?string => $record->worktree()->path(), $all),
         );
     }
 
@@ -373,7 +280,7 @@ final class GenerationStoreTest extends TestCase
             $this->start($this->record('Add a --dry-run option')),
         );
 
-        foreach ([Phase::Executing, Phase::Verifying, Phase::Committing, Phase::Finalizing] as $phase) {
+        foreach ([Phase::Executing, Phase::Verifying, Phase::Finalizing] as $phase) {
             $generation = $this->generations->enterPhase($generation, $phase);
 
             self::assertSame($phase, $generation->phase());
@@ -407,210 +314,6 @@ final class GenerationStoreTest extends TestCase
         $this->generations->enterPhase($completed, Phase::Executing);
     }
 
-    #[Test]
-    public function a_pass_claims_a_branch_and_keeps_it(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        $assigned = $this->generations->assignBranch($generation, 'ralph/task-19e0214a');
-
-        self::assertSame('ralph/task-19e0214a', $assigned->branch());
-        self::assertTrue($assigned->hasBranch());
-        self::assertTrue($assigned->ownsBranch('ralph/task-19e0214a'));
-    }
-
-    /**
-     * Git refs are case-sensitive, so a near-match is someone else's branch.
-     */
-    #[Test]
-    public function branch_ownership_is_compared_exactly(): void
-    {
-        $assigned = $this->generations->assignBranch(
-            $this->start($this->record('Add a --dry-run option')),
-            'ralph/task-19e0214a',
-        );
-
-        self::assertFalse($assigned->ownsBranch('ralph/TASK-19E0214A'));
-        self::assertFalse($assigned->ownsBranch('ralph/task-19e0214'));
-    }
-
-    /**
-     * So resume does not have to remember whether it got this far.
-     */
-    #[Test]
-    public function reclaiming_the_branch_a_pass_already_owns_does_nothing(): void
-    {
-        $assigned = $this->generations->assignBranch(
-            $this->start($this->record('Add a --dry-run option')),
-            'ralph/task-19e0214a',
-        );
-        $this->clock->advance(60);
-
-        $again = $this->generations->assignBranch($assigned, 'ralph/task-19e0214a');
-
-        self::assertSame('ralph/task-19e0214a', $again->branch());
-        self::assertSame(
-            $assigned->updatedAt()->value(),
-            $again->updatedAt()->value(),
-            'Re-claiming the same branch is not a write.',
-        );
-    }
-
-    /**
-     * The behaviour PROJECT.md section F, item 4 requires, and the reason
-     * reopening a task cannot destroy the commit the first pass left behind.
-     */
-    #[Test]
-    public function a_branch_another_pass_owns_is_refused_rather_than_reset(): void
-    {
-        $first = $this->start($this->record('First task'));
-        $this->generations->assignBranch($first, 'ralph/shared');
-        $second = $this->start($this->record('Second task'));
-
-        try {
-            $this->generations->assignBranch($second, 'ralph/shared');
-            self::fail('A branch owned by another pass must not be taken.');
-        } catch (StateException $refusal) {
-            self::assertStringContainsString('already owned by another pass', $refusal->getMessage());
-            self::assertStringContainsString(
-                'belongs to exactly one execution generation',
-                implode(' ', $refusal->hints()),
-            );
-        }
-
-        self::assertSame(
-            'ralph/shared',
-            $this->generations->get($first->generation())->branch(),
-            'The owning pass keeps its branch.',
-        );
-    }
-
-    #[Test]
-    public function a_branch_must_name_something(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        $this->expectException(StateException::class);
-        $this->expectExceptionMessage('must name something');
-
-        $this->generations->assignBranch($generation, '   ');
-    }
-
-    #[Test]
-    public function a_workspace_is_recorded_with_who_created_it(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        $owned = $this->generations->recordWorktree(
-            $generation,
-            WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
-        );
-
-        self::assertSame('/repo/.ralph/runtime/worktrees/g1', $owned->worktree()->path());
-        self::assertTrue($owned->worktree()->isOwned());
-
-        $adopted = $this->generations->recordWorktree(
-            $owned,
-            WorktreeOwnership::adopted('/repo/.ralph/runtime/worktrees/g1'),
-        );
-
-        self::assertTrue($adopted->worktree()->mustBePreserved());
-    }
-
-    /**
-     * The mark that makes an interrupted cleanup recoverable: written before
-     * the removal is issued, and idempotent so that a retry does not have to
-     * remember whether it got this far (PROJECT.md section K, item 7).
-     */
-    #[Test]
-    public function a_workspace_cleanup_is_marked_before_it_is_attempted(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-        $prepared = $this->generations->recordWorktree(
-            $generation,
-            WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
-        );
-
-        self::assertNull($prepared->cleanup());
-        self::assertFalse($prepared->cleanupIsUnfinished());
-        self::assertFalse($prepared->cleanupIsFinished());
-
-        $removing = $this->generations->beginWorktreeCleanup($prepared);
-
-        self::assertSame(CleanupState::Removing, $removing->cleanup());
-        self::assertTrue($removing->cleanupIsUnfinished());
-        self::assertFalse($removing->cleanupIsFinished());
-
-        // The workspace is still named: nothing has been confirmed yet, and the
-        // path is what a resumed cleanup needs in order to finish.
-        self::assertSame('/repo/.ralph/runtime/worktrees/g1', $removing->worktree()->path());
-
-        $this->clock->advance(60);
-
-        self::assertSame(
-            $removing->updatedAt()->value(),
-            $this->generations->beginWorktreeCleanup($removing)->updatedAt()->value(),
-            'Marking a removal that is already marked is not a write.',
-        );
-    }
-
-    /**
-     * Finishing a cleanup clears the workspace and marks it complete in one
-     * statement, so no crash can leave a row that both names a directory and
-     * claims to have removed it.
-     */
-    #[Test]
-    public function a_finished_workspace_cleanup_forgets_the_workspace_and_keeps_the_evidence(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-        $committed = $this->generations->recordCommit(
-            $this->generations->recordWorktree(
-                $generation,
-                WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
-            ),
-            'f1e2d3c4b5a6',
-        );
-
-        $cleaned = $this->generations->finishWorktreeCleanup(
-            $this->generations->beginWorktreeCleanup($committed),
-        );
-
-        self::assertSame(CleanupState::Removed, $cleaned->cleanup());
-        self::assertTrue($cleaned->cleanupIsFinished());
-        self::assertFalse($cleaned->cleanupIsUnfinished());
-        self::assertNull($cleaned->worktree()->path());
-        self::assertFalse($cleaned->worktree()->isOwned());
-
-        // What the pass is reviewed from is untouched.
-        self::assertSame('f1e2d3c4b5a6', $cleaned->commitSha());
-    }
-
-    /**
-     * A fresh workspace is a workspace no removal has been issued against, so
-     * recording one clears the mark left by the last.
-     */
-    #[Test]
-    public function recording_a_workspace_clears_an_earlier_cleanup_mark(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-        $cleaned = $this->generations->finishWorktreeCleanup(
-            $this->generations->beginWorktreeCleanup(
-                $this->generations->recordWorktree(
-                    $generation,
-                    WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
-                ),
-            ),
-        );
-
-        $prepared = $this->generations->recordWorktree(
-            $cleaned,
-            WorktreeOwnership::created('/repo/.ralph/runtime/worktrees/g1'),
-        );
-
-        self::assertNull($prepared->cleanup());
-        self::assertSame('/repo/.ralph/runtime/worktrees/g1', $prepared->worktree()->path());
-    }
-
     /**
      * The one fact the filesystem cannot supply afterwards: that a log is
      * missing because the package deleted it on purpose (PROJECT.md section K,
@@ -621,7 +324,7 @@ final class GenerationStoreTest extends TestCase
     #[Test]
     public function a_wiped_log_is_dated_once_and_leaves_the_rest_of_the_row_alone(): void
     {
-        $completed = $this->completed('Add a --dry-run option', 'ralph/dry-run');
+        $completed = $this->completed('Add a --dry-run option');
 
         self::assertNull($completed->logsWipedAt());
         self::assertFalse($completed->logsWereWiped());
@@ -632,8 +335,6 @@ final class GenerationStoreTest extends TestCase
         self::assertSame($this->clock->now()->format(DATE_ATOM), $wiped->logsWipedAt()?->value());
 
         // Everything the pass is reviewed from outlives its logs.
-        self::assertSame('f1e2d3c4b5a6', $wiped->commitSha());
-        self::assertSame('ralph/dry-run', $wiped->branch());
         self::assertSame(LifecycleState::Completed, $wiped->state());
 
         $this->clock->advance(3600);
@@ -645,209 +346,6 @@ final class GenerationStoreTest extends TestCase
     }
 
     /**
-     * The column refuses a state this build does not know, so a database and a
-     * build cannot quietly disagree about whether a workspace was removed.
-     */
-    #[Test]
-    public function the_cleanup_column_refuses_a_state_the_package_never_writes(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        $this->expectException(StateException::class);
-
-        $this->database->execute(
-            'UPDATE generations SET cleanup_state = ? WHERE id = ?',
-            ['halfway', $generation->rowId()],
-        );
-    }
-
-    #[Test]
-    public function a_recorded_commit_is_read_back(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        $committed = $this->generations->recordCommit($generation, 'f1e2d3c4b5a6');
-
-        self::assertSame('f1e2d3c4b5a6', $committed->commitSha());
-        self::assertTrue($committed->hasCommit());
-        self::assertTrue($committed->hasImplementation());
-        self::assertFalse($committed->isNoChange());
-    }
-
-    #[Test]
-    public function recording_the_same_commit_twice_does_nothing(): void
-    {
-        $committed = $this->generations->recordCommit(
-            $this->start($this->record('Add a --dry-run option')),
-            'f1e2d3c4b5a6',
-        );
-        $this->clock->advance(60);
-
-        $again = $this->generations->recordCommit($committed, 'f1e2d3c4b5a6');
-
-        self::assertSame($committed->updatedAt()->value(), $again->updatedAt()->value());
-    }
-
-    /**
-     * Two commits means the implementation ran twice, which resume is meant to
-     * prevent — so it is reported rather than overwritten.
-     */
-    #[Test]
-    public function a_second_different_commit_is_refused(): void
-    {
-        $committed = $this->generations->recordCommit(
-            $this->start($this->record('Add a --dry-run option')),
-            'f1e2d3c4b5a6',
-        );
-
-        try {
-            $this->generations->recordCommit($committed, '0a0b0c0d0e0f');
-            self::fail('A pass commits once.');
-        } catch (StateException $refusal) {
-            self::assertStringContainsString('already records commit f1e2d3c4b5a6', $refusal->getMessage());
-        }
-
-        self::assertSame(
-            'f1e2d3c4b5a6',
-            $this->generations->get($committed->generation())->commitSha(),
-            'The recorded commit is kept.',
-        );
-    }
-
-    #[Test]
-    public function a_commit_must_name_something(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        $this->expectException(StateException::class);
-        $this->expectExceptionMessage('must name something');
-
-        $this->generations->recordCommit($generation, '');
-    }
-
-    /**
-     * A complete outcome rather than a failure, and deliberately not an empty
-     * commit (PROJECT.md section G, item 6).
-     */
-    #[Test]
-    public function an_already_satisfied_task_is_recorded_as_a_no_change_result(): void
-    {
-        $generation = $this->start($this->record('Already satisfied'));
-
-        $unchanged = $this->generations->recordNoChange($generation);
-
-        self::assertTrue($unchanged->isNoChange());
-        self::assertFalse($unchanged->hasCommit());
-        self::assertTrue($unchanged->hasImplementation());
-    }
-
-    #[Test]
-    public function a_pass_that_committed_cannot_also_claim_it_changed_nothing(): void
-    {
-        $committed = $this->generations->recordCommit(
-            $this->start($this->record('Add a --dry-run option')),
-            'f1e2d3c4b5a6',
-        );
-
-        $this->expectException(StateException::class);
-        $this->expectExceptionMessage('did not leave the task unchanged');
-
-        $this->generations->recordNoChange($committed);
-    }
-
-    /**
-     * The other direction: a pass recorded as unchanged that then commits is a
-     * pass that did change something, and the commit is the stronger fact.
-     */
-    #[Test]
-    public function a_commit_after_a_no_change_result_replaces_it(): void
-    {
-        $unchanged = $this->generations->recordNoChange(
-            $this->start($this->record('Add a --dry-run option')),
-        );
-
-        $committed = $this->generations->recordCommit($unchanged, 'f1e2d3c4b5a6');
-
-        self::assertSame('f1e2d3c4b5a6', $committed->commitSha());
-        self::assertFalse($committed->isNoChange());
-    }
-
-    #[Test]
-    public function where_publication_stands_is_recorded(): void
-    {
-        $generation = $this->start(
-            $this->record('Add a --dry-run option'),
-            push: PushResult::pending('origin'),
-        );
-
-        $published = $this->generations->recordPush($generation, PushResult::published('origin'));
-
-        self::assertSame(PushState::Published, $published->push()->state());
-        self::assertSame('origin', $published->push()->remote());
-        self::assertNull($published->push()->error());
-    }
-
-    #[Test]
-    public function a_failed_push_keeps_its_reason(): void
-    {
-        $generation = $this->start(
-            $this->record('Add a --dry-run option'),
-            push: PushResult::pending('origin'),
-        );
-
-        $failed = $this->generations->recordPush(
-            $generation,
-            PushResult::failed('origin', '! [rejected] (non-fast-forward)'),
-        );
-
-        self::assertTrue($failed->push()->hasFailed());
-        self::assertStringContainsString('non-fast-forward', (string) $failed->push()->error());
-    }
-
-    /**
-     * The state resume reads to retry only the publication, without repeating
-     * the implementation or the commit.
-     */
-    #[Test]
-    public function a_committed_pass_with_a_failed_push_awaits_publication_and_nothing_else(): void
-    {
-        $generation = $this->generations->recordCommit(
-            $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
-            'f1e2d3c4b5a6',
-        );
-
-        $failed = $this->generations->recordPush(
-            $generation,
-            PushResult::failed('origin', 'rejected'),
-        );
-
-        self::assertTrue($failed->awaitsPublication());
-        self::assertFalse($failed->isFinalizable());
-        self::assertTrue($failed->hasImplementation());
-    }
-
-    #[Test]
-    public function a_pass_with_nothing_outstanding_is_finalizable(): void
-    {
-        $generation = $this->generations->recordCommit(
-            $this->start($this->record('Add a --dry-run option')),
-            'f1e2d3c4b5a6',
-        );
-
-        self::assertTrue($generation->isFinalizable());
-        self::assertFalse($generation->awaitsPublication());
-    }
-
-    #[Test]
-    public function a_pass_with_no_implementation_is_not_finalizable(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        self::assertFalse($generation->isFinalizable());
-        self::assertFalse($generation->awaitsPublication());
-    }
-
-    /**
      * The way back into a pass that owes nothing but the write to the user's
      * checklist (PROJECT.md section G, item 8).
      *
@@ -856,12 +354,12 @@ final class GenerationStoreTest extends TestCase
      * read-only file eventually exhaust the budget of work that has passed.
      */
     #[Test]
-    public function a_blocked_pass_with_its_work_recorded_resumes_at_finalizing(): void
+    public function a_blocked_pass_whose_checks_passed_resumes_at_finalizing(): void
     {
         $blocked = $this->generations->block(
-            $this->generations->recordCommit(
+            $this->generations->enterPhase(
                 $this->generations->beginAttempt($this->start($this->record('Add a --dry-run option'))),
-                'f1e2d3c4b5a6',
+                Phase::Verifying,
             ),
             Blocker::raised('its box could not be ticked', 'Make the checklist writable.'),
         );
@@ -872,171 +370,17 @@ final class GenerationStoreTest extends TestCase
         self::assertSame(LifecycleState::Running, $resumed->state());
         self::assertSame(Phase::Finalizing, $resumed->phase());
         self::assertSame(1, $resumed->attempts(), 'The write is not an attempt at the task.');
-        self::assertSame('f1e2d3c4b5a6', $resumed->commitSha());
+        self::assertNull($resumed->blocker(), 'The reason it stopped is the thing being done again.');
 
         // And from there the pass can be completed, which is the whole journey
         // a refused checkbox write has left to make.
         self::assertTrue($this->generations->complete($resumed)->isComplete());
     }
 
-    /**
-     * A pass interrupted before its work was recorded has work to redo, and
-     * resuming it at the last phase would move a row into a state its history
-     * does not support.
-     */
-    #[Test]
-    public function a_pass_with_nothing_recorded_cannot_resume_at_finalizing(): void
-    {
-        $generation = $this->generations->beginAttempt(
-            $this->start($this->record('Add a --dry-run option')),
-        );
-
-        try {
-            $this->generations->resumeFinalizing($generation);
-            self::fail('A pass with nothing to show cannot be finalized.');
-        } catch (StateException $refused) {
-            self::assertStringContainsString('has not reached finalization', $refused->getMessage());
-            self::assertStringContainsString('no-change result', $refused->getMessage());
-        }
-    }
-
-    #[Test]
-    public function a_pass_whose_push_is_outstanding_cannot_resume_at_finalizing(): void
-    {
-        $generation = $this->generations->recordCommit(
-            $this->generations->beginAttempt(
-                $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
-            ),
-            'f1e2d3c4b5a6',
-        );
-
-        try {
-            $this->generations->resumeFinalizing($generation);
-            self::fail('A pass that still owes a push is not pending its checklist write.');
-        } catch (StateException $refused) {
-            self::assertStringContainsString('has not reached finalization', $refused->getMessage());
-            self::assertStringContainsString('push pending', $refused->getMessage());
-        }
-    }
-
-    /**
-     * The way back into a pass that owes nothing but its push (PROJECT.md
-     * section H, item 7).
-     *
-     * The attempt counter does not move here either, and for the same reason it
-     * does not move for a refused checkbox write: a remote that is down has
-     * nothing to do with how many tries the task itself deserves.
-     */
-    #[Test]
-    public function a_failed_pass_whose_only_debt_is_the_push_resumes_at_publishing(): void
-    {
-        $failed = $this->generations->fail(
-            $this->generations->recordPush(
-                $this->generations->recordCommit(
-                    $this->generations->beginAttempt(
-                        $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
-                    ),
-                    'f1e2d3c4b5a6',
-                ),
-                PushResult::failed('origin', 'fatal: "origin" does not appear to be a Git repository'),
-            ),
-            Blocker::raised('the push to origin was refused', 'Resolve the remote, then resume.'),
-        );
-        self::assertSame(1, $failed->attempts());
-
-        $resumed = $this->generations->resumePublishing($failed);
-
-        self::assertSame(LifecycleState::Running, $resumed->state());
-        self::assertSame(Phase::Publishing, $resumed->phase());
-        self::assertSame(1, $resumed->attempts(), 'A push is not an attempt at the task.');
-        self::assertSame('f1e2d3c4b5a6', $resumed->commitSha(), 'The implementation is kept.');
-        self::assertTrue($resumed->awaitsPublication(), 'The push is still the thing that is owed.');
-
-        // The reason it stopped was the thing now being done again, so it is
-        // not left on the row for `ralph status` to report against a task that
-        // goes on to publish.
-        self::assertNull($resumed->blocker());
-    }
-
-    /**
-     * An interrupted pass reaches the same place: a stop between the commit and
-     * the push leaves the publication owed, not the implementation.
-     */
-    #[Test]
-    public function an_interrupted_pass_that_had_committed_resumes_at_publishing(): void
-    {
-        $interrupted = $this->generations->interrupt(
-            $this->generations->recordCommit(
-                $this->generations->beginAttempt(
-                    $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
-                ),
-                'f1e2d3c4b5a6',
-            ),
-        );
-
-        $resumed = $this->generations->resumePublishing($interrupted);
-
-        self::assertSame(LifecycleState::Running, $resumed->state());
-        self::assertSame(Phase::Publishing, $resumed->phase());
-        self::assertSame(1, $resumed->attempts());
-    }
-
-    #[Test]
-    public function a_pass_with_nothing_recorded_cannot_resume_at_publishing(): void
-    {
-        $generation = $this->generations->beginAttempt(
-            $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
-        );
-
-        try {
-            $this->generations->resumePublishing($generation);
-            self::fail('A pass with nothing committed has work to redo, not a push to retry.');
-        } catch (StateException $refused) {
-            self::assertStringContainsString('is not waiting to be published', $refused->getMessage());
-            self::assertStringContainsString('no-change result', $refused->getMessage());
-        }
-    }
-
-    /**
-     * A push that already succeeded is not retried: that pass owes the
-     * checklist write, and pushing again would report an obligation it has
-     * discharged.
-     */
-    #[Test]
-    public function a_pass_whose_push_is_settled_cannot_resume_at_publishing(): void
-    {
-        $published = $this->generations->recordPush(
-            $this->generations->recordCommit(
-                $this->generations->beginAttempt(
-                    $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
-                ),
-                'f1e2d3c4b5a6',
-            ),
-            PushResult::published('origin'),
-        );
-
-        try {
-            $this->generations->resumePublishing($published);
-            self::fail('A published pass does not owe a push.');
-        } catch (StateException $refused) {
-            self::assertStringContainsString('is not waiting to be published', $refused->getMessage());
-            self::assertStringContainsString('pushed "origin"', $refused->getMessage());
-        }
-
-        // The other resumption is the one it does qualify for.
-        self::assertSame(
-            Phase::Finalizing,
-            $this->generations->resumeFinalizing($published)->phase(),
-        );
-    }
-
     #[Test]
     public function completing_a_pass_records_it_as_complete(): void
     {
-        $generation = $this->generations->recordCommit(
-            $this->generations->beginAttempt($this->start($this->record('Add a --dry-run option'))),
-            'f1e2d3c4b5a6',
-        );
+        $generation = $this->generations->beginAttempt($this->start($this->record('Add a --dry-run option')));
 
         $completed = $this->generations->complete($generation);
 
@@ -1044,60 +388,6 @@ final class GenerationStoreTest extends TestCase
         self::assertTrue($completed->isComplete());
         self::assertFalse($completed->isOpen());
         self::assertNull($completed->phase(), 'A finished pass is not in the middle of anything.');
-    }
-
-    /**
-     * A store that let this slide would make the checked box the only place the
-     * lie showed up.
-     */
-    #[Test]
-    public function a_pass_with_no_implementation_cannot_be_completed(): void
-    {
-        $generation = $this->generations->beginAttempt(
-            $this->start($this->record('Add a --dry-run option')),
-        );
-
-        try {
-            $this->generations->complete($generation);
-            self::fail('A pass with nothing to show cannot be completed.');
-        } catch (StateException $refusal) {
-            self::assertStringContainsString(
-                'neither a commit nor a recorded no-change result',
-                $refusal->getMessage(),
-            );
-        }
-    }
-
-    #[Test]
-    public function a_pass_whose_push_is_outstanding_cannot_be_completed(): void
-    {
-        $generation = $this->generations->recordCommit(
-            $this->generations->beginAttempt(
-                $this->start($this->record('Add a --dry-run option'), push: PushResult::pending('origin')),
-            ),
-            'f1e2d3c4b5a6',
-        );
-
-        try {
-            $this->generations->complete($generation);
-            self::fail('A pass that owes a push cannot be completed.');
-        } catch (StateException $refusal) {
-            self::assertStringContainsString('cannot be completed while', $refusal->getMessage());
-            self::assertStringContainsString(
-                'resume retries the publication',
-                implode(' ', $refusal->hints()),
-            );
-        }
-    }
-
-    #[Test]
-    public function a_no_change_pass_can_be_completed(): void
-    {
-        $generation = $this->generations->recordNoChange(
-            $this->generations->beginAttempt($this->start($this->record('Already satisfied'))),
-        );
-
-        self::assertTrue($this->generations->complete($generation)->isComplete());
     }
 
     #[Test]
@@ -1202,10 +492,7 @@ final class GenerationStoreTest extends TestCase
     #[Test]
     public function finished_at_is_written_when_the_pass_reaches_a_state_it_does_not_come_back_from(): void
     {
-        $generation = $this->generations->recordCommit(
-            $this->generations->beginAttempt($this->start($this->record('Add a --dry-run option'))),
-            'f1e2d3c4b5a6',
-        );
+        $generation = $this->generations->beginAttempt($this->start($this->record('Add a --dry-run option')));
         $this->clock->advance(600);
 
         $completed = $this->generations->complete($generation);
@@ -1245,10 +532,7 @@ final class GenerationStoreTest extends TestCase
 
         $this->clock->advance(3600);
         $completed = $this->generations->complete(
-            $this->generations->recordCommit(
-                $this->generations->beginAttempt($blocked),
-                'f1e2d3c4b5a6',
-            ),
+            $this->generations->beginAttempt($blocked),
         );
 
         self::assertSame('2026-11-01T10:30:00+00:00', $completed->finishedAt()?->value());
@@ -1328,66 +612,6 @@ final class GenerationStoreTest extends TestCase
         self::assertSame(2, $this->generations->latestFor($snapshot->id())?->number());
     }
 
-    /**
-     * What tells a commit this package made from one somebody made by hand,
-     * which is the question a shared branch's tip has to answer before a run
-     * may continue it.
-     */
-    #[Test]
-    public function the_pass_that_produced_a_commit_is_found_by_its_sha(): void
-    {
-        $snapshot = $this->record('Add a --dry-run option');
-        $pass = $this->generations->recordCommit($this->start($snapshot), str_repeat('a', 40));
-
-        self::assertSame($pass->slug(), $this->generations->atCommit(str_repeat('a', 40))?->slug());
-        self::assertSame($pass->slug(), $this->generations->atCommit(' ' . str_repeat('a', 40) . ' ')?->slug());
-
-        // Nothing recorded it, and an abbreviation is not matched: whether a
-        // prefix is unique depends on how many objects a repository holds.
-        self::assertNull($this->generations->atCommit(str_repeat('b', 40)));
-        self::assertNull($this->generations->atCommit(str_repeat('a', 12)));
-        self::assertNull($this->generations->atCommit('   '));
-    }
-
-    /**
-     * The index a deleted shared branch leaves behind: the reference is gone,
-     * its commits are unreachable, and the rows are the only remaining record
-     * of which commits were on it (PROJECT.md section K, item 5).
-     */
-    #[Test]
-    public function the_commits_this_project_recorded_on_a_branch_are_listed_in_order(): void
-    {
-        $first = $this->generations->recordCommit(
-            $this->generations->assignBranch($this->start($this->record('Add a greeting')), 'ralph/shared', shared: true),
-            str_repeat('a', 40),
-        );
-        $second = $this->generations->recordCommit(
-            $this->generations->assignBranch($this->start($this->record('Add a farewell')), 'ralph/shared', shared: true),
-            str_repeat('b', 40),
-        );
-
-        // A pass on the branch that never committed, and a pass that committed
-        // on a branch of its own: neither is a commit this branch holds.
-        $this->generations->assignBranch($this->start($this->record('Add a usage line')), 'ralph/shared', shared: true);
-        $this->generations->recordCommit(
-            $this->generations->assignBranch($this->start($this->record('Add a version line')), 'ralph/elsewhere'),
-            str_repeat('c', 40),
-        );
-
-        $recorded = $this->generations->committedOn('ralph/shared');
-
-        self::assertSame(
-            [$first->slug(), $second->slug()],
-            array_map(static fn ($pass): string => $pass->slug(), $recorded),
-        );
-        self::assertSame(
-            [str_repeat('a', 40), str_repeat('b', 40)],
-            array_map(static fn ($pass): ?string => $pass->commitSha(), $recorded),
-        );
-        self::assertSame([], $this->generations->committedOn('ralph/nothing'));
-        self::assertSame([], $this->generations->committedOn('  '));
-    }
-
     #[Test]
     public function a_task_with_no_passes_has_no_latest_one(): void
     {
@@ -1460,40 +684,24 @@ final class GenerationStoreTest extends TestCase
     }
 
     /**
-     * Reopening finished work starts a new pass with its own branch, and the
-     * first pass keeps the one it earned.
+     * Reopening finished work starts a new pass, and the finished one keeps
+     * everything it recorded.
      */
     #[Test]
-    public function reopening_a_completed_task_starts_a_new_pass_with_its_own_branch(): void
+    public function reopening_a_completed_task_starts_a_new_pass_of_its_own(): void
     {
         $snapshot = $this->record('Add a --dry-run option');
-        $first = $this->completed('Add a --dry-run option', branch: 'ralph/g1');
+        $first = $this->completed('Add a --dry-run option');
 
         $second = $this->start($snapshot, TaskGeneration::of($snapshot->id(), 2));
-        $second = $this->generations->assignBranch($second, 'ralph/g2');
 
         self::assertSame(2, $second->number());
-        self::assertSame('ralph/g2', $second->branch());
-        self::assertSame('ralph/g1', $this->generations->get($first->generation())->branch());
-        self::assertSame('f1e2d3c4b5a6', $this->generations->get($first->generation())->commitSha());
-    }
+        self::assertSame(LifecycleState::Pending, $second->state());
+        self::assertSame(0, $second->attempts(), 'A reopened task starts its attempts again.');
 
-    #[Test]
-    public function the_branches_already_owned_are_listed(): void
-    {
-        $first = $this->start($this->record('First task'));
-        $this->generations->assignBranch($first, 'ralph/first');
-        $second = $this->start($this->record('Second task'));
-        $this->generations->assignBranch($second, 'ralph/second');
-        $this->start($this->record('Third task'));
-
-        self::assertSame(['ralph/first', 'ralph/second'], $this->generations->reservedBranches());
-    }
-
-    #[Test]
-    public function no_branches_are_reserved_in_a_fresh_database(): void
-    {
-        self::assertSame([], $this->generations->reservedBranches());
+        $kept = $this->generations->get($first->generation());
+        self::assertSame(LifecycleState::Completed, $kept->state());
+        self::assertSame(1, $kept->attempts(), 'The finished pass keeps the attempt it spent.');
     }
 
     /**
@@ -1504,9 +712,9 @@ final class GenerationStoreTest extends TestCase
     public function the_history_carries_what_the_checklist_layer_asks_for(): void
     {
         $open = $this->record('Still running');
-        $this->generations->assignBranch($this->start($open), 'ralph/open');
+        $this->start($open);
         $done = $this->record('Already finished');
-        $this->completed('Already finished', branch: 'ralph/done');
+        $this->completed('Already finished');
 
         $history = $this->generations->history();
 
@@ -1514,8 +722,7 @@ final class GenerationStoreTest extends TestCase
         self::assertFalse($history->isComplete($open->id()));
         self::assertTrue($history->isComplete($done->id()));
         self::assertFalse($history->hasOpen($done->id()));
-        self::assertSame(['ralph/open'], $history->branchesOf($open->id()));
-        self::assertSame('f1e2d3c4b5a6', $history->latestOf($done->id())?->commit());
+        self::assertTrue($history->latestOf($done->id())?->isComplete());
     }
 
     #[Test]
@@ -1524,48 +731,16 @@ final class GenerationStoreTest extends TestCase
         self::assertTrue($this->generations->history()->isEmpty());
     }
 
-    /**
-     * A completed pass carries its commit into the history; an open one has
-     * nothing to carry yet.
-     */
-    #[Test]
-    public function only_a_finished_pass_reports_a_commit_to_the_checklist_layer(): void
-    {
-        $snapshot = $this->record('Add a --dry-run option');
-        $open = $this->generations->recordCommit($this->start($snapshot), 'f1e2d3c4b5a6');
-
-        $record = $open->toRecordedGeneration();
-
-        self::assertTrue($record->isOpen());
-        self::assertNull(
-            $record->commit(),
-            'An open pass has not finished, so its commit is not yet a finished fact.',
-        );
-        self::assertSame($snapshot->contentHash(), $record->contentHash());
-    }
-
     #[Test]
     public function a_pass_describes_itself_for_a_status_table(): void
     {
-        $generation = $this->generations->assignBranch(
-            $this->generations->beginAttempt($this->start($this->record('Add a --dry-run option'))),
-            'ralph/task',
-        );
+        $generation = $this->generations->beginAttempt($this->start($this->record('Add a --dry-run option')));
 
         $described = $generation->describe();
 
         self::assertStringContainsString('running', $described);
         self::assertStringContainsString('preparing', $described);
         self::assertStringContainsString('attempt 1', $described);
-        self::assertStringContainsString('ralph/task', $described);
-    }
-
-    #[Test]
-    public function a_pass_with_no_branch_says_so(): void
-    {
-        $generation = $this->start($this->record('Add a --dry-run option'));
-
-        self::assertStringContainsString('no branch yet', $generation->describe());
     }
 
     /**
@@ -1601,13 +776,7 @@ final class GenerationStoreTest extends TestCase
             ['ANTHROPIC_API_KEY'],
         ));
         $snapshot = $this->record('Add a --dry-run option');
-        $this->generations->start(
-            TaskGeneration::first($snapshot->id()),
-            $snapshot,
-            $agent,
-            'main',
-            'a1b2c3d4e5f6',
-        );
+        $this->generations->start(TaskGeneration::first($snapshot->id()), $snapshot, $agent);
 
         $read = $this->generations->get(TaskGeneration::first($snapshot->id()))->agent();
 
@@ -1615,26 +784,6 @@ final class GenerationStoreTest extends TestCase
         self::assertSame('/usr/local/bin/claude', $read->executable());
         self::assertSame('opus', $read->model());
         self::assertSame($agent->settings(), $read->settings());
-    }
-
-    /**
-     * The base is recorded rather than re-resolved, which is the whole point:
-     * the base moving on under a running task must not change what the task was
-     * built on.
-     */
-    #[Test]
-    public function the_base_commit_a_pass_branched_from_does_not_move(): void
-    {
-        $snapshot = $this->record('Add a --dry-run option');
-        $generation = $this->start($snapshot);
-
-        $this->generations->beginAttempt($generation);
-        $this->generations->assignBranch($generation, 'ralph/task');
-
-        $read = $this->generations->get($generation->generation());
-
-        self::assertSame('a1b2c3d4e5f6', $read->baseSha());
-        self::assertSame('main', $read->baseReference());
     }
 
     /**
@@ -1665,15 +814,13 @@ final class GenerationStoreTest extends TestCase
     private function start(
         TaskSnapshot $snapshot,
         ?TaskGeneration $generation = null,
-        ?PushResult $push = null,
+        ?int $runId = null,
     ): GenerationRecord {
         return $this->generations->start(
             $generation ?? TaskGeneration::first($snapshot->id()),
             $snapshot,
             $this->agent(),
-            'main',
-            'a1b2c3d4e5f6',
-            $push,
+            $runId,
         );
     }
 
@@ -1681,19 +828,14 @@ final class GenerationStoreTest extends TestCase
      * A pass carried all the way through, for the tests about what happens
      * after one.
      */
-    private function completed(string $description, ?string $branch = null): GenerationRecord
+    private function completed(string $description): GenerationRecord
     {
         $snapshot = $this->tasks->has(TaskId::fromDescription($description))
             ? $this->snapshot($description)
             : $this->record($description);
-        $generation = $this->generations->beginAttempt($this->start($snapshot));
-
-        if ($branch !== null) {
-            $generation = $this->generations->assignBranch($generation, $branch);
-        }
 
         return $this->generations->complete(
-            $this->generations->recordCommit($generation, 'f1e2d3c4b5a6'),
+            $this->generations->beginAttempt($this->start($snapshot)),
         );
     }
 
@@ -1712,8 +854,8 @@ final class GenerationStoreTest extends TestCase
         $this->database->execute(
             'INSERT INTO runs
                  (run_id, state, agent, adapter, agent_source, agent_settings, configuration,
-                  checks, tasks_path, base_reference, started_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                  checks, tasks_path, started_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 'RUN-0001',
                 'running',
@@ -1724,7 +866,6 @@ final class GenerationStoreTest extends TestCase
                 '{}',
                 '[]',
                 '.ralph/tasks.md',
-                'main',
                 '2026-11-01T09:30:00+00:00',
                 '2026-11-01T09:30:00+00:00',
             ],

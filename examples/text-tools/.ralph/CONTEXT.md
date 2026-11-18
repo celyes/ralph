@@ -18,12 +18,11 @@ composer test
 `composer test` is PHPUnit over `tests/`, and it is the command Ralph PHP runs
 to verify a task. A task is not finished until it passes.
 
-Each task is implemented in its own linked worktree, which Git creates with the
-tracked files and nothing else — so there is no `vendor/` in it. The
-`workspace.prepare` setting in `.ralph/config.json` runs `composer install
---no-interaction` there before you start; it has already run by the time you
-see the workspace. There is nothing else to set up: this package has no `.env`,
-no credentials and no generated code.
+Each task is implemented in this checkout, on whatever branch it has checked
+out, so `vendor/` is already installed and `composer test` runs as it does for a
+person. Nothing is committed: the change a task makes is left in the working
+tree. There is nothing else to set up — this package has no `.env`, no
+credentials and no generated code.
 
 ## Conventions
 

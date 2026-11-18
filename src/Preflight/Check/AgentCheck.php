@@ -36,7 +36,7 @@ use Celyes\RalphPhp\Process\ExecutableFinder;
  * Neither failure is ever resolved by running something else. The hints say so
  * in as many words, because "no agent found" is the one moment a tool could
  * plausibly be expected to reach for whatever else is installed, and a run
- * whose commits were made by an agent the user did not choose is worse than no
+ * whose changes were made by an agent the user did not choose is worse than no
  * run (PROJECT.md section E, item 9).
  */
 final class AgentCheck implements PreflightCheck

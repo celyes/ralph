@@ -4,9 +4,9 @@
 # PROJECT.md: "the automated tests run without live model credentials". So no
 # step here holds a secret, and none reaches a paid service. The agent adapters
 # are exercised against the deterministic fixture worker, which is a PHP script
-# in the repository, and the Git behaviour is exercised against temporary local
-# repositories and a local bare remote. The only network access is Composer
-# downloading packages from Packagist.
+# in the repository, and what a run leaves in a checkout is asserted against
+# temporary local repositories. The only network access is Composer downloading
+# packages from Packagist.
 #
 # The PHP matrix is the package's own `php` constraint spelled out: its lowest
 # entry is Ralph::MINIMUM_PHP_VERSION, and every entry is a version that
@@ -34,9 +34,9 @@ jobs:
     name: Tests on PHP ${{ matrix.php }}
     runs-on: ubuntu-latest
     # Linux and WSL are the supported platforms (PROJECT.md section 2), and the
-    # runner is the Linux half: it has the Git the package requires, a /proc to
-    # find processes through, and POSIX file permissions, all of which parts of
-    # the suite need rather than skip around.
+    # runner is the Linux half: it has the Git the suite reads a checkout with,
+    # a /proc to find processes through, and POSIX file permissions, all of
+    # which parts of the suite need rather than skip around.
     timeout-minutes: 30
 
     strategy:

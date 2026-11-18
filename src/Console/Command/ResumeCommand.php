@@ -30,7 +30,7 @@ final class ResumeCommand extends LoopCommand
 
     public function summary(): string
     {
-        return 'Reconcile an interrupted run and continue from its recorded phase.';
+        return 'Continue an interrupted run from its recorded phase.';
     }
 
     /**
@@ -41,15 +41,16 @@ final class ResumeCommand extends LoopCommand
         return [
             'Usage: ralph resume [--agent NAME] [--bail|--no-bail]',
             '',
-            'Reconciles worktree, branch and recorded commit state after an interruption and',
-            'continues with the agent and settings recorded for the original run. An edit to',
-            'the agent settings in .ralph/config.json since that run was opened is reported',
-            'and not applied: the task is finished as it was started.',
+            'Continues the run that was interrupted, with the agent and the settings',
+            'recorded for it. An edit to the agent settings in .ralph/config.json since that',
+            'run was opened is reported and not applied: the task is finished as it was',
+            'started.',
             '',
             'A task is picked up at the phase it stopped in, and nothing earlier is repeated.',
-            'A pass whose commit is made and whose push the remote refused retries the push',
-            'alone; one whose box could not be written writes only the box. Neither invokes',
-            'the agent again or creates a second commit.',
+            'A pass stopped while the agent was working is attempted again; one stopped',
+            'during its checks has them run again over the changes that are still there;',
+            'one whose box could not be written writes only the box, without invoking the',
+            'agent and without spending an attempt.',
             '',
             'The run\'s iteration count and elapsed time carry over, so resuming finishes the',
             'work the interrupted run had left rather than starting its budget again.',
@@ -66,20 +67,18 @@ final class ResumeCommand extends LoopCommand
             'still to come rather than the work already done, which is how the iteration and',
             'time limits are read too. Neither given, "limits.bail_on_failure" decides.',
             '',
-            'To use a different agent, reconcile the interrupted work first — "ralph status"',
+            'To use a different agent, deal with the interrupted work first — "ralph status"',
             'shows what is outstanding — and then begin a new run with it:',
             '',
             '  ralph run --agent NAME',
             '',
             'A new run starts with the configured limits whole. Tasks earlier runs completed',
-            'stay completed and are not taken on again, and their commits and attempt history',
-            'stay attributed to the agent that earned them.',
+            'stay completed and are not taken on again, and their attempt history stays',
+            'attributed to the agent that earned them.',
             '',
             'Exits as "ralph run" does: 0 when the resumed run finished the checklist, 1',
             'when a task was given up on, 75 when it stopped on a decision, 124 when it',
-            'reached a configured limit, and 130 when it was stopped again. A pass that',
-            'cannot be reconciled without a person stops the resume before any agent is',
-            'invoked, with the reading that stopped it.',
+            'reached a configured limit, and 130 when it was stopped again.',
         ];
     }
 

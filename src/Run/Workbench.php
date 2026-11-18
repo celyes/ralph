@@ -5,21 +5,10 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Run;
 
 use Celyes\RalphPhp\Config\Configuration;
-use Celyes\RalphPhp\Git\BranchNamer;
-use Celyes\RalphPhp\Git\SharedBranches;
-use Celyes\RalphPhp\Git\TaskBranches;
-use Celyes\RalphPhp\Git\TaskCommitter;
-use Celyes\RalphPhp\Git\TaskPublisher;
-use Celyes\RalphPhp\Git\TaskWorktrees;
-use Celyes\RalphPhp\Git\WorkspaceAuditor;
-use Celyes\RalphPhp\Git\WorkspacePreparer;
-use Celyes\RalphPhp\Git\WorkspaceStager;
-use Celyes\RalphPhp\Git\WorktreeCleaner;
 use Celyes\RalphPhp\Log\LogDirectory;
 use Celyes\RalphPhp\Log\LogWiper;
 use Celyes\RalphPhp\Memory\AttemptContextLoader;
 use Celyes\RalphPhp\Memory\MemoryWriter;
-use Celyes\RalphPhp\Process\ProcessRunner;
 use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Support\SystemClock;
@@ -27,40 +16,31 @@ use Celyes\RalphPhp\Tasks\ChecklistReader;
 use Celyes\RalphPhp\Tasks\ChecklistReconciler;
 use Celyes\RalphPhp\Tasks\ChecklistWriter;
 use Celyes\RalphPhp\Tasks\GenerationSelector;
-use Celyes\RalphPhp\Verification\ChecksAuditor;
-use Celyes\RalphPhp\Verification\SatisfactionAuditor;
 
 /**
  * Everything a task is carried out with, built once for a run.
  *
- * The Git steps of PROJECT.md section F, the checklist readers and writers of
- * section C, and the context and log of sections D and E. Each of these was
- * written to be usable on its own and each takes the configuration — so they
- * are assembled here, once, rather than in the middle of a loop that would
- * otherwise spend a line per task rebuilding the same ten objects from the same
+ * The checklist readers and writers of PROJECT.md section C, the context and
+ * memory of section D, and the logs of section E. Each of these was written to
+ * be usable on its own and most of them take the configuration — so they are
+ * assembled here, once, rather than in the middle of a loop that would
+ * otherwise spend a line per task rebuilding the same objects from the same
  * settings.
  *
  * Built from the configuration the run froze, so a worker that edits
- * `.ralph/config.json` while the run is going cannot change the base reference,
- * the branch prefix, the push remote, or what counts as uncommittable for any
- * task the run has left.
+ * `.ralph/config.json` while the run is going cannot change where this run
+ * reads its tasks from or how long it keeps their logs for any task the run has
+ * left.
+ *
+ * There is nothing here that touches Git. A task is implemented in the user's
+ * own checkout, on the branch they have checked out (section K, item 1), so the
+ * workspace a pass works in is the project root and needs neither making nor
+ * cleaning up.
  */
 final class Workbench
 {
     public function __construct(
-        private readonly TaskWorktrees $worktrees,
-        private readonly TaskBranches $branches,
-        private readonly SharedBranches $shared,
-        private readonly BranchNamer $namer,
-        private readonly WorkspacePreparer $preparer,
-        private readonly WorkspaceAuditor $auditor,
-        private readonly WorkspaceStager $stager,
-        private readonly ChecksAuditor $checks,
-        private readonly SatisfactionAuditor $satisfaction,
         private readonly CompletionRecorder $completions,
-        private readonly TaskCommitter $committer,
-        private readonly TaskPublisher $publisher,
-        private readonly WorktreeCleaner $cleaner,
         private readonly LogDirectory $logs,
         private readonly LogWiper $wiper,
         private readonly MemoryWriter $memory,
@@ -69,117 +49,45 @@ final class Workbench
         private readonly ChecklistWriter $checkboxes,
         private readonly ChecklistReconciler $reconciler,
         private readonly GenerationSelector $passes,
-        private readonly PassRecovery $recovery,
     ) {
     }
 
     /**
      * Assemble the tools for a project.
      *
-     * @param Journal $journal the run's stores; the Git steps that record what
-     *        they did need the generation store, and they must be the same
-     *        instances the loop reads back through
+     * @param Journal $journal the run's stores; the log wiper decides what it
+     *        may delete from a pass's row, and it must be the same instance the
+     *        loop reads back through
      */
     public static function forProject(
         Configuration $configuration,
         Journal $journal,
         ?Clock $clock = null,
-        string $executable = 'git',
-        ProcessRunner $processes = new ProcessRunner(),
         ?Secrets $secrets = null,
     ): self {
-        $generations = $journal->generations();
-
         // The logs are told the run's known secrets so that the notes they
         // write are redacted; the worker's own output is kept as it arrived
         // (section I, item 6, and {@see \Celyes\RalphPhp\Log\LogFile}).
         $logs = LogDirectory::in($configuration->projectRoot(), $secrets);
 
         return new self(
-            TaskWorktrees::forProject($configuration, $executable, $processes),
-            TaskBranches::forProject($configuration, $executable, $processes),
-            SharedBranches::forProject($configuration, $generations, $executable, $processes),
-            BranchNamer::forProject($configuration),
-            WorkspacePreparer::forProject($configuration, $processes),
-            WorkspaceAuditor::forProject($configuration, $generations, $executable, $processes),
-            WorkspaceStager::forProject($configuration, $executable, $processes),
-            new ChecksAuditor($executable, $processes),
-            new SatisfactionAuditor(),
             new CompletionRecorder(),
-            TaskCommitter::forProject($configuration, $generations, $executable, $processes),
-            TaskPublisher::forProject($configuration, $generations, $executable, $processes),
-            WorktreeCleaner::forProject($configuration, $generations, $executable, $processes),
             $logs,
             // The same directory the run writes into, so what a wipe is
             // entitled to delete cannot drift from what was written.
-            new LogWiper($logs, $configuration->logs(), $generations),
+            new LogWiper(
+                $logs,
+                $configuration->logs(),
+                $journal->generations(),
+                $journal->checklists(),
+            ),
             MemoryWriter::in($configuration->projectRoot(), $clock ?? new SystemClock()),
             new AttemptContextLoader(),
             new ChecklistReader(),
             new ChecklistWriter(),
             new ChecklistReconciler(),
             new GenerationSelector(),
-            PassRecovery::forProject($configuration, $generations, $executable, $processes),
         );
-    }
-
-    public function worktrees(): TaskWorktrees
-    {
-        return $this->worktrees;
-    }
-
-    public function branches(): TaskBranches
-    {
-        return $this->branches;
-    }
-
-    /**
-     * The branch a shared-branch run shares, and who may commit to it.
-     *
-     * Read by the runner once per run and by each pass thereafter; in per-task
-     * mode nothing asks it anything.
-     */
-    public function shared(): SharedBranches
-    {
-        return $this->shared;
-    }
-
-    public function namer(): BranchNamer
-    {
-        return $this->namer;
-    }
-
-    public function preparer(): WorkspacePreparer
-    {
-        return $this->preparer;
-    }
-
-    public function auditor(): WorkspaceAuditor
-    {
-        return $this->auditor;
-    }
-
-    public function stager(): WorkspaceStager
-    {
-        return $this->stager;
-    }
-
-    /**
-     * What reads a staged diff for changes that weaken the project's own
-     * verification (PROJECT.md section G, item 5).
-     */
-    public function checks(): ChecksAuditor
-    {
-        return $this->checks;
-    }
-
-    /**
-     * What makes the case for a task that changed nothing (PROJECT.md
-     * section G, item 6).
-     */
-    public function satisfaction(): SatisfactionAuditor
-    {
-        return $this->satisfaction;
     }
 
     /**
@@ -189,21 +97,6 @@ final class Workbench
     public function completions(): CompletionRecorder
     {
         return $this->completions;
-    }
-
-    public function committer(): TaskCommitter
-    {
-        return $this->committer;
-    }
-
-    public function publisher(): TaskPublisher
-    {
-        return $this->publisher;
-    }
-
-    public function cleaner(): WorktreeCleaner
-    {
-        return $this->cleaner;
     }
 
     public function logs(): LogDirectory
@@ -251,14 +144,5 @@ final class Workbench
     public function passes(): GenerationSelector
     {
         return $this->passes;
-    }
-
-    /**
-     * What puts an interrupted pass's row back in step with the repository
-     * before anything resumes it (PROJECT.md section H, item 5).
-     */
-    public function recovery(): PassRecovery
-    {
-        return $this->recovery;
     }
 }

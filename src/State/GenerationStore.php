@@ -28,11 +28,6 @@ use Celyes\RalphPhp\Tasks\TaskSnapshot;
  *   write, so a status table can show which pass is actually making progress;
  *   `finished_at` is written exactly when the pass reaches a state it does not
  *   come back from, and never cleared.
- * - **Ownership is recorded, not re-derived.** The branch, the base commit the
- *   branch started from, and whether this pass created its worktree are
- *   written when they become true and read back as they were. A run that looked
- *   at the repository and guessed would guess wrong exactly after an
- *   interruption, which is when the directory has something in it.
  * - **The agent is recorded on the pass**, not only on the run, because resume
  *   must continue with the agent the work was started under even if the
  *   project's default has changed since.
@@ -41,11 +36,11 @@ use Celyes\RalphPhp\Tasks\TaskSnapshot;
  *   row no later run can interpret. The database refuses the vocabulary; this
  *   refuses the sequence.
  *
- * Two invariants are the database's, and the readable failures for them are
- * this class's: a branch belongs to exactly one generation, and a task has at
- * most one pass that can still be continued. Both are partial unique indexes,
- * so they hold even against a process that crashed halfway; both would
- * otherwise surface as a bare SQLite constraint message naming an index.
+ * One invariant is the database's, and the readable failure for it is this
+ * class's: a task has at most one pass that can still be continued. It is a
+ * partial unique index, so it holds even against a process that crashed
+ * halfway, and it would otherwise surface as a bare SQLite constraint message
+ * naming an index.
  */
 final class GenerationStore
 {
@@ -71,22 +66,15 @@ final class GenerationStore
      * that claimed to be running in that gap would be reconciled as an
      * interrupted execution.
      *
-     * @param PushResult|null $push what publication is expected to require,
-     *                              from the run's frozen configuration;
-     *                              defaults to not required
-     * @param int|null        $runId the run this pass belongs to
+     * @param int|null $runId the run this pass belongs to
      *
-     * @throws StateException when the task is unknown, the branch or the open
-     *                        pass is already taken, or the row cannot be
-     *                        written
+     * @throws StateException when the task is unknown, the task's open pass is
+     *                        already taken, or the row cannot be written
      */
     public function start(
         TaskGeneration $generation,
         TaskSnapshot $snapshot,
         AgentRecord $agent,
-        string $baseReference,
-        string $baseSha,
-        ?PushResult $push = null,
         ?int $runId = null,
     ): GenerationRecord {
         if (!$generation->belongsTo($snapshot->id())) {
@@ -99,7 +87,6 @@ final class GenerationStore
 
         $task = $this->tasks->get($snapshot->id());
         $selected = $agent->toColumns();
-        $publication = ($push ?? PushResult::notRequired())->toColumns();
         $now = Timestamp::now($this->clock);
 
         $this->guard(
@@ -107,9 +94,8 @@ final class GenerationStore
             fn (): int => $this->database->execute(
                 'INSERT INTO generations
                      (task_id, number, slug, run_id, state, phase, attempts, content_hash,
-                      agent, adapter, agent_settings, base_reference, base_sha,
-                      push_state, push_remote, push_error, started_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                      agent, adapter, agent_settings, started_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?)',
                 [
                     $task->rowId(),
                     $generation->number(),
@@ -120,11 +106,6 @@ final class GenerationStore
                     $selected['agent'],
                     $selected['adapter'],
                     $selected['settings'],
-                    $this->reference($baseReference, 'base reference'),
-                    $this->reference($baseSha, 'base commit'),
-                    $publication['state'],
-                    $publication['remote'],
-                    $publication['error'],
                     $now->value(),
                     $now->value(),
                 ],
@@ -145,7 +126,7 @@ final class GenerationStore
     }
 
     /**
-     * The pass named by a slug, which is what a branch or a log path carries.
+     * The pass named by a slug, which is what a log path carries.
      *
      * @throws StateException when the row cannot be read
      */
@@ -227,7 +208,7 @@ final class GenerationStore
      *
      * What {@see \Celyes\RalphPhp\Tasks\GenerationSelector} needs to decide
      * whether a task is being run for the first time, continued, or reopened —
-     * and which branches are already owned, so a new pass is never handed one.
+     * so a reopened task is never mistaken for one that has never been run.
      *
      * @throws StateException when the rows cannot be read
      */
@@ -269,90 +250,6 @@ final class GenerationStore
     }
 
     /**
-     * The pass that produced a commit, when this project recorded one.
-     *
-     * What tells a commit this package made from a commit somebody made by
-     * hand, which is the question a shared branch's tip has to answer before a
-     * run may continue it ({@see \Celyes\RalphPhp\Git\SharedBranches}): a tip
-     * no row accounts for is work the run has never seen and must not build on
-     * silently.
-     *
-     * Compared as the full SHA, exactly as recorded. Git's abbreviations are
-     * not matched: a prefix lookup would make the answer depend on how many
-     * objects the repository happens to hold.
-     *
-     * @throws StateException when the rows cannot be read
-     */
-    public function atCommit(string $commit): ?GenerationRecord
-    {
-        $sha = trim($commit);
-
-        if ($sha === '') {
-            return null;
-        }
-
-        $rows = $this->database->query(
-            'SELECT * FROM generations WHERE commit_sha = ? ORDER BY id DESC LIMIT 1',
-            [$sha],
-        );
-
-        return $rows === [] ? null : GenerationRecord::fromRow($rows[0]);
-    }
-
-    /**
-     * Every commit this project recorded on a branch, oldest row first.
-     *
-     * What a shared branch's reconciliation needs when the branch itself has
-     * gone (PROJECT.md section K, item 5): a deleted reference leaves its
-     * commits in the repository and unreachable, so they cannot be walked down
-     * to from the commit a pass records. The rows are the only remaining index
-     * of them, and re-creating the reference at the furthest of them is what
-     * puts the whole run's work back within reach instead of only the pass's
-     * own ({@see \Celyes\RalphPhp\Run\PassRecovery}).
-     *
-     * Ordered by row id, which is the order they were committed: a later task
-     * of a run commits after an earlier one, and the rows are written in that
-     * order too.
-     *
-     * @return list<GenerationRecord>
-     *
-     * @throws StateException when the rows cannot be read
-     */
-    public function committedOn(string $branch): array
-    {
-        $name = trim($branch);
-
-        if ($name === '') {
-            return [];
-        }
-
-        return array_map(
-            static fn (array $row): GenerationRecord => GenerationRecord::fromRow($row),
-            $this->database->query(
-                'SELECT * FROM generations WHERE branch = ? AND commit_sha IS NOT NULL ORDER BY id',
-                [$name],
-            ),
-        );
-    }
-
-    /**
-     * Every branch a generation already owns.
-     *
-     * @return list<string>
-     *
-     * @throws StateException when the rows cannot be read
-     */
-    public function reservedBranches(): array
-    {
-        return array_map(
-            static fn (array $row): string => (string) $row['branch'],
-            $this->database->query(
-                'SELECT branch FROM generations WHERE branch IS NOT NULL ORDER BY id',
-            ),
-        );
-    }
-
-    /**
      * Spend an attempt and put the pass into `running` at its first phase.
      *
      * Called before the agent is invoked. The counter goes up here whatever
@@ -381,95 +278,34 @@ final class GenerationStore
      * spending an attempt.
      *
      * The one way back into a pass that owes nothing but the write to the
-     * user's checklist (PROJECT.md section G, item 8). Everything an attempt
-     * produces is already recorded — the implementation, the commit, the
-     * publication — so there is nothing to attempt, and counting one would let
-     * a read-only file eventually exhaust the budget of a pass that has
-     * already done its work.
+     * user's checklist (PROJECT.md section G, item 8). The work is done and the
+     * checks have passed, so there is nothing to attempt, and counting an
+     * attempt would let a read-only file eventually exhaust the budget of a
+     * pass that has already done its work.
      *
-     * Refused for a pass that is not finalizable, which is what keeps this from
-     * being a general way to call a pass running: resuming the finalization of
-     * work that was never committed would move a row into a state its history
-     * does not support.
+     * What says the pass got that far is its planned checklist update: the row
+     * is written before the file is touched and is still `pending` afterwards
+     * only if the write never landed ({@see ChecklistStore}). The caller reads
+     * that and this does the state move, which is why there is no condition
+     * here beyond the one the lifecycle itself imposes.
      *
-     * @throws StateException when the pass has no implementation recorded, its
-     *                        required push has not succeeded, or it cannot be
-     *                        run from the state it is in
+     * @throws StateException when the pass cannot be run from the state it is
+     *                        in
      */
     public function resumeFinalizing(GenerationRecord $generation): GenerationRecord
     {
-        if (!$generation->isFinalizable()) {
-            throw new StateException(
-                sprintf(
-                    'Generation %s has not reached finalization: %s.',
-                    $generation->slug(),
-                    $generation->hasImplementation()
-                        ? $generation->push()->describe()
-                        : 'neither a commit nor a recorded no-change result',
-                ),
-                [
-                    'Only a pass whose work is recorded can be resumed at its last phase; '
-                    . 'anything earlier is another attempt.',
-                ],
-            );
-        }
-
         return $this->reopenAt($generation, Phase::Finalizing);
-    }
-
-    /**
-     * Put a pass back into `running` at {@see Phase::Publishing}, without
-     * spending an attempt.
-     *
-     * The one way back into a pass that owes nothing but its push (PROJECT.md
-     * section H, item 7). The implementation is committed and the checks have
-     * passed; what is missing is a remote that would take the commit, and a
-     * remote being down or a reference having moved is not something an attempt
-     * at the task would put right. So no attempt is counted here either: a
-     * rejected push must not be able to eat the budget of work that is already
-     * done, any more than a read-only checklist can.
-     *
-     * Refused for a pass whose publication is not the only thing outstanding.
-     * A pass with no implementation recorded has work to redo rather than a
-     * push to retry, and a pass whose push is already settled is
-     * {@see self::resumeFinalizing()}'s case — pushing again would be a second
-     * attempt at something that succeeded, reported as though it were owed.
-     *
-     * @throws StateException when the pass has no implementation recorded, its
-     *                        publication is already settled, or it cannot be
-     *                        run from the state it is in
-     */
-    public function resumePublishing(GenerationRecord $generation): GenerationRecord
-    {
-        if (!$generation->awaitsPublication()) {
-            throw new StateException(
-                sprintf(
-                    'Generation %s is not waiting to be published: %s.',
-                    $generation->slug(),
-                    $generation->hasImplementation()
-                        ? $generation->push()->describe()
-                        : 'neither a commit nor a recorded no-change result',
-                ),
-                [
-                    'Only a pass whose work is recorded and whose push is still owed can be resumed at '
-                    . 'publication; anything earlier is another attempt, and anything later is the '
-                    . 'checklist write.',
-                ],
-            );
-        }
-
-        return $this->reopenAt($generation, Phase::Publishing);
     }
 
     /**
      * Put a pass back into `running` at a phase it already reached.
      *
-     * Shared by the two resumptions that spend no attempt, and the blocker is
-     * cleared by both. The reason a pass in either of those states stopped was
-     * the thing that is now being done again — a push to retry, a box to write
-     * — so leaving the old reason on the row would have `ralph status` report a
-     * refused push against a task that went on to publish and complete. A
-     * retry that stops again records its own.
+     * Used by the resumption that spends no attempt, and the blocker is
+     * cleared by it. The reason a pass in either of those states stopped was
+     * the thing that is now being done again — the box to write — so leaving
+     * the old reason on the row would have `ralph status` report an unwritable
+     * checklist against a task that went on to complete. A retry that stops
+     * again records its own.
      *
      * @throws StateException when the pass cannot be run from the state it is
      *                        in
@@ -543,125 +379,6 @@ final class GenerationStore
     }
 
     /**
-     * Claim a branch for this pass.
-     *
-     * The storage half of branch ownership. The database allows a per-task
-     * branch name on at most one generation, so a second pass asking for a
-     * branch an earlier one owns is refused here rather than resetting it —
-     * which is the behaviour PROJECT.md section F, item 4 requires and the
-     * reason reopening a task cannot destroy the commit the first pass left
-     * behind.
-     *
-     * A *shared* branch is the exception, and `$shared` is how the caller says
-     * so. The branch a shared-branch run established belongs to the run, and
-     * every task of that run records it as the branch holding its commit
-     * (section K, item 4), so the row is marked and the unique index skips it
-     * ({@see Migrations}). The flag is the committer's reading of the branch it
-     * was handed, not a guess made here: only the runner knows whether the name
-     * came from the run's shared branch or from the task's own.
-     *
-     * Re-claiming the branch this pass already owns is allowed and does
-     * nothing, so resume does not have to remember whether it got this far.
-     *
-     * @param bool $shared whether the name is the run's shared branch rather
-     *        than one this pass owns alone
-     *
-     * @throws StateException when a per-task branch belongs to another pass
-     */
-    public function assignBranch(
-        GenerationRecord $generation,
-        string $branch,
-        bool $shared = false,
-    ): GenerationRecord {
-        $name = $this->reference($branch, 'branch');
-
-        if ($generation->ownsBranch($name)) {
-            return $generation;
-        }
-
-        return $this->guard(
-            $generation->slug(),
-            fn (): GenerationRecord => $this->write($generation, [
-                'branch' => $name,
-                'branch_shared' => $shared ? 1 : 0,
-            ]),
-        );
-    }
-
-    /**
-     * Record the workspace this pass is using and whether it created it.
-     *
-     * Recording a workspace also forgets whatever cleanup had been started
-     * against the last one, because the column is about the directory the row
-     * names: a pass given a fresh workspace has had no removal issued against
-     * *it*, and carrying the old mark forward would tell a later cleanup that a
-     * directory it has never touched is a part-deleted husk.
-     */
-    public function recordWorktree(
-        GenerationRecord $generation,
-        WorktreeOwnership $worktree,
-    ): GenerationRecord {
-        $columns = $worktree->toColumns();
-
-        return $this->write($generation, [
-            'worktree_path' => $columns['path'],
-            'owns_worktree' => $columns['owned'],
-            'cleanup_state' => null,
-        ]);
-    }
-
-    /**
-     * Record that a removal of this pass's workspace is about to be issued.
-     *
-     * Written *before* the Git command, which is the whole point of the column
-     * (PROJECT.md section K, item 7). `git worktree remove` deletes the
-     * worktree directory and then Git's administrative record of it, so an
-     * interruption part way through leaves a directory that looks, from
-     * outside, exactly like one somebody has been editing. This mark is what
-     * tells the two apart afterwards: it says that this package judged the
-     * workspace removable and asked Git to delete it, so whatever is left at
-     * the path is the remains of that deletion.
-     *
-     * Idempotent: a row already marked is left as it is, so a cleanup that
-     * retries after an interruption does not have to remember whether it got
-     * this far.
-     */
-    public function beginWorktreeCleanup(GenerationRecord $generation): GenerationRecord
-    {
-        if ($generation->cleanupIsUnfinished()) {
-            return $generation;
-        }
-
-        return $this->write($generation, ['cleanup_state' => CleanupState::Removing->value]);
-    }
-
-    /**
-     * Record that the workspace has gone, in one statement.
-     *
-     * The two halves of the invariant are written together on purpose: the
-     * workspace columns are cleared and the cleanup is marked finished by the
-     * same `UPDATE`, so no crash can leave a row that both names a directory
-     * and claims to have removed it. A row naming a path always means a
-     * directory that is still there — or a removal the caller is in the middle
-     * of, which is what {@see self::beginWorktreeCleanup()} records.
-     *
-     * Everything that makes the pass reviewable stays: the branch, the commit
-     * SHA, the push result and the verification evidence. Only the workspace is
-     * forgotten, and only once Git has confirmed it is gone — which is the
-     * caller's job to establish before calling this.
-     */
-    public function finishWorktreeCleanup(GenerationRecord $generation): GenerationRecord
-    {
-        $columns = WorktreeOwnership::none()->toColumns();
-
-        return $this->write($generation, [
-            'worktree_path' => $columns['path'],
-            'owns_worktree' => $columns['owned'],
-            'cleanup_state' => CleanupState::Removed->value,
-        ]);
-    }
-
-    /**
      * Record that this pass's own log files have been deleted on purpose.
      *
      * Written **after** the deletion and only once no eligible log is left, so
@@ -677,10 +394,10 @@ final class GenerationStore
      * a pass whose logs have already gone deleted nothing, so moving the
      * timestamp would date the removal to a run that did not make it.
      *
-     * Nothing else on the row is touched. The commit, the branch, the push
-     * result, the verification evidence and the completion record all outlive
-     * the logs by design — the setting trades the output of a successful task
-     * for disk, not the account of what it did.
+     * Nothing else on the row is touched. The state, the verification evidence
+     * and the completion record all outlive the logs by design — the setting
+     * trades the output of a successful task for disk, not the account of what
+     * it did.
      */
     public function recordLogWipe(GenerationRecord $generation): GenerationRecord
     {
@@ -692,125 +409,20 @@ final class GenerationStore
     }
 
     /**
-     * Record the commit this pass produced.
-     *
-     * Writing this row is the point at which a commit stops being something
-     * only Git knows about. The reverse — a commit in the repository with no
-     * row — is the crash this schema is shaped around, and it is why the Git
-     * log of PROJECT.md section F is appended to before the commit is
-     * attempted, not only after.
-     *
-     * @throws StateException when the SHA is blank, or a different commit is
-     *                        already recorded, which means something ran twice
-     *                        and must be reconciled rather than overwritten
-     */
-    public function recordCommit(GenerationRecord $generation, string $sha): GenerationRecord
-    {
-        $commit = $this->reference($sha, 'commit');
-        $recorded = $generation->commitSha();
-
-        if ($recorded === $commit) {
-            return $generation;
-        }
-
-        if ($recorded !== null) {
-            throw new StateException(
-                sprintf(
-                    'Generation %s already records commit %s and cannot record %s as well.',
-                    $generation->slug(),
-                    $recorded,
-                    $commit,
-                ),
-                [
-                    'A pass commits once. Two commits means the implementation ran twice, '
-                    . 'which resume is meant to prevent, and the recorded one is kept.',
-                ],
-            );
-        }
-
-        return $this->write($generation, ['commit_sha' => $commit, 'no_change' => 0]);
-    }
-
-    /**
-     * Record that the task was already satisfied, so there was nothing to
-     * commit.
-     *
-     * A verified outcome rather than a failure, and deliberately not an empty
-     * commit (PROJECT.md section G, item 6). This column says only that no
-     * commit is owed; the case for saying it is
-     * {@see \Celyes\RalphPhp\Verification\Satisfaction}, which the pass makes
-     * before calling this and which is refused rather than recorded when the
-     * facts contradict it. The durable half of that case is the pass's
-     * verification results, and a copy of the whole of it is written beside the
-     * attempt's logs.
-     *
-     * @throws StateException when a commit is already recorded, in which case
-     *                        the pass did change something
-     */
-    public function recordNoChange(GenerationRecord $generation): GenerationRecord
-    {
-        if ($generation->hasCommit()) {
-            throw new StateException(sprintf(
-                'Generation %s recorded commit %s, so it did not leave the task unchanged.',
-                $generation->slug(),
-                (string) $generation->commitSha(),
-            ));
-        }
-
-        return $this->write($generation, ['no_change' => 1]);
-    }
-
-    /**
-     * Record where publication stands.
-     *
-     * @throws StateException when the row cannot be written
-     */
-    public function recordPush(GenerationRecord $generation, PushResult $push): GenerationRecord
-    {
-        $columns = $push->toColumns();
-
-        return $this->write($generation, [
-            'push_state' => $columns['state'],
-            'push_remote' => $columns['remote'],
-            'push_error' => $columns['error'],
-        ]);
-    }
-
-    /**
      * Finish the pass as complete.
      *
-     * Refuses a pass that has no implementation recorded, or one whose required
-     * push has not succeeded. Those are the Git-side conditions PROJECT.md puts
-     * on ticking a box, and a store that let them slide would make the checked
-     * box the only place the lie showed up.
+     * What a pass has to have done to get here is verification: the configured
+     * checks passed, against the user's own checkout, run by something that is
+     * not the worker. That evidence is the rows in `verification_results` and
+     * the completion record the pass writes beside its logs, not a column on
+     * this row, so the condition is the caller's to establish — this refuses
+     * only a move the lifecycle itself does not allow.
      *
-     * @throws StateException when the pass has not earned completion, or cannot
-     *                        reach it from the state it is in
+     * @throws StateException when the pass cannot reach completion from the
+     *                        state it is in
      */
     public function complete(GenerationRecord $generation): GenerationRecord
     {
-        if (!$generation->hasImplementation()) {
-            throw new StateException(
-                sprintf(
-                    'Generation %s has neither a commit nor a recorded no-change result, '
-                    . 'so it cannot be completed.',
-                    $generation->slug(),
-                ),
-                ['Record the commit, or record a verified no-change outcome, first.'],
-            );
-        }
-
-        if ($generation->push()->isOutstanding()) {
-            throw new StateException(
-                sprintf(
-                    'Generation %s cannot be completed while %s.',
-                    $generation->slug(),
-                    $generation->push()->describe(),
-                ),
-                ['The local commit is kept; resume retries the publication without re-running the work.'],
-            );
-        }
-
         return $this->finish($generation, LifecycleState::Completed);
     }
 
@@ -838,7 +450,8 @@ final class GenerationStore
      * Record that the pass was interrupted.
      *
      * The phase is left exactly as it was: it is the only thing that tells
-     * resume whether to invoke the agent again or to retry a push.
+     * resume whether to invoke the agent again or to write the checkbox it
+     * stopped before.
      *
      * @throws StateException when a pass in this state cannot be interrupted
      */
@@ -927,7 +540,7 @@ final class GenerationStore
     }
 
     /**
-     * Run a write, turning the two ownership indexes into readable failures.
+     * Run a write, turning the ownership indexes into readable failures.
      *
      * @template T
      *
@@ -963,18 +576,6 @@ final class GenerationStore
             return $failure;
         }
 
-        if (str_contains($message, 'generations.branch')) {
-            return new StateException(
-                sprintf('That branch is already owned by another pass, so %s cannot take it.', $slug),
-                [
-                    'A branch belongs to exactly one execution generation, so reopening a task '
-                    . 'can never reset the branch an earlier pass left behind.',
-                    'Delete the branch yourself if it is genuinely unwanted, or let the pass that '
-                    . 'owns it finish.',
-                ],
-            );
-        }
-
         if (
             str_contains($message, 'generations.slug')
             || str_contains($message, 'generations.number')
@@ -990,26 +591,12 @@ final class GenerationStore
                 sprintf('That task already has a pass that can be continued, so %s cannot start.', $slug),
                 [
                     'A new generation is only started when the previous one is complete or was '
-                    . 'deliberately skipped; anything else is continued on the branch it owns.',
+                    . 'deliberately skipped; anything else is continued where it stopped.',
                     'Run "ralph status" to see which pass is open and what it is waiting for.',
                 ],
             );
         }
 
         return $failure;
-    }
-
-    /**
-     * @throws StateException when a reference that must name something is blank
-     */
-    private function reference(string $value, string $what): string
-    {
-        $trimmed = trim($value);
-
-        if ($trimmed === '') {
-            throw new StateException(sprintf('A recorded %s must name something.', $what));
-        }
-
-        return $trimmed;
     }
 }

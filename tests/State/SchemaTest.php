@@ -25,11 +25,11 @@ use PHPUnit\Framework\TestCase;
  * What the schema refuses.
  *
  * The tables are only worth having if the database enforces the things the
- * design promised — a branch belonging to one generation, a task having one
- * pass that can still be continued, evidence that cannot outlive the attempt it
- * belongs to. Those are tested by trying to write the forbidden row and
- * expecting SQLite to say no, because the alternative is an application layer
- * that is the only thing standing between a careless update and a reset branch.
+ * design promised — a task having one pass that can still be continued,
+ * evidence that cannot outlive the attempt it belongs to. Those are tested by
+ * trying to write the forbidden row and expecting SQLite to say no, because the
+ * alternative is an application layer that is the only thing standing between a
+ * careless update and a pass that two runs believe they own.
  *
  * The rows here are written with raw SQL on purpose. The stores that will write
  * them for real are later items, and a schema test that went through them would
@@ -68,35 +68,51 @@ final class SchemaTest extends TestCase
     }
 
     /**
-     * The storage half of "a separately owned branch".
+     * The Git columns and the branch index are gone, and the step that drops
+     * them is part of the schema this build produces (migration 7).
      *
-     * Reopening a finished task must not be able to land on the branch the
-     * earlier pass left behind, and this is the guarantee that holds even if
-     * the branch name is computed wrongly.
+     * Asserted against the live table rather than against the migration's text,
+     * because what matters is the schema a fresh database ends up with: a
+     * column still there would be one `ralph status` could report and nothing
+     * writes.
      */
     #[Test]
-    public function two_generations_cannot_own_one_branch(): void
+    public function the_generations_table_has_no_git_columns(): void
     {
-        $task = $this->insertTask('add a flag');
-        $this->insertGeneration($task, 1, 'ralph/TASK-A-add-a-flag', state: 'completed');
+        $columns = $this->columnsOf('generations');
 
-        $this->refuses(
-            'UNIQUE constraint failed: generations.branch',
-            fn (): int => $this->insertGeneration($task, 2, 'ralph/TASK-A-add-a-flag'),
+        self::assertSame(
+            [],
+            array_values(array_intersect($columns, [
+                'base_reference',
+                'base_sha',
+                'branch',
+                'branch_shared',
+                'commit_sha',
+                'no_change',
+                'push_state',
+                'push_remote',
+                'push_error',
+                'worktree_path',
+                'owns_worktree',
+                'cleanup_state',
+            ])),
+            'A Git column survived the migration that drops them.',
         );
-    }
 
-    #[Test]
-    public function generations_that_own_no_branch_yet_do_not_collide(): void
-    {
-        $first = $this->insertTask('add a flag');
-        $second = $this->insertTask('remove a flag');
+        self::assertSame(
+            [],
+            array_values(array_intersect($this->columnsOf('runs'), [
+                'base_reference',
+                'base_sha',
+                'shared_branch',
+            ])),
+        );
 
-        $this->insertGeneration($first, 1, null, state: 'completed');
-        $this->insertGeneration($first, 2, null, state: 'completed');
-        $this->insertGeneration($second, 1, null);
-
-        self::assertSame(3, $this->rowsIn('generations'));
+        self::assertNotContains('git_references', $this->database->tables());
+        self::assertSame([], $this->database->query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'generations_branch'",
+        ));
     }
 
     /**
@@ -106,11 +122,11 @@ final class SchemaTest extends TestCase
     public function a_task_cannot_have_two_passes_that_are_still_open(): void
     {
         $task = $this->insertTask('add a flag');
-        $this->insertGeneration($task, 1, 'ralph/first', state: 'interrupted');
+        $this->insertGeneration($task, 1, state: 'interrupted');
 
         $this->refuses(
             'UNIQUE constraint failed: generations.task_id',
-            fn (): int => $this->insertGeneration($task, 2, 'ralph/second', state: 'running'),
+            fn (): int => $this->insertGeneration($task, 2, state: 'running'),
         );
     }
 
@@ -118,8 +134,8 @@ final class SchemaTest extends TestCase
     public function a_finished_pass_lets_the_next_one_start(): void
     {
         $task = $this->insertTask('add a flag');
-        $this->insertGeneration($task, 1, 'ralph/first', state: 'completed');
-        $this->insertGeneration($task, 2, 'ralph/second', state: 'running');
+        $this->insertGeneration($task, 1, state: 'completed');
+        $this->insertGeneration($task, 2, state: 'running');
 
         self::assertSame(2, $this->rowsIn('generations'));
     }
@@ -129,11 +145,11 @@ final class SchemaTest extends TestCase
     {
         foreach (['pending', 'running', 'blocked', 'failed', 'interrupted'] as $state) {
             $task = $this->insertTask('a task that ends ' . $state);
-            $this->insertGeneration($task, 1, 'ralph/' . $state . '-1', state: $state);
+            $this->insertGeneration($task, 1, state: $state);
 
             $this->refuses(
                 'UNIQUE constraint failed: generations.task_id',
-                fn (): int => $this->insertGeneration($task, 2, 'ralph/' . $state . '-2', state: 'running'),
+                fn (): int => $this->insertGeneration($task, 2, state: 'running'),
                 sprintf('A second open pass was allowed beside a %s one.', $state),
             );
 
@@ -151,7 +167,7 @@ final class SchemaTest extends TestCase
     {
         foreach (LifecycleState::cases() as $state) {
             $task = $this->insertTask('a task recorded as ' . $state->value);
-            $this->insertGeneration($task, 1, 'ralph/takes-' . $state->value, state: $state->value);
+            $this->insertGeneration($task, 1, state: $state->value);
         }
 
         self::assertSame(count(LifecycleState::cases()), $this->rowsIn('generations'));
@@ -164,7 +180,7 @@ final class SchemaTest extends TestCase
 
         $this->refuses(
             'CHECK constraint failed: state IN',
-            fn (): int => $this->insertGeneration($task, 1, 'ralph/first', state: 'paused'),
+            fn (): int => $this->insertGeneration($task, 1, state: 'paused'),
         );
     }
 
@@ -172,8 +188,8 @@ final class SchemaTest extends TestCase
     public function a_skipped_pass_is_closed_like_a_completed_one(): void
     {
         $task = $this->insertTask('add a flag');
-        $this->insertGeneration($task, 1, 'ralph/first', state: 'skipped');
-        $this->insertGeneration($task, 2, 'ralph/second', state: 'running');
+        $this->insertGeneration($task, 1, state: 'skipped');
+        $this->insertGeneration($task, 2, state: 'running');
 
         self::assertSame(2, $this->rowsIn('generations'));
         self::assertFalse(Schema::isOpen('skipped'));
@@ -184,11 +200,11 @@ final class SchemaTest extends TestCase
     public function one_generation_number_is_recorded_once(): void
     {
         $task = $this->insertTask('add a flag');
-        $this->insertGeneration($task, 1, 'ralph/first', state: 'completed');
+        $this->insertGeneration($task, 1, state: 'completed');
 
         $this->refuses(
             'UNIQUE constraint failed: generations.task_id, generations.number',
-            fn (): int => $this->insertGeneration($task, 1, 'ralph/again', state: 'completed'),
+            fn (): int => $this->insertGeneration($task, 1, state: 'completed'),
         );
     }
 
@@ -199,7 +215,7 @@ final class SchemaTest extends TestCase
 
         $this->refuses(
             'CHECK constraint failed: number >= 1',
-            fn (): int => $this->insertGeneration($task, 0, 'ralph/zero'),
+            fn (): int => $this->insertGeneration($task, 0),
         );
     }
 
@@ -215,7 +231,6 @@ final class SchemaTest extends TestCase
             $this->insertGeneration(
                 $task,
                 $number,
-                'ralph/' . $generation->slug(),
                 state: $number === 3 ? 'running' : 'completed',
                 slug: $generation->slug(),
             );
@@ -237,7 +252,7 @@ final class SchemaTest extends TestCase
 
         $this->refuses(
             'CHECK constraint failed: state IN',
-            fn (): int => $this->insertGeneration($task, 1, 'ralph/first', state: 'nearly-done'),
+            fn (): int => $this->insertGeneration($task, 1, state: 'nearly-done'),
         );
     }
 
@@ -251,7 +266,7 @@ final class SchemaTest extends TestCase
     {
         foreach (Phase::cases() as $phase) {
             $task = $this->insertTask('a task stopped while ' . $phase->value);
-            $this->insertGeneration($task, 1, 'ralph/takes-' . $phase->value, phase: $phase->value);
+            $this->insertGeneration($task, 1, phase: $phase->value);
         }
 
         self::assertSame(count(Phase::cases()), $this->rowsIn('generations'));
@@ -264,7 +279,7 @@ final class SchemaTest extends TestCase
 
         $this->refuses(
             'CHECK constraint failed: phase IS NULL OR phase IN',
-            fn (): int => $this->insertGeneration($task, 1, 'ralph/first', phase: 'thinking'),
+            fn (): int => $this->insertGeneration($task, 1, phase: 'thinking'),
         );
     }
 
@@ -272,7 +287,7 @@ final class SchemaTest extends TestCase
     public function a_generation_that_is_not_running_records_no_phase(): void
     {
         $task = $this->insertTask('add a flag');
-        $this->insertGeneration($task, 1, 'ralph/first', state: 'completed', phase: null);
+        $this->insertGeneration($task, 1, state: 'completed', phase: null);
 
         self::assertNull($this->database->value('SELECT phase FROM generations'));
     }
@@ -336,10 +351,9 @@ final class SchemaTest extends TestCase
     {
         $task = $this->insertTask('add a flag');
         $run = $this->insertRun();
-        $generation = $this->insertGeneration($task, 1, 'ralph/first', run: $run);
+        $generation = $this->insertGeneration($task, 1, run: $run);
         $attempt = $this->insertAttempt($generation, $run);
         $this->insertVerificationResult($attempt);
-        $this->insertGitReference($generation);
         $this->insertChecklistUpdate($generation, $run);
 
         $this->database->execute('DELETE FROM tasks WHERE id = ?', [$task]);
@@ -347,21 +361,20 @@ final class SchemaTest extends TestCase
         self::assertSame(0, $this->rowsIn('generations'));
         self::assertSame(0, $this->rowsIn('attempts'));
         self::assertSame(0, $this->rowsIn('verification_results'));
-        self::assertSame(0, $this->rowsIn('git_references'));
         self::assertSame(0, $this->rowsIn('checklist_updates'));
     }
 
     /**
      * A finished run must not take the history of what it did with it: the
-     * commits it made are still on branches, and `status` has to keep being
-     * able to say which task they belong to.
+     * tasks it completed are still completed, and `status` has to keep being
+     * able to say which run they belong to.
      */
     #[Test]
     public function deleting_a_run_leaves_the_generations_it_produced(): void
     {
         $run = $this->insertRun();
         $task = $this->insertTask('add a flag');
-        $this->insertGeneration($task, 1, 'ralph/first', run: $run, state: 'completed');
+        $this->insertGeneration($task, 1, run: $run, state: 'completed');
 
         $this->database->execute('DELETE FROM runs WHERE id = ?', [$run]);
 
@@ -374,7 +387,7 @@ final class SchemaTest extends TestCase
     {
         $task = $this->insertTask('add a flag');
         $run = $this->insertRun();
-        $attempt = $this->insertAttempt($this->insertGeneration($task, 1, 'ralph/first', run: $run), $run);
+        $attempt = $this->insertAttempt($this->insertGeneration($task, 1, run: $run), $run);
 
         $this->insertVerificationResult($attempt, position: 1);
 
@@ -389,22 +402,11 @@ final class SchemaTest extends TestCase
     {
         $task = $this->insertTask('add a flag');
         $run = $this->insertRun();
-        $attempt = $this->insertAttempt($this->insertGeneration($task, 1, 'ralph/first', run: $run), $run);
+        $attempt = $this->insertAttempt($this->insertGeneration($task, 1, run: $run), $run);
 
         $this->refuses(
             'CHECK constraint failed: outcome IN',
             fn (): int => $this->insertVerificationResult($attempt, outcome: 'mostly_passed'),
-        );
-    }
-
-    #[Test]
-    public function a_push_state_the_package_does_not_know_is_refused(): void
-    {
-        $task = $this->insertTask('add a flag');
-
-        $this->refuses(
-            'CHECK constraint failed: push_state IN',
-            fn (): int => $this->insertGeneration($task, 1, 'ralph/first', pushState: 'probably'),
         );
     }
 
@@ -414,8 +416,7 @@ final class SchemaTest extends TestCase
      * tested and not the helper's.
      *
      * Each one is the answer that cannot claim something the runner has not
-     * done: nothing is awaiting publication, no commit has been skipped as
-     * unnecessary, no attempt has been made, and no worktree is owned.
+     * done: no attempt has been made, and the pass is in the middle of nothing.
      */
     #[Test]
     public function a_new_generation_claims_nothing_by_default(): void
@@ -425,8 +426,8 @@ final class SchemaTest extends TestCase
         $this->database->execute(
             'INSERT INTO generations
                 (task_id, number, slug, state, content_hash, agent, adapter, agent_settings,
-                 base_reference, base_sha, started_at, updated_at)
-             VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 started_at, updated_at)
+             VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 $task,
                 'TASK-00000001',
@@ -435,25 +436,16 @@ final class SchemaTest extends TestCase
                 'codex',
                 'codex',
                 '{}',
-                'HEAD',
-                str_repeat('a', 40),
                 '2026-11-01T00:00:00+00:00',
                 '2026-11-01T00:00:00+00:00',
             ],
         );
 
-        $row = $this->database->query(
-            'SELECT push_state, no_change, attempts, owns_worktree, phase, branch, commit_sha
-             FROM generations',
-        )[0];
+        $row = $this->database->query('SELECT attempts, phase, logs_wiped_at FROM generations')[0];
 
-        self::assertSame('not_required', $row['push_state'], 'A new pass was recorded as awaiting a push.');
-        self::assertSame(0, (int) $row['no_change'], 'A new pass claimed the task was already satisfied.');
         self::assertSame(0, (int) $row['attempts'], 'A new pass started with an attempt already counted.');
-        self::assertSame(0, (int) $row['owns_worktree'], 'A new pass claimed a worktree it had not made.');
         self::assertNull($row['phase']);
-        self::assertNull($row['branch']);
-        self::assertNull($row['commit_sha']);
+        self::assertNull($row['logs_wiped_at'], 'A new pass claimed logs had been wiped.');
     }
 
     #[Test]
@@ -467,9 +459,6 @@ final class SchemaTest extends TestCase
             Schema::RUN_STATES,
             Schema::attemptOutcomes(),
             Schema::checkOutcomes(),
-            Schema::pushStates(),
-            Schema::GIT_REFERENCE_KINDS,
-            Schema::GIT_REFERENCE_OUTCOMES,
             Schema::checklistMarkers(),
             Schema::checklistUpdateStates(),
             Schema::completions(),
@@ -543,8 +532,8 @@ final class SchemaTest extends TestCase
         $this->database->execute(
             'INSERT INTO runs
                 (run_id, state, agent, adapter, agent_source, agent_settings, configuration, checks,
-                 tasks_path, base_reference, started_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 tasks_path, started_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 'RUN-' . bin2hex(random_bytes(4)),
                 'running',
@@ -555,7 +544,6 @@ final class SchemaTest extends TestCase
                 '{}',
                 '[]',
                 '.ralph/tasks.md',
-                'HEAD',
                 '2026-11-01T00:00:00+00:00',
                 '2026-11-01T00:00:00+00:00',
             ],
@@ -567,18 +555,16 @@ final class SchemaTest extends TestCase
     private function insertGeneration(
         int $task,
         int $number,
-        ?string $branch = null,
         ?int $run = null,
         string $state = 'running',
         ?string $phase = 'executing',
-        string $pushState = 'not_required',
         ?string $slug = null,
     ): int {
         $this->database->execute(
             'INSERT INTO generations
                 (task_id, number, slug, run_id, state, phase, content_hash, agent, adapter, agent_settings,
-                 base_reference, base_sha, branch, push_state, started_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 started_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 $task,
                 $number,
@@ -590,16 +576,26 @@ final class SchemaTest extends TestCase
                 'codex',
                 'codex',
                 '{}',
-                'HEAD',
-                str_repeat('a', 40),
-                $branch,
-                $pushState,
                 '2026-11-01T00:00:00+00:00',
                 '2026-11-01T00:00:00+00:00',
             ],
         );
 
         return $this->database->lastInsertId();
+    }
+
+    /**
+     * The columns a table actually has, for the assertions about what the
+     * migrations left behind.
+     *
+     * @return list<string>
+     */
+    private function columnsOf(string $table): array
+    {
+        return array_map(
+            static fn (array $row): string => (string) $row['name'],
+            $this->database->query(sprintf('PRAGMA table_info(%s)', $table)),
+        );
     }
 
     private function insertAttempt(int $generation, int $run, int $number = 1): int
@@ -645,17 +641,6 @@ final class SchemaTest extends TestCase
                 600,
                 '2026-11-01T00:00:00+00:00',
             ],
-        );
-
-        return $this->database->lastInsertId();
-    }
-
-    private function insertGitReference(int $generation): int
-    {
-        $this->database->execute(
-            'INSERT INTO git_references (generation_id, kind, name, sha, outcome, recorded_at)
-             VALUES (?, ?, ?, ?, ?, ?)',
-            [$generation, 'commit', null, str_repeat('b', 40), 'created', '2026-11-01T00:00:00+00:00'],
         );
 
         return $this->database->lastInsertId();

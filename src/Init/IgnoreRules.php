@@ -13,8 +13,8 @@ use Celyes\RalphPhp\Config\Path;
  * The Git ignore rules a Ralph PHP project needs.
  *
  * Three things the package produces must stay out of a commit: the runtime
- * directory, which holds the state database, raw worker output and task
- * worktrees; the operational task checklist, which is a local work queue rather
+ * directory, which holds the state database, raw worker output and memory
+ * summaries; the operational task checklist, which is a local work queue rather
  * than project source (PROJECT.md section 4); and the `.bak` copies
  * `init --force` leaves behind. Everything else initialisation writes — the
  * configuration and the context file — is meant to be shared, and is not

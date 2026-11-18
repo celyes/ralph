@@ -185,46 +185,24 @@ final class TaskGenerationTest extends TestCase
     {
         $pass = RecordedGeneration::completed(
             TaskGeneration::first(self::id()),
-            'ralph/TASK-19E0214A-add-a-flag',
-            'a1b2c3d',
             TaskSnapshot::hash('Add a --dry-run option'),
         );
 
         self::assertTrue($pass->isComplete());
         self::assertFalse($pass->isOpen());
         self::assertSame(1, $pass->number());
-        self::assertSame('a1b2c3d', $pass->commit());
-        self::assertTrue($pass->ownsBranch('ralph/TASK-19E0214A-add-a-flag'));
-        self::assertFalse($pass->ownsBranch('ralph/task-19e0214a-add-a-flag'));
+        self::assertSame(TaskSnapshot::hash('Add a --dry-run option'), $pass->contentHash());
         self::assertSame(self::id()->value(), $pass->task()->value());
     }
 
-    /**
-     * A task that was already satisfied completes without a commit
-     * (PROJECT.md section G, item 6), so a null commit cannot be read as "did
-     * not finish".
-     */
     #[Test]
-    public function a_pass_can_complete_without_a_commit(): void
+    public function an_open_pass_is_the_one_a_run_continues(): void
     {
-        $pass = RecordedGeneration::completed(TaskGeneration::first(self::id()));
-
-        self::assertTrue($pass->isComplete());
-        self::assertNull($pass->commit());
-    }
-
-    #[Test]
-    public function an_open_pass_has_no_commit_and_may_still_own_a_branch(): void
-    {
-        $pass = RecordedGeneration::open(
-            TaskGeneration::first(self::id()),
-            'ralph/TASK-19E0214A-add-a-flag',
-        );
+        $pass = RecordedGeneration::open(TaskGeneration::first(self::id()));
 
         self::assertTrue($pass->isOpen());
         self::assertFalse($pass->isComplete());
-        self::assertNull($pass->commit());
-        self::assertSame('ralph/TASK-19E0214A-add-a-flag', $pass->branch());
+        self::assertNull($pass->contentHash());
     }
 
     #[Test]
@@ -261,12 +239,7 @@ final class TaskGenerationTest extends TestCase
             ['  - It must not write to the database or the logs.'],
         ));
 
-        $pass = RecordedGeneration::completed(
-            TaskGeneration::first($before->id()),
-            null,
-            null,
-            $before->contentHash(),
-        );
+        $pass = RecordedGeneration::completed(TaskGeneration::first($before->id()), $before->contentHash());
 
         self::assertTrue($pass->statesSameWork($before));
         self::assertFalse($pass->statesSameWork($after));

@@ -12,6 +12,7 @@ use Celyes\RalphPhp\Log\LogWipe;
 use Celyes\RalphPhp\Log\LogWiper;
 use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\Blocker;
+use Celyes\RalphPhp\State\ChecklistStore;
 use Celyes\RalphPhp\State\Database;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\GenerationStore;
@@ -62,6 +63,10 @@ final class LogWiperTest extends TestCase
 
     private GenerationStore $generations;
 
+    private ChecklistStore $checklists;
+
+    private int $runRowId = 0;
+
     private LogDirectory $logs;
 
     protected function setUp(): void
@@ -71,6 +76,8 @@ final class LogWiperTest extends TestCase
         $this->clock = FrozenClock::at('2026-11-17T09:30:00+00:00');
         $this->tasks = new TaskStore($this->database, $this->clock);
         $this->generations = new GenerationStore($this->database, $this->clock);
+        $this->checklists = new ChecklistStore($this->database, $this->clock);
+        $this->runRowId = $this->insertRun();
         $this->logs = LogDirectory::in($this->project);
     }
 
@@ -105,27 +112,22 @@ final class LogWiperTest extends TestCase
     }
 
     /**
-     * What the setting trades is output for disk. The commit, the push result,
-     * the state and the evidence the completion rests on are not output.
+     * What the setting trades is output for disk. The state and the evidence
+     * the completion rests on are not output.
      */
     #[Test]
-    public function the_completion_evidence_and_the_commit_outlive_the_logs(): void
+    public function the_completion_evidence_outlives_the_logs(): void
     {
         $record = $this->completed();
         $this->writeLog($record, 'attempt-01-agent.log');
         $evidence = $this->writeLog($record, 'attempt-01-completed.md');
-        $satisfied = $this->writeLog($record, 'attempt-01-satisfied.md');
-        $diff = $this->writeLog($record, 'attempt-01-staged.diff');
 
         $this->wiper()->wipe($record);
 
         self::assertFileExists($evidence);
-        self::assertFileExists($satisfied);
-        self::assertFileExists($diff);
 
         $written = $this->generations->get($record->generation());
 
-        self::assertSame('f1e2d3c4b5a6', $written->commitSha());
         self::assertSame(LifecycleState::Completed, $written->state());
         self::assertSame(1, $written->attempts());
     }
@@ -224,41 +226,24 @@ final class LogWiperTest extends TestCase
     }
 
     /**
-     * The precondition the item states: a completion is durable once the
-     * required push has settled, and a row that says otherwise is refused
-     * whatever else it says. The store will not write such a row — `complete()`
-     * refuses an outstanding push — so the guard is asked of a row built by
-     * hand, which is the only way the condition it defends against could arise.
+     * The precondition the item states: a completion is durable once the box
+     * has been written, and a row that says otherwise is refused whatever else
+     * it says. The runner does not produce such a row — the checklist write
+     * lands before `complete()` is called — so the guard is asked of a pass
+     * whose planned write is still outstanding, which is the only way the
+     * condition it defends against could arise.
      */
     #[Test]
-    public function a_completion_whose_push_is_outstanding_is_not_wiped(): void
+    public function a_completion_that_still_owes_its_checkbox_is_not_wiped(): void
     {
-        $generation = TaskGeneration::first(Task::fromItem($this->item())->id());
-        $record = GenerationRecord::fromRow([
-            'id' => 1,
-            'slug' => $generation->slug(),
-            'run_id' => 1,
-            'state' => 'completed',
-            'phase' => null,
-            'attempts' => 1,
-            'content_hash' => str_repeat('c', 64),
-            'agent' => 'codex',
-            'adapter' => 'codex',
-            'agent_settings' => '{"executable":"codex"}',
-            'base_reference' => 'main',
-            'base_sha' => str_repeat('a', 40),
-            'branch' => null,
-            'commit_sha' => str_repeat('f', 40),
-            'no_change' => 0,
-            'push_state' => 'pending',
-            'push_remote' => 'origin',
-            'push_error' => null,
-            'worktree_path' => null,
-            'owns_worktree' => 0,
-            'started_at' => '2026-11-17T09:00:00+00:00',
-            'updated_at' => '2026-11-17T09:10:00+00:00',
-            'finished_at' => null,
-        ]);
+        $record = $this->completed();
+        $this->checklists->plan(
+            $record,
+            $this->runRowId,
+            '.ralph/tasks.md',
+            str_repeat('d', 64),
+            str_repeat('e', 64),
+        );
 
         $agent = $this->writeLog($record, 'attempt-01-agent.log');
 
@@ -467,6 +452,7 @@ final class LogWiperTest extends TestCase
             $this->logs,
             $settings ?? new LogSettings(true),
             $this->generations,
+            $this->checklists,
         );
     }
 
@@ -475,12 +461,7 @@ final class LogWiperTest extends TestCase
      */
     private function completed(): GenerationRecord
     {
-        return $this->generations->complete(
-            $this->generations->recordCommit(
-                $this->generations->beginAttempt($this->start()),
-                'f1e2d3c4b5a6',
-            ),
-        );
+        return $this->generations->complete($this->generations->beginAttempt($this->start()));
     }
 
     /**
@@ -511,8 +492,6 @@ final class LogWiperTest extends TestCase
             TaskGeneration::first($snapshot->id()),
             $snapshot,
             AgentRecord::ofDefinition(AgentDefinition::builtIn('codex')),
-            'main',
-            'a1b2c3d4e5f6',
         );
     }
 
@@ -540,5 +519,32 @@ final class LogWiperTest extends TestCase
         if (!is_dir($directory) && !mkdir($directory, 0o700, true) && !is_dir($directory)) {
             self::fail(sprintf('Unable to create %s.', $directory));
         }
+    }
+    /**
+     * A run row, for the checklist updates that reference one.
+     */
+    private function insertRun(): int
+    {
+        $this->database->execute(
+            'INSERT INTO runs
+                 (run_id, state, agent, adapter, agent_source, agent_settings, configuration,
+                  checks, tasks_path, started_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+                'RUN-0001',
+                'running',
+                'codex',
+                'codex',
+                'project_default',
+                '{"executable":"codex"}',
+                '{}',
+                '[]',
+                '.ralph/tasks.md',
+                '2026-11-17T09:30:00+00:00',
+                '2026-11-17T09:30:00+00:00',
+            ],
+        );
+
+        return $this->database->lastInsertId();
     }
 }

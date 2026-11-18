@@ -12,14 +12,9 @@ use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Exception\ConfigurationException;
 use Celyes\RalphPhp\Preflight\Check\AgentCheck;
 use Celyes\RalphPhp\Preflight\Check\AgentVersionCheck;
-use Celyes\RalphPhp\Preflight\Check\BaseReferenceCheck;
 use Celyes\RalphPhp\Preflight\Check\ExtensionsCheck;
-use Celyes\RalphPhp\Preflight\Check\GitCheck;
-use Celyes\RalphPhp\Preflight\Check\IdentityCheck;
 use Celyes\RalphPhp\Preflight\Check\PhpCheck;
-use Celyes\RalphPhp\Preflight\Check\RepositoryCheck;
 use Celyes\RalphPhp\Preflight\Check\VerificationCheck;
-use Celyes\RalphPhp\Preflight\Check\WorkspaceCheck;
 use Celyes\RalphPhp\Preflight\CheckId;
 use Celyes\RalphPhp\Preflight\CheckOutcome;
 use Celyes\RalphPhp\Preflight\CheckResult;
@@ -49,14 +44,9 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(Preflight::class)]
 #[CoversClass(PhpCheck::class)]
 #[CoversClass(ExtensionsCheck::class)]
-#[CoversClass(GitCheck::class)]
-#[CoversClass(RepositoryCheck::class)]
-#[CoversClass(BaseReferenceCheck::class)]
-#[CoversClass(IdentityCheck::class)]
 #[CoversClass(AgentCheck::class)]
 #[CoversClass(AgentVersionCheck::class)]
 #[CoversClass(VerificationCheck::class)]
-#[CoversClass(WorkspaceCheck::class)]
 final class PreflightTest extends TestCase
 {
     /**
@@ -78,7 +68,7 @@ final class PreflightTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and these checks are about a real repository.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = TemporaryProject::create();
@@ -95,7 +85,7 @@ final class PreflightTest extends TestCase
     public function a_prepared_project_passes_every_check(): void
     {
         $this->givenARepository();
-        $commit = Git::commit($this->project->root());
+        Git::commit($this->project->root());
 
         $report = $this->report();
 
@@ -107,9 +97,10 @@ final class PreflightTest extends TestCase
             self::assertSame(CheckOutcome::Passed, $this->outcome($report, $id), $this->describe($report));
         }
 
-        self::assertStringContainsString(substr($commit, 0, 12), $this->summary($report, CheckId::BaseReference));
-        self::assertStringContainsString('Test User <test@example.com>', $this->summary($report, CheckId::Identity));
-        self::assertStringContainsString('Initial commit', implode("\n", $this->details($report, CheckId::BaseReference)));
+        self::assertStringContainsString(
+            '1 verification command can run',
+            $this->summary($report, CheckId::Checks),
+        );
     }
 
     #[Test]
@@ -148,245 +139,14 @@ final class PreflightTest extends TestCase
     }
 
     #[Test]
-    public function a_directory_that_is_not_a_repository_is_reported_without_blaming_the_configuration(): void
-    {
-        $report = $this->report();
-
-        self::assertFalse($report->isUsable());
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Repository));
-        self::assertStringContainsString('is not in a Git repository', $this->summary($report, CheckId::Repository));
-        self::assertStringContainsString('git init', implode("\n", $this->hints($report, CheckId::Repository)));
-
-        // The base cannot be resolved without a repository, and saying so is
-        // more useful than a second failure about the same thing.
-        self::assertSame(CheckOutcome::Skipped, $this->outcome($report, CheckId::BaseReference));
-        self::assertStringContainsString('"repository" check failed', $this->summary($report, CheckId::BaseReference));
-
-        // The identity does not depend on the repository, so it is still
-        // answered: the user learns about both problems in one run.
-        self::assertNotSame(CheckOutcome::Skipped, $this->outcome($report, CheckId::Identity));
-    }
-
-    #[Test]
-    public function a_bare_repository_is_rejected(): void
-    {
-        Git::initialise($this->project->root(), bare: true);
-
-        $report = $this->report();
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Repository));
-        self::assertStringContainsString('is a bare repository', $this->summary($report, CheckId::Repository));
-        self::assertStringContainsString('working tree', implode("\n", $this->hints($report, CheckId::Repository)));
-    }
-
-    #[Test]
-    public function a_subdirectory_of_a_repository_is_rejected_with_the_directory_to_run_from(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-
-        $subdirectory = $this->project->path('packages/library');
-        mkdir($subdirectory, 0o700, true);
-
-        $report = (new Preflight())->run(
-            (new ConfigurationLoader())->fromArray([], $subdirectory),
-        );
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Repository));
-        self::assertStringContainsString('is not the root of its repository', $this->summary($report, CheckId::Repository));
-        self::assertStringContainsString(
-            'Run ralph from ' . $this->project->root(),
-            implode("\n", $this->hints($report, CheckId::Repository)),
-        );
-    }
-
-    #[Test]
-    public function an_empty_repository_is_reported_as_having_no_commits(): void
-    {
-        $this->givenARepository();
-
-        $report = $this->report();
-
-        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Repository));
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::BaseReference));
-        self::assertStringContainsString('no commits yet', $this->summary($report, CheckId::BaseReference));
-        self::assertStringContainsString('first commit', implode("\n", $this->hints($report, CheckId::BaseReference)));
-    }
-
-    #[Test]
-    public function a_base_reference_that_does_not_exist_names_the_branches_that_do(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-        Git::run($this->project->root(), 'branch', 'release');
-
-        $report = $this->report(['git' => ['base' => 'production']]);
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::BaseReference));
-        self::assertStringContainsString(
-            'git.base "production" does not name a commit',
-            $this->summary($report, CheckId::BaseReference),
-        );
-
-        $hints = implode("\n", $this->hints($report, CheckId::BaseReference));
-        self::assertStringContainsString('main', $hints);
-        self::assertStringContainsString('release', $hints);
-        self::assertStringContainsString($this->project->path(Defaults::CONFIG_FILE), $hints);
-    }
-
-    #[Test]
-    public function a_configured_branch_is_resolved_to_its_commit(): void
-    {
-        $this->givenARepository();
-        $commit = Git::commit($this->project->root());
-
-        $report = $this->report(['git' => ['base' => 'main']]);
-
-        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::BaseReference));
-        self::assertStringContainsString('git.base "main"', $this->summary($report, CheckId::BaseReference));
-        self::assertStringContainsString($commit, implode("\n", $this->details($report, CheckId::BaseReference)));
-    }
-
-    #[Test]
-    public function a_reference_that_is_not_a_commit_does_not_satisfy_the_base(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-        // An annotated tag of a tree, which resolves as an object but is not a
-        // commit to branch from.
-        $tree = trim(Git::run($this->project->root(), 'rev-parse', 'HEAD^{tree}')->standardOutput);
-        Git::run($this->project->root(), 'tag', 'tree-tag', $tree);
-
-        $report = $this->report(['git' => ['base' => 'tree-tag']]);
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::BaseReference));
-    }
-
-    #[Test]
-    public function a_missing_git_identity_is_reported_with_the_commands_that_set_it(): void
-    {
-        $version = Git::version();
-        if ($version === null || version_compare($version, '2.32.0', '<')) {
-            self::markTestSkipped('Neutralising the machine\'s own Git configuration needs Git 2.32 or newer.');
-        }
-
-        $this->givenARepository(identity: false);
-        Git::commit($this->project->root());
-        $this->givenNoGitConfigurationOutsideTheRepository();
-
-        $report = $this->report();
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Identity));
-        self::assertStringContainsString(
-            'Git cannot determine the commit author identity',
-            $this->summary($report, CheckId::Identity),
-        );
-        self::assertStringContainsString('git config user.email', implode("\n", $this->hints($report, CheckId::Identity)));
-    }
-
-    #[Test]
-    public function the_repository_checked_is_the_project_rather_than_one_named_in_the_environment(): void
-    {
-        $elsewhere = TemporaryProject::create();
-
-        try {
-            Git::initialise($elsewhere->root());
-            Git::setIdentity($elsewhere->root());
-            Git::commit($elsewhere->root());
-
-            // A redirection left in the shell must not make preflight answer
-            // about another repository than the project it was given.
-            $this->environment->set('GIT_DIR', $elsewhere->path('.git'));
-            $this->environment->set('GIT_WORK_TREE', $elsewhere->root());
-
-            $report = $this->report();
-
-            self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Repository));
-            self::assertStringContainsString(
-                $this->project->root() . ' is not in a Git repository',
-                $this->summary($report, CheckId::Repository),
-            );
-        } finally {
-            $elsewhere->remove();
-        }
-    }
-
-    #[Test]
-    public function a_git_older_than_the_requirement_is_rejected(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-        $this->givenAGitNamed("#!/bin/sh\necho \"git version 2.17.1\"\n");
-
-        $report = $this->report();
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Git));
-        self::assertStringContainsString(
-            'is older than the required ' . Ralph::MINIMUM_GIT_VERSION,
-            $this->summary($report, CheckId::Git),
-        );
-        self::assertSame(CheckOutcome::Skipped, $this->outcome($report, CheckId::Repository));
-    }
-
-    #[Test]
-    public function a_git_version_that_cannot_be_read_is_a_warning_rather_than_a_refusal(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-
-        // Vendors and distributions write their own text into the version
-        // string. Everything but the version query is the real Git, because
-        // what this test is about is that the checks after it still run.
-        $real = (new ExecutableFinder())->find('git', $this->project->root());
-        self::assertIsString($real);
-        $this->givenAGitNamed(sprintf(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"git version (a vendor build)\"; exit 0; fi\nexec %s \"$@\"\n",
-            $real,
-        ));
-
-        $report = $this->report();
-
-        self::assertSame(CheckOutcome::Warning, $this->outcome($report, CheckId::Git));
-        self::assertStringContainsString('version could not be read', $this->summary($report, CheckId::Git));
-        self::assertStringContainsString(
-            'git version (a vendor build)',
-            implode("\n", $this->details($report, CheckId::Git)),
-        );
-
-        // A warning is not a refusal: the run may start, and the checks that
-        // depend on Git are still answered.
-        self::assertTrue($report->isUsable(), $this->describe($report));
-        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Repository));
-        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::BaseReference));
-    }
-
-    #[Test]
-    public function the_git_checks_are_skipped_when_git_is_not_installed(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-        $this->environment->set('PATH', $this->project->path('empty'));
-
-        $report = $this->report();
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Git));
-        self::assertStringContainsString('was not found in PATH', $this->summary($report, CheckId::Git));
-
-        foreach ([CheckId::Repository, CheckId::BaseReference, CheckId::Identity] as $dependent) {
-            self::assertSame(CheckOutcome::Skipped, $this->outcome($report, $dependent), $this->describe($report));
-            self::assertStringContainsString('"git" check failed', $this->summary($report, $dependent));
-        }
-    }
-
-    #[Test]
     public function every_check_is_answered_even_after_one_fails(): void
     {
         $report = $this->report(['checks' => [['command' => ['no-such-program-' . bin2hex(random_bytes(4))]]]]);
 
         self::assertCount(count(CheckId::cases()), $report->results());
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Repository));
+        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Php));
         self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Checks));
-        self::assertGreaterThan(1, count($report->failures()));
+        self::assertCount(1, $report->failures());
     }
 
     #[Test]
@@ -815,7 +575,7 @@ final class PreflightTest extends TestCase
         // What the run will do instead is said before it starts, not after.
         $details = implode("\n", $this->details($report, CheckId::Checks));
         self::assertStringContainsString('"checks" is empty', $details);
-        self::assertStringContainsString('the agent\'s reported result and its commit alone', $details);
+        self::assertStringContainsString('the agent\'s own reported result alone', $details);
         self::assertStringContainsString(
             'Add the command this project is verified with under "checks"',
             implode("\n", $this->hints($report, CheckId::Checks)),
@@ -823,133 +583,6 @@ final class PreflightTest extends TestCase
 
         // A warning is not a refusal: this project may start a run.
         self::assertTrue($report->isUsable(), $this->describe($report));
-    }
-
-    #[Test]
-    public function a_preparation_command_whose_program_is_missing_fails(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-
-        $report = $this->report(['workspace' => ['prepare' => [
-            ['name' => 'dependencies', 'command' => [$this->writeProgram('tools/install'), '--frozen']],
-            ['name' => 'assets', 'command' => ['ralph-no-such-bundler', 'build']],
-        ]]]);
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Workspace));
-        self::assertStringContainsString(
-            '1 of the "workspace" setting cannot be used: assets',
-            $this->summary($report, CheckId::Workspace),
-        );
-
-        $details = implode("\n", $this->details($report, CheckId::Workspace));
-        self::assertStringContainsString('assets: "ralph-no-such-bundler build" cannot run', $details);
-        self::assertStringContainsString('dependencies: "' . $this->project->path('tools/install'), $details);
-        self::assertStringContainsString(
-            'Install "ralph-no-such-bundler"',
-            implode("\n", $this->hints($report, CheckId::Workspace)),
-        );
-    }
-
-    #[Test]
-    public function the_default_installation_is_measured_against_the_project_s_composer_json(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-
-        $settings = ['workspace' => ['prepare' => [[
-            'name' => 'dependencies',
-            'command' => [$this->writeProgram('tools/composer'), 'install', '--no-interaction'],
-        ]]]];
-
-        // A project with no composer.json: the install would resolve here and
-        // then fail in every task workspace it was sent to.
-        $report = $this->report($settings);
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Workspace));
-        self::assertStringContainsString(
-            'there is no composer.json',
-            implode("\n", $this->details($report, CheckId::Workspace)),
-        );
-        self::assertStringContainsString(
-            'never has a "vendor" of its own',
-            implode("\n", $this->hints($report, CheckId::Workspace)),
-        );
-
-        $this->project->write(
-            'composer.json',
-            (string) json_encode(['name' => 'acme/project'], JSON_THROW_ON_ERROR),
-        );
-
-        // "install" is Composer's own command rather than a script, so having
-        // the file is the whole of what can be established without running it.
-        $report = $this->report($settings);
-        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Workspace));
-        self::assertStringContainsString(
-            '1 preparation command can run',
-            $this->summary($report, CheckId::Workspace),
-        );
-    }
-
-    #[Test]
-    public function a_file_a_workspace_would_be_given_is_reported_when_it_is_not_here_to_give(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-
-        $this->project->write('.env', "APP_ENV=local\n");
-        $this->project->write('config/local.php', "<?php return [];\n");
-        symlink($this->project->path('.env'), $this->project->path('.env.local'));
-
-        $report = $this->report(['workspace' => [
-            'prepare' => [],
-            'copy' => ['.env', 'auth.json', 'config', '.env.local'],
-        ]]);
-
-        self::assertSame(CheckOutcome::Failed, $this->outcome($report, CheckId::Workspace));
-        self::assertStringContainsString(
-            '3 of the "workspace" settings cannot be used: auth.json, config, .env.local',
-            $this->summary($report, CheckId::Workspace),
-        );
-
-        $details = implode("\n", $this->details($report, CheckId::Workspace));
-        self::assertStringContainsString('copies .env', $details);
-        self::assertStringContainsString('there is no auth.json in ' . $this->project->root(), $details);
-        self::assertStringContainsString($this->project->path('config') . ' is a directory', $details);
-        self::assertStringContainsString($this->project->path('.env.local') . ' is a symbolic link', $details);
-    }
-
-    #[Test]
-    public function a_project_whose_checkout_is_already_usable_has_nothing_to_prepare(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-
-        $report = $this->report(['workspace' => ['prepare' => [], 'copy' => []]]);
-
-        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Workspace));
-        self::assertSame(
-            'task workspaces need no preparation',
-            $this->summary($report, CheckId::Workspace),
-        );
-    }
-
-    #[Test]
-    public function the_preparation_commands_are_resolved_and_not_run(): void
-    {
-        $this->givenARepository();
-        Git::commit($this->project->root());
-
-        // Running an install here would be minutes of network work in the one
-        // directory preparation must never write to: the user's own checkout.
-        $marker = $this->project->path('the-preparation-ran');
-        $program = $this->writeProgram('tools/prepare', "#!/bin/sh\ntouch '" . $marker . "'\n");
-
-        $report = $this->report(['workspace' => [
-            'prepare' => [['name' => 'dependencies', 'command' => [$program]]],
-        ]]);
-
-        self::assertSame(CheckOutcome::Passed, $this->outcome($report, CheckId::Workspace));
-        self::assertFileDoesNotExist($marker, 'preflight executed a workspace preparation command');
     }
 
     /**
@@ -962,31 +595,6 @@ final class PreflightTest extends TestCase
 
         if ($identity) {
             Git::setIdentity($this->project->root());
-        }
-    }
-
-    /**
-     * Put a program named `git` in front of the real one, and nothing else on
-     * the search path.
-     */
-    private function givenAGitNamed(string $script): void
-    {
-        $shim = $this->writeProgram('tools/git-shim/git', $script);
-
-        $this->environment->set('PATH', dirname($shim));
-    }
-
-    /**
-     * Hide the machine's own global and system Git configuration, and any
-     * identity in the environment, from the commands preflight runs.
-     */
-    private function givenNoGitConfigurationOutsideTheRepository(): void
-    {
-        $this->environment->set('GIT_CONFIG_GLOBAL', '/dev/null');
-        $this->environment->set('GIT_CONFIG_SYSTEM', '/dev/null');
-
-        foreach (['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'EMAIL'] as $variable) {
-            $this->environment->remove($variable);
         }
     }
 
@@ -1015,7 +623,6 @@ final class PreflightTest extends TestCase
     {
         $settings['agents'] ??= ['codex' => ['executable' => $this->agentProgram()]];
         $settings['checks'] ??= [['name' => 'tests', 'command' => [PHP_BINARY, '-v']]];
-        $settings['workspace'] ??= ['prepare' => [['name' => 'dependencies', 'command' => [PHP_BINARY, '-v']]]];
 
         return (new ConfigurationLoader())->fromArray(
             $settings,

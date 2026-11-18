@@ -21,13 +21,14 @@ use PHPUnit\Framework\TestCase;
  * The interruption is a real SIGINT to a real run, which is the only way to
  * produce the thing this command exists for. A test that hand-wrote an
  * `interrupted` row would be testing its own idea of what an interrupted run
- * leaves behind, and the rows, the worktree and the branch left behind are
- * exactly what the resume has to reconcile (PROJECT.md section H, item 5).
+ * leaves behind, and what it leaves behind — the rows, and whatever the stopped
+ * agent had written into the checkout — is exactly what the resume picks up
+ * from (PROJECT.md section H, item 5).
  *
  * Four properties, one per part of what a resume is for:
  *
- *  - the work is finished rather than started over — one commit for the task,
- *    not two, and the pass's attempt history kept;
+ *  - the work is finished rather than started over, with the pass's attempt
+ *    history kept;
  *  - the agent is the interrupted run's, and `--agent` naming a different one
  *    is refused with what to type instead (section H, item 6);
  *  - the iteration and time counters carry over, so the resume finishes the
@@ -56,7 +57,7 @@ final class ResumeCommandTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and a resumed run commits in a real worktree.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         if (!extension_loaded('pcntl')) {
@@ -75,10 +76,10 @@ final class ResumeCommandTest extends TestCase
 
     /**
      * The whole command, in one case: an interrupted task is finished by the
-     * agent that started it, once, and the box is ticked.
+     * agent that started it, and the box is ticked.
      */
     #[Test]
-    public function it_finishes_an_interrupted_task_without_implementing_or_committing_it_twice(): void
+    public function it_finishes_an_interrupted_task_without_starting_it_over(): void
     {
         $this->givenAnInterruptedRun();
 
@@ -91,23 +92,10 @@ final class ResumeCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertStringContainsString('resuming the interrupted run', $result->standardOutput, $result->describe());
 
-        // Reconciled before anything was worked on, and said so.
-        self::assertStringContainsString(
-            'the repository matches what the pass recorded',
-            $result->standardOutput,
-            $result->describe(),
-        );
-
-        // The task was finished, once.
+        // The task was finished, in the checkout the interrupted attempt was
+        // already working in.
         self::assertStringContainsString('- [x] ' . self::TASK, $this->project->checklist());
-
-        $branches = $this->project->taskBranches();
-        self::assertCount(1, $branches, 'The resumed pass kept the branch it owned.');
-        self::assertCount(
-            1,
-            $this->project->commitsOn($branches[0] ?? ''),
-            'A resumed task is committed once, not once per run.',
-        );
+        self::assertNotSame([], $this->project->workingTreeChanges());
 
         // The pass is the interrupted one carried on, not a second pass: its
         // attempts are cumulative and its generation is still the first.

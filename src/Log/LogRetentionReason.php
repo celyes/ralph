@@ -11,7 +11,7 @@ namespace Celyes\RalphPhp\Log;
  * it to (PROJECT.md section K, item 11), and every other outcome is a refusal
  * with one of these behind it. They are kept as an enum rather than as free
  * text for the reason the Git refusals are
- * ({@see \Celyes\RalphPhp\Git\RetentionReason}): the next item makes
+ * (the workspace retention this package used to have): the next item makes
  * `ralph logs TASK-ID` explain an absent file, and the explanation a reader
  * gets should be the same sentence the run wrote, not a second phrasing of it.
  *
@@ -44,10 +44,11 @@ enum LogRetentionReason: string
     /**
      * The completion is not durable yet.
      *
-     * The implementation is recorded but a required push has not settled, so
-     * the pass is one a resume still has work to do on. Wiping here would be
-     * wiping the logs of a task that is not finished, which is the one
-     * condition the item states as a precondition rather than as a preference.
+     * The row says completed and a planned checklist write is still
+     * outstanding, so the pass is one a resume still has work to do on. Wiping
+     * here would be wiping the logs of a task that is not finished, which is
+     * the one condition the item states as a precondition rather than as a
+     * preference.
      */
     case Unsettled = 'unsettled';
 

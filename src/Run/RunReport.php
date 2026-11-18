@@ -6,7 +6,6 @@ namespace Celyes\RalphPhp\Run;
 
 use Celyes\RalphPhp\Agent\AgentSelection;
 use Celyes\RalphPhp\Config\VerificationDrift;
-use Celyes\RalphPhp\Git\BaseCommit;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\RunRecord;
 use Celyes\RalphPhp\Tasks\TaskList;
@@ -36,7 +35,6 @@ final class RunReport
     private function __construct(
         private readonly RunRecord $run,
         private readonly AgentSelection $agent,
-        private readonly BaseCommit $base,
         private readonly TaskList $tasks,
         private readonly array $results,
         private readonly RunStop $stop,
@@ -58,7 +56,6 @@ final class RunReport
     public static function of(
         RunRecord $run,
         AgentSelection $agent,
-        BaseCommit $base,
         TaskList $tasks,
         array $results,
         RunStop $stop,
@@ -67,7 +64,6 @@ final class RunReport
         return new self(
             $run,
             $agent,
-            $base,
             $tasks,
             array_values($results),
             $stop,
@@ -94,14 +90,6 @@ final class RunReport
     public function agent(): AgentSelection
     {
         return $this->agent;
-    }
-
-    /**
-     * The commit every task branch started from.
-     */
-    public function base(): BaseCommit
-    {
-        return $this->base;
     }
 
     /**
@@ -321,7 +309,6 @@ final class RunReport
         return [
             'run' => $this->run->toArray(),
             'agent' => $this->agent->toArray(),
-            'base' => ['reference' => $this->base->reference(), 'sha' => $this->base->sha()],
             'stop' => $this->stop->toArray(),
             'stop_reason' => $this->stop->reason(),
             'completed' => $this->completedCount(),

@@ -35,7 +35,7 @@ final class PhaseTest extends TestCase
     public function the_stored_spellings_and_their_order_are_pinned(): void
     {
         self::assertSame(
-            ['preparing', 'executing', 'verifying', 'committing', 'publishing', 'finalizing'],
+            ['preparing', 'executing', 'verifying', 'finalizing'],
             Phase::values(),
         );
         self::assertSame(Phase::cases(), Phase::all());
@@ -103,19 +103,14 @@ final class PhaseTest extends TestCase
     }
 
     /**
-     * Only `committing` and `publishing` are conditional: nothing is committed
-     * for a task that was already satisfied, and nothing is pushed unless
-     * pushing is enabled. Every pass prepares, executes, verifies and
-     * finalizes.
+     * No phase is conditional since the Git ones went: every pass prepares,
+     * executes, verifies and finalizes.
      */
     #[Test]
     #[DataProvider('phases')]
-    public function the_two_conditional_phases_are_the_git_ones(Phase $phase): void
+    public function no_phase_is_skipped_by_any_configuration(Phase $phase): void
     {
-        self::assertSame(
-            in_array($phase, [Phase::Committing, Phase::Publishing], true),
-            $phase->isOptional(),
-        );
+        self::assertFalse($phase->isOptional());
     }
 
     #[Test]
@@ -265,48 +260,25 @@ final class PhaseTest extends TestCase
     }
 
     /**
-     * Reaching `committing` is what passing the checks means. A pass stopped
-     * during `verifying` has no verdict — some checks having run is not the run
-     * having passed.
+     * Reaching `finalizing` is what passing the checks means. A pass stopped
+     * during `verifying` has no verdict — some checks having run is not the set
+     * of them having passed.
      */
     #[Test]
     #[DataProvider('phases')]
-    public function verification_has_passed_from_committing_onwards(Phase $phase): void
+    public function verification_has_passed_from_finalizing_onwards(Phase $phase): void
     {
-        self::assertSame($phase->hasReached(Phase::Committing), $phase->verificationPassed());
+        self::assertSame($phase->hasReached(Phase::Finalizing), $phase->verificationPassed());
         self::assertFalse(Phase::Verifying->verificationPassed());
     }
 
     /**
-     * `committing` is excluded on purpose: a crash inside it can leave Git and
-     * the database disagreeing, and that question is answered by looking at the
-     * repository. Where this is true, resume must not create a second commit.
-     */
-    #[Test]
-    #[DataProvider('phases')]
-    public function a_commit_is_on_record_from_publishing_onwards(Phase $phase): void
-    {
-        self::assertSame($phase->hasReached(Phase::Publishing), $phase->commitRecorded());
-        self::assertFalse(Phase::Committing->commitRecorded());
-    }
-
-    /**
-     * The three already-true questions are nested, not independent: nothing is
-     * committed that was not verified, and nothing is verified without a
-     * candidate to verify.
+     * The two already-true questions are nested, not independent: nothing is
+     * verified without a candidate to verify.
      */
     #[Test]
     public function the_already_true_questions_are_nested(): void
     {
-        foreach (Phase::cases() as $phase) {
-            if (!$phase->commitRecorded()) {
-                continue;
-            }
-
-            self::assertTrue($phase->verificationPassed(), $phase->value . ' has a commit it never verified.');
-            self::assertTrue($phase->hasCandidate(), $phase->value . ' has a commit of nothing.');
-        }
-
         foreach (Phase::cases() as $phase) {
             if (!$phase->verificationPassed()) {
                 continue;
@@ -329,14 +301,14 @@ final class PhaseTest extends TestCase
     }
 
     #[Test]
-    public function an_interrupted_push_is_retried_without_the_agent(): void
+    public function an_interrupted_checklist_write_is_retried_without_the_agent(): void
     {
-        self::assertTrue(Phase::Publishing->resumesInPlace());
-        self::assertTrue(Phase::Publishing->commitRecorded());
-        self::assertFalse(Phase::Publishing->invokesAgent());
+        self::assertTrue(Phase::Finalizing->resumesInPlace());
+        self::assertTrue(Phase::Finalizing->verificationPassed());
+        self::assertFalse(Phase::Finalizing->invokesAgent());
 
         self::assertTrue(Phase::Executing->requiresNewAttempt());
-        self::assertFalse(Phase::Executing->commitRecorded());
+        self::assertFalse(Phase::Executing->verificationPassed());
     }
 
     #[Test]
@@ -381,7 +353,7 @@ final class PhaseTest extends TestCase
             Phase::fromStorage('thinking');
         } catch (StateException $refused) {
             self::assertStringContainsString('thinking', $refused->getMessage());
-            self::assertStringContainsString('publishing', implode(' ', $refused->hints()));
+            self::assertStringContainsString('finalizing', implode(' ', $refused->hints()));
 
             return;
         }
@@ -485,20 +457,14 @@ final class PhaseTest extends TestCase
 
     /**
      * Every sequence a pass can actually take, written out independently of the
-     * enum. There is no sequence that publishes without committing: a pass with
-     * no commit has nothing to push.
+     * enum. There is only one since the Git phases went: a pass prepares,
+     * invokes the agent, has the result verified and writes the box.
      *
      * @return iterable<string, array{list<string>}>
      */
     public static function sequences(): iterable
     {
-        yield 'pushing enabled' => [
-            ['preparing', 'executing', 'verifying', 'committing', 'publishing', 'finalizing'],
-        ];
-        yield 'pushing off' => [
-            ['preparing', 'executing', 'verifying', 'committing', 'finalizing'],
-        ];
-        yield 'already satisfied, no commit' => [
+        yield 'the whole of a pass' => [
             ['preparing', 'executing', 'verifying', 'finalizing'],
         ];
     }

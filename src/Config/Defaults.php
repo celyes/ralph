@@ -14,8 +14,8 @@ use Celyes\RalphPhp\Ralph;
  * disagreed, an initialised project would behave differently from a project
  * whose file omits the same setting.
  *
- * Defaults are deliberately conservative: nothing is published and no agent
- * credential is assumed to exist.
+ * Defaults are deliberately conservative: nothing outside the project's own
+ * files is touched and no agent credential is assumed to exist.
  */
 final class Defaults
 {
@@ -35,10 +35,10 @@ final class Defaults
     public const string CONTEXT_FILE = Ralph::PROJECT_DIRECTORY . '/CONTEXT.md';
 
     /**
-     * Directory the runner owns: state, logs, memory and task worktrees.
+     * Directory the runner owns: state, logs and memory.
      *
-     * Its contents are generated, git-ignored and removed by cleanup, so a
-     * configured task checklist or context file must not live here.
+     * Its contents are generated and git-ignored, so a configured task
+     * checklist or context file must not live here.
      */
     public const string RUNTIME_DIRECTORY = Ralph::PROJECT_DIRECTORY . '/runtime';
 
@@ -53,11 +53,6 @@ final class Defaults
     public const string LOGS_DIRECTORY = self::RUNTIME_DIRECTORY . '/logs';
 
     /**
-     * Isolated task workspaces, one linked Git worktree per task.
-     */
-    public const string WORKTREES_DIRECTORY = self::RUNTIME_DIRECTORY . '/worktrees';
-
-    /**
      * Append-only stream of what each run did, one JSON object per line.
      *
      * Deliberately not a configurable setting, and deliberately not under
@@ -69,10 +64,10 @@ final class Defaults
     public const string EVENTS_FILE = self::RUNTIME_DIRECTORY . '/events.jsonl';
 
     /**
-     * SQLite database holding task, attempt, Git and recovery records.
+     * SQLite database holding task, attempt and recovery records.
      *
-     * Deliberately not a configurable setting. It is the file that says which
-     * commit belongs to which task, and a project that could point two
+     * Deliberately not a configurable setting. It is the file that says what
+     * has been done to which task, and a project that could point two
      * configurations at two databases would be a project where reopening a
      * finished task cannot see that it was ever finished.
      */
@@ -93,69 +88,6 @@ final class Defaults
      * Agent used when `run --agent NAME` is not given.
      */
     public const string AGENT = 'codex';
-
-    /**
-     * Commit task branches start from. `HEAD` works in any repository,
-     * whatever its default branch is called.
-     */
-    public const string BASE_REFERENCE = 'HEAD';
-
-    /**
-     * Prefix for generated task branch names.
-     */
-    public const string BRANCH_PREFIX = 'ralph/';
-
-    /**
-     * How a run distributes its task commits across branches.
-     *
-     * Shared, because a checklist is usually one piece of work split up rather
-     * than a bag of unrelated errands: the second task wants to see what the
-     * first one did, and under the per-task mode it cannot, because its
-     * workspace is made from the run's base commit. One branch also leaves one
-     * history to review instead of a branch per ticked box.
-     *
-     * The cost is the one the mode's refusals are about: tasks of a run share a
-     * branch, so a task building on a mistake the task before it made inherits
-     * it. Projects whose checklist items really are independent — and anyone
-     * who wants each task reviewable, revertable and mergeable on its own — set
-     * `git.strategy` to {@see BranchStrategy::PerTask}.
-     *
-     * @see BranchStrategy for what the two modes are for
-     */
-    public const string BRANCH_STRATEGY = BranchStrategy::Shared->value;
-
-    /**
-     * Branch a shared-branch run commits to: derived, not fixed.
-     *
-     * Null means {@see GitSettings::sharedBranch()} appends
-     * {@see self::SHARED_BRANCH_SEGMENT} to the configured branch prefix, which
-     * keeps the shared branch inside the namespace this package already owns
-     * and makes it follow a project that renames its prefix. A project naming
-     * the branch itself writes the name here and the prefix stops applying.
-     */
-    public const ?string SHARED_BRANCH = null;
-
-    /**
-     * What the derived shared branch name ends in, after the branch prefix.
-     *
-     * `ralph/shared` under the default prefix. It says what the branch is for
-     * rather than which run made it: a name carrying a run identifier would
-     * start a new branch every run, which is the opposite of what a project
-     * asking for one branch wants, and the run that owns the branch at any
-     * moment is recorded rather than spelled.
-     */
-    public const string SHARED_BRANCH_SEGMENT = 'shared';
-
-    /**
-     * Pushing is opt-in: a loop that publishes by default would put unreviewed
-     * work on a shared remote.
-     */
-    public const bool PUSH_ENABLED = false;
-
-    /**
-     * Remote used when pushing is enabled.
-     */
-    public const string PUSH_REMOTE = 'origin';
 
     /**
      * Tasks a single run may process.
@@ -218,16 +150,6 @@ final class Defaults
     public const int CHECK_TIMEOUT_SECONDS = 600;
 
     /**
-     * Seconds a single workspace preparation command may run.
-     *
-     * Longer than a verification command, and for a different kind of work: an
-     * install in a new worktree has a cold Composer cache and goes to the
-     * network, where a check is the project's own suite on dependencies that
-     * are already there.
-     */
-    public const int PREPARE_TIMEOUT_SECONDS = 900;
-
-    /**
      * Built-in agent definitions.
      *
      * Both ship with the adapter and executable named after the agent and no
@@ -284,40 +206,6 @@ final class Defaults
     }
 
     /**
-     * Commands assumed to prepare a new task worktree: none.
-     *
-     * Empty, for the reason {@see self::checks()} is. A linked worktree holds
-     * the repository's tracked files and nothing else, so a PHP project whose
-     * checks need `vendor/` does want `composer install` here — but that is a
-     * fact about the project, not about Ralph PHP, and assuming it made the
-     * package refuse to start anywhere there was no `composer.json` and run a
-     * minutes-long install per task everywhere there was.
-     *
-     * A project says what its worktrees need by listing it; a project whose
-     * checkout is usable as Git leaves it says nothing and nothing is run.
-     *
-     * @return list<array<string, mixed>>
-     */
-    public static function prepare(): array
-    {
-        return [];
-    }
-
-    /**
-     * Files copied into a new task worktree from the controlling checkout.
-     *
-     * Empty: a copied file is one that exists on this machine and in no commit,
-     * so only the project knows whether it has any, and guessing at `.env`
-     * would make a run depend on a file the package invented a need for.
-     *
-     * @return list<string>
-     */
-    public static function copies(): array
-    {
-        return [];
-    }
-
-    /**
      * The complete default configuration, in the file's own layout.
      *
      * @return array<string, mixed>
@@ -330,20 +218,6 @@ final class Defaults
             'agent' => self::AGENT,
             'agents' => self::agents(),
             'checks' => self::checks(),
-            'workspace' => [
-                'prepare' => self::prepare(),
-                'copy' => self::copies(),
-            ],
-            'git' => [
-                'base' => self::BASE_REFERENCE,
-                'branch_prefix' => self::BRANCH_PREFIX,
-                'strategy' => self::BRANCH_STRATEGY,
-                'shared_branch' => self::SHARED_BRANCH,
-                'push' => [
-                    'enabled' => self::PUSH_ENABLED,
-                    'remote' => self::PUSH_REMOTE,
-                ],
-            ],
             'limits' => [
                 'iterations' => self::ITERATIONS,
                 'attempts_per_task' => self::ATTEMPTS_PER_TASK,

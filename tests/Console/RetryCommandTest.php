@@ -43,7 +43,7 @@ final class RetryCommandTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and a retried task commits in a real worktree.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = LoopProject::create();
@@ -80,18 +80,15 @@ final class RetryCommandTest extends TestCase
         );
         self::assertStringContainsString('- [x] ' . self::TASK, $this->project->checklist());
 
-        // The same pass, carried on: its earlier attempt is still counted, its
-        // generation is still the first, and it owns one branch with one commit.
+        // The same pass, carried on: its earlier attempt is still counted and
+        // its generation is still the first.
         $after = $this->pass();
 
         self::assertSame(LifecycleState::Completed, $after?->state());
         self::assertSame(2, $after->attempts(), 'The attempt that failed is preserved, not replaced.');
         self::assertTrue($after->generation()->isFirst());
         self::assertSame($before->generation()->number(), $after->generation()->number());
-
-        $branches = $this->project->taskBranches();
-        self::assertCount(1, $branches);
-        self::assertCount(1, $this->project->commitsOn($branches[0] ?? ''));
+        self::assertNotSame([], $this->project->workingTreeChanges());
     }
 
     /**

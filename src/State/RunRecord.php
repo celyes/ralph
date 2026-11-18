@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\State;
 
 use Celyes\RalphPhp\Agent\AgentSource;
-use Celyes\RalphPhp\Config\BranchStrategy;
 use Celyes\RalphPhp\Config\Defaults;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Exception\ConfigurationException;
@@ -16,7 +15,7 @@ use InvalidArgumentException;
  *
  * A run is the unit the limits of PROJECT.md section H are counted against and
  * the unit `resume` reconciles. It exists mainly so that the things a run must
- * not change halfway through — the agent, the checks, the base reference, the
+ * not change halfway through — the agent, the checks, the
  * task file — are written down once, at the start, where a later phase can read
  * them instead of asking the configuration again.
  *
@@ -48,9 +47,6 @@ final class RunRecord
         private readonly array $configuration,
         private readonly array $checks,
         private readonly string $tasksPath,
-        private readonly string $baseReference,
-        private readonly ?string $baseSha,
-        private readonly ?string $establishedSharedBranch,
         private readonly ?string $host,
         private readonly ?int $pid,
         private readonly ?int $resumedFrom,
@@ -92,9 +88,6 @@ final class RunRecord
             self::decodeMap(self::text($row, 'configuration')),
             self::decodeList(self::text($row, 'checks')),
             self::text($row, 'tasks_path'),
-            self::text($row, 'base_reference'),
-            self::nullableText($row, 'base_sha'),
-            self::nullableText($row, 'shared_branch'),
             self::nullableText($row, 'host'),
             isset($row['pid']) ? (int) $row['pid'] : null,
             isset($row['resumed_from']) ? (int) $row['resumed_from'] : null,
@@ -118,7 +111,8 @@ final class RunRecord
     }
 
     /**
-     * The identifier a person reads and a commit trailer carries.
+     * The identifier a person reads, and what every line of the event stream
+     * is correlated by.
      */
     public function runId(): string
     {
@@ -213,107 +207,6 @@ final class RunRecord
     }
 
     /**
-     * The branch strategy the run was started under.
-     *
-     * Read out of the frozen settings rather than out of the live
-     * configuration, for the reason the whole snapshot exists: a project that
-     * switches modes while a run is interrupted must not move the pass that is
-     * halfway through onto a different branch, and `resume` has to be able to
-     * see the mode the commit it is finishing was going to land under.
-     *
-     * A run recorded before the setting existed has no `git.strategy` in its
-     * snapshot and reads as {@see BranchStrategy::PerTask}, which is what it
-     * was: the mode is derived from what the run stored, never from what the
-     * file says today.
-     */
-    public function branchStrategy(): BranchStrategy
-    {
-        $git = $this->configuration['git'] ?? null;
-        $value = is_array($git) ? ($git['strategy'] ?? null) : null;
-
-        if (!is_string($value)) {
-            return BranchStrategy::PerTask;
-        }
-
-        return BranchStrategy::parse($value) ?? BranchStrategy::PerTask;
-    }
-
-    /**
-     * The branch a shared-branch run commits to, as the run recorded it.
-     *
-     * The established branch when the run has one — the name it created or
-     * validated at its start, written to its row once ({@see
-     * \Celyes\RalphPhp\State\RunStore::recordSharedBranch()}, PROJECT.md
-     * section K, item 3). That column is the run's identity for the rest of its
-     * life, including across a resume: `git.shared_branch` and
-     * `git.branch_prefix` are both settings a user may edit between an
-     * interrupted run and the resume that finishes it, and a resume that
-     * derived the name again would continue on a second branch while the first
-     * one still held the commits.
-     *
-     * Otherwise what the run's own frozen configuration names, which is the
-     * answer for the window before the branch has been established and for a
-     * row written by a build that had no column for it.
-     *
-     * Null in per-task mode, and null for a run whose snapshot predates the
-     * setting: in both cases there is no one branch to name, and a derived one
-     * would be this build's answer rather than the run's.
-     */
-    public function sharedBranch(): ?string
-    {
-        if (!$this->branchStrategy()->isShared()) {
-            return null;
-        }
-
-        if ($this->establishedSharedBranch !== null && trim($this->establishedSharedBranch) !== '') {
-            return trim($this->establishedSharedBranch);
-        }
-
-        $git = $this->configuration['git'] ?? null;
-        $configured = is_array($git) ? ($git['shared_branch'] ?? null) : null;
-
-        if (is_string($configured) && trim($configured) !== '') {
-            return trim($configured);
-        }
-
-        $prefix = is_array($git) ? ($git['branch_prefix'] ?? null) : null;
-
-        if (!is_string($prefix)) {
-            return null;
-        }
-
-        return trim($prefix) . Defaults::SHARED_BRANCH_SEGMENT;
-    }
-
-    /**
-     * The shared branch the run actually established, as its row holds it.
-     *
-     * The column alone, with no derivation behind it: null means this run has
-     * not reached the point of creating or validating a branch, which is what
-     * tells a run at its start from one already committing to a branch.
-     * {@see self::sharedBranch()} is what a caller that only needs a name
-     * should ask for.
-     */
-    public function establishedSharedBranch(): ?string
-    {
-        $recorded = $this->establishedSharedBranch;
-
-        if ($recorded === null || trim($recorded) === '') {
-            return null;
-        }
-
-        return trim($recorded);
-    }
-
-    /**
-     * Whether the run has established the branch it commits to.
-     */
-    public function hasEstablishedSharedBranch(): bool
-    {
-        return $this->establishedSharedBranch() !== null;
-    }
-
-    /**
      * The verification commands the run froze at its start.
      *
      * The stored rows. {@see verification()} is what a caller that intends to
@@ -369,20 +262,6 @@ final class RunRecord
     public function tasksPath(): string
     {
         return $this->tasksPath;
-    }
-
-    public function baseReference(): string
-    {
-        return $this->baseReference;
-    }
-
-    /**
-     * The commit the reference resolved to, or null when the run stopped before
-     * it could be resolved.
-     */
-    public function baseSha(): ?string
-    {
-        return $this->baseSha;
     }
 
     public function host(): ?string
@@ -529,12 +408,11 @@ final class RunRecord
     public function describe(): string
     {
         $described = sprintf(
-            '%s %s with %s, %s from %s',
+            '%s %s with %s, %s',
             $this->runId,
             $this->state->value,
             $this->agent->describe(),
             $this->tasksTaken(),
-            $this->baseReference,
         );
 
         if ($this->stopReason !== null) {
@@ -578,11 +456,7 @@ final class RunRecord
             'agent' => $this->agent->name(),
             'adapter' => $this->agent->adapter(),
             'agent_source' => $this->agentSource->value,
-            'branch_strategy' => $this->branchStrategy()->value,
-            'shared_branch' => $this->sharedBranch(),
             'checks' => $this->checkNames(),
-            'base_reference' => $this->baseReference,
-            'base_sha' => $this->baseSha,
             // Null for a deliberately new run, the predecessor's identifier
             // for a continuation: the one field that tells the two apart
             // (section H, item 3).

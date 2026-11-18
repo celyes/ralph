@@ -123,16 +123,16 @@ final class LogsCommand extends ProjectCommand
             '',
             '  Worker output is written to .ralph/runtime/logs/TASK-ID[-N]/, one file per',
             '  attempt, created readable only by you. "ralph init" adds the runtime',
-            '  directory to this project\'s ignore rules, so nothing here is committed or',
-            '  pushed. Nothing trims or rotates them.',
+            '  directory to this project\'s ignore rules, so nothing here is committed by',
+            '  accident. Nothing trims or rotates them.',
             '',
             '  With "logs": {"wipe_on_success": true} in .ralph/config.json, a task\'s own',
-            '  log files are deleted once its commit, its required push, its state and its',
-            '  checklist write are all durable. A log removed that way is reported here as',
-            '  wiped, with the moment it went, rather than as a file that is missing. The',
-            '  logs of a failed, blocked or interrupted task are kept whatever that setting',
-            '  says, and so is everything a completion rests on: the commit, the check',
-            '  results above, a preserved diff and the completion evidence.',
+            '  log files are deleted once its checks, its state and its checklist write are',
+            '  all durable. A log removed that way is reported here as wiped, with the',
+            '  moment it went, rather than as a file that is missing. The logs of a failed,',
+            '  blocked or interrupted task are kept whatever that setting says, and so is',
+            '  everything a completion rests on: the check results above and the completion',
+            '  evidence.',
             '',
             '  A log is a verbatim copy of what the agent printed, so it holds whatever the',
             '  agent chose to print — source code, file contents, and anything it echoed',
@@ -233,13 +233,6 @@ final class LogsCommand extends ProjectCommand
         $style = $output->style();
 
         $output->line($style->state($record->state(), $record->describe()));
-        $output->line($style->muted(sprintf(
-            '  base %s, %s',
-            substr($record->baseSha(), 0, 12),
-            $record->hasCommit()
-                ? 'commit ' . substr((string) $record->commitSha(), 0, 12)
-                : ($record->isNoChange() ? 'verified with no change needed' : 'no commit'),
-        )));
 
         $wipedAt = $record->logsWipedAt();
 
@@ -252,7 +245,7 @@ final class LogsCommand extends ProjectCommand
                 $wipedAt->describe(),
             )));
             $output->line('  ' . $style->muted(
-                '  the commit, the checks below and the completion evidence were kept.',
+                '  the checks below and the completion evidence were kept.',
             ));
         }
 
@@ -388,7 +381,7 @@ final class LogsCommand extends ProjectCommand
         // which the next run will finish. Still not a warning: the file went
         // where the user asked it to go, and the account of why it is absent
         // belongs beside it rather than in whatever they go on to check next.
-        if ($retention->wipesOnSuccess() && $record->isComplete() && $record->isFinalizable()) {
+        if ($retention->wipesOnSuccess() && $record->isComplete()) {
             return $style->muted(sprintf(
                 'worker log %s was wiped; this pass\'s wipe has not finished, and the next run completes it.',
                 $path,

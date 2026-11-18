@@ -14,7 +14,6 @@ use Celyes\RalphPhp\State\ChecklistUpdateState;
 use Celyes\RalphPhp\State\Database;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\GenerationStore;
-use Celyes\RalphPhp\State\PushResult;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\State\TaskStore;
 use Celyes\RalphPhp\Support\FrozenClock;
@@ -76,8 +75,8 @@ final class ChecklistStoreTest extends TestCase
         $this->database->execute(
             'INSERT INTO runs
                  (run_id, state, agent, adapter, agent_source, agent_settings, configuration,
-                  checks, tasks_path, base_reference, started_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                  checks, tasks_path, started_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 'RUN-0001',
                 'running',
@@ -88,7 +87,6 @@ final class ChecklistStoreTest extends TestCase
                 '{}',
                 '[]',
                 '.ralph/tasks.md',
-                'main',
                 '2026-11-01T09:30:00+00:00',
                 '2026-11-01T09:30:00+00:00',
             ],
@@ -576,16 +574,10 @@ final class ChecklistStoreTest extends TestCase
             $generation ?? TaskGeneration::first($snapshot->id()),
             $snapshot,
             AgentRecord::ofDefinition(AgentDefinition::builtIn('codex')),
-            'main',
-            'a1b2c3d4e5f6',
-            PushResult::notRequired(),
             $this->run,
         );
 
-        return $this->generations->recordCommit(
-            $this->generations->beginAttempt($pass),
-            str_repeat('f', 40),
-        );
+        return $this->generations->beginAttempt($pass);
     }
 
     private function plan(

@@ -12,9 +12,8 @@ namespace Celyes\RalphPhp\Preflight;
  * single outcome rather than on rendered text.
  *
  * The order is the order of dependency: the runtime before the tools, the tools
- * before the repository, the repository before what is read out of it, and the
- * agent last, with the two things a run cannot substitute for — the workspace a
- * task is implemented in, and the commands that decide whether it worked.
+ * before what is asked of them, and last the commands that decide whether a
+ * task worked.
  */
 enum CheckId: string
 {
@@ -29,29 +28,6 @@ enum CheckId: string
     case Extensions = 'extensions';
 
     /**
-     * The `git` executable and its version.
-     */
-    case Git = 'git';
-
-    /**
-     * That the project directory is the root of a usable, non-bare Git
-     * working tree Ralph PHP may write to.
-     */
-    case Repository = 'repository';
-
-    /**
-     * That the configured `git.base` names a commit task branches can start
-     * from.
-     */
-    case BaseReference = 'base';
-
-    /**
-     * That Git can determine an author and committer identity, without which
-     * no task commit can be created.
-     */
-    case Identity = 'identity';
-
-    /**
      * That the selected agent's executable exists and its declared
      * authentication variables are present.
      */
@@ -62,13 +38,6 @@ enum CheckId: string
      * was written for.
      */
     case AgentVersion = 'agent-version';
-
-    /**
-     * That a new task worktree could be prepared: the `workspace.prepare`
-     * commands name programs that exist, and the files `workspace.copy` lists
-     * are on this machine to be copied.
-     */
-    case Workspace = 'workspace';
 
     /**
      * That every configured verification command names a program that could
@@ -96,8 +65,6 @@ enum CheckId: string
     public function dependsOn(): array
     {
         return match ($this) {
-            self::Repository, self::Identity => [self::Git],
-            self::BaseReference => [self::Git, self::Repository],
             self::AgentVersion => [self::Agent],
             default => [],
         };

@@ -231,25 +231,6 @@ final class RunStoreTest extends TestCase
         self::assertSame($failed->runId(), $resumed->resumedFromRunId());
     }
 
-    /**
-     * A resume continues from the commit the interrupted run branched from,
-     * unless it is given another: the work it is continuing is on branches cut
-     * from that one.
-     */
-    #[Test]
-    public function a_resume_keeps_the_base_commit_the_interrupted_run_recorded(): void
-    {
-        $first = $this->runs->open($this->agent(), $this->configuration(), 'a1b2c3d4e5f6');
-
-        $second = $this->runs->resume(
-            $this->runs->interrupt($first, 'Ctrl+C'),
-            $this->agent(),
-            $this->configuration(),
-        );
-
-        self::assertSame('a1b2c3d4e5f6', $second->baseSha());
-    }
-
     #[Test]
     public function a_new_run_after_a_completed_one_starts_the_counters_again(): void
     {
@@ -345,7 +326,7 @@ final class RunStoreTest extends TestCase
 
         self::assertStringContainsString('2 tasks continuing ' . $first->runId(), $described);
         self::assertStringContainsString('(5 in all)', $described);
-        self::assertStringContainsString('3 tasks from HEAD', $first->describe());
+        self::assertStringContainsString('3 tasks', $first->describe());
         self::assertStringNotContainsString('continuing', $first->describe());
 
         self::assertSame($first->runId(), $second->toArray()['resumed_from']);
@@ -361,7 +342,7 @@ final class RunStoreTest extends TestCase
     {
         $run = $this->spent($this->runs->open($this->agent(), $this->configuration()), 1, 60);
 
-        self::assertStringContainsString('1 task from HEAD', $run->describe());
+        self::assertStringContainsString('1 task', $run->describe());
     }
 
     /**
@@ -416,130 +397,6 @@ final class RunStoreTest extends TestCase
         self::assertNull($open->stopReason());
         self::assertNull($open->stopAction());
         self::assertNull($open->stopKind());
-    }
-
-    /**
-     * The mode is read out of the snapshot, so a project that switches it
-     * mid-run cannot move the commits a run already placed.
-     */
-    #[Test]
-    public function a_run_records_the_branch_strategy_it_was_started_under(): void
-    {
-        $run = $this->runs->open($this->agent(), $this->configuration());
-
-        // The default, which is the shared branch derived from the prefix.
-        self::assertSame(BranchStrategy::Shared, $run->branchStrategy());
-        self::assertSame('shared', $run->toArray()['branch_strategy']);
-        self::assertSame('ralph/shared', $run->sharedBranch());
-        self::assertSame('ralph/shared', $run->toArray()['shared_branch']);
-
-        $perTask = $this->runs->open($this->agent(), $this->configuration(['strategy' => 'per-task']));
-
-        self::assertSame(BranchStrategy::PerTask, $perTask->branchStrategy());
-        self::assertSame('per-task', $perTask->toArray()['branch_strategy']);
-        // No one branch to name in per-task mode, so none is reported.
-        self::assertNull($perTask->sharedBranch());
-        self::assertNull($perTask->toArray()['shared_branch']);
-
-        $shared = $this->runs->open($this->agent(), $this->configuration([
-            'strategy' => 'shared',
-            'shared_branch' => 'release/october',
-        ]));
-
-        self::assertSame(BranchStrategy::Shared, $this->runs->get($shared->rowId())->branchStrategy());
-        self::assertSame('release/october', $this->runs->get($shared->rowId())->sharedBranch());
-    }
-
-    #[Test]
-    public function a_shared_run_that_named_no_branch_reports_the_one_derived_from_its_prefix(): void
-    {
-        $run = $this->runs->open($this->agent(), $this->configuration([
-            'strategy' => 'shared',
-            'branch_prefix' => 'agent/',
-        ]));
-
-        self::assertSame('agent/shared', $this->runs->get($run->rowId())->sharedBranch());
-    }
-
-    /**
-     * The identity of section K, item 3: the branch is established once and
-     * then belongs to the run, whatever the settings say afterwards.
-     */
-    #[Test]
-    public function a_shared_run_keeps_the_branch_it_established_when_the_setting_changes_under_it(): void
-    {
-        $run = $this->runs->open($this->agent(), $this->configuration([
-            'strategy' => 'shared',
-            'shared_branch' => 'release/october',
-        ]));
-
-        self::assertFalse($run->hasEstablishedSharedBranch());
-        self::assertNull($run->establishedSharedBranch());
-
-        $established = $this->runs->recordSharedBranch($run, 'release/october');
-
-        self::assertTrue($established->hasEstablishedSharedBranch());
-        self::assertSame('release/october', $established->establishedSharedBranch());
-
-        // What a resume reads: the row, not a name derived again from a file
-        // that has been edited since.
-        $this->database->execute(
-            'UPDATE runs SET configuration = ? WHERE run_id = ?',
-            ['{"git":{"strategy":"shared","shared_branch":"release/november","branch_prefix":"ralph/"}}', $run->runId()],
-        );
-
-        self::assertSame('release/october', $this->runs->get($run->rowId())->sharedBranch());
-    }
-
-    /**
-     * Recording the same branch again is what a resume does: it validates the
-     * branch before continuing and must be allowed to arrive at the same answer.
-     */
-    #[Test]
-    public function a_shared_branch_may_be_recorded_again_but_never_replaced(): void
-    {
-        $run = $this->runs->recordSharedBranch(
-            $this->runs->open($this->agent(), $this->configuration(['strategy' => 'shared'])),
-            'ralph/shared',
-        );
-
-        self::assertSame('ralph/shared', $this->runs->recordSharedBranch($run, 'ralph/shared')->sharedBranch());
-
-        $this->expectException(StateException::class);
-        $this->expectExceptionMessage('already commits to the shared branch "ralph/shared"');
-
-        $this->runs->recordSharedBranch($run, 'ralph/other');
-    }
-
-    #[Test]
-    public function a_blank_shared_branch_is_refused(): void
-    {
-        $run = $this->runs->open($this->agent(), $this->configuration(['strategy' => 'shared']));
-
-        $this->expectException(StateException::class);
-        $this->expectExceptionMessage('blank shared branch');
-
-        $this->runs->recordSharedBranch($run, '  ');
-    }
-
-    /**
-     * A run from a release before the setting existed: its snapshot has no
-     * `git.strategy`, and it was per task, which is what it must read as.
-     */
-    #[Test]
-    public function a_run_recorded_before_the_setting_existed_reads_as_per_task(): void
-    {
-        $run = $this->runs->open($this->agent(), $this->configuration());
-
-        $this->database->execute(
-            'UPDATE runs SET configuration = ? WHERE run_id = ?',
-            ['{"git":{"base":"HEAD","branch_prefix":"ralph/"}}', $run->runId()],
-        );
-
-        $read = $this->runs->get($run->rowId());
-
-        self::assertSame(BranchStrategy::PerTask, $read->branchStrategy());
-        self::assertNull($read->sharedBranch());
     }
 
     /**

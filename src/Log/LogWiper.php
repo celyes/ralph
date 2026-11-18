@@ -7,6 +7,7 @@ namespace Celyes\RalphPhp\Log;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\LogSettings;
 use Celyes\RalphPhp\Exception\StateException;
+use Celyes\RalphPhp\State\ChecklistStore;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\GenerationStore;
 use Celyes\RalphPhp\State\LifecycleState;
@@ -29,24 +30,23 @@ use Celyes\RalphPhp\Support\Secrets;
  *    full of generated data is still somewhere a person may have put something,
  *    and a wipe that deleted by extension would be the one that found their
  *    note.
- *  - **State, commit and completion metadata are retained.** Nothing here
- *    writes to a row except the one timestamp, and the files that are evidence
- *    rather than output — `attempt-NN-completed.md`, `attempt-NN-satisfied.md`,
- *    `attempt-NN-staged.diff` — are not eligible and sit in the same directory
- *    untouched. The trade the setting offers is output for disk, not the
- *    account of what a task did.
+ *  - **State and completion metadata are retained.** Nothing here writes to a
+ *    row except the one timestamp, and the files that are evidence rather than
+ *    output — `attempt-NN-completed.md` — are not eligible and sit in the same
+ *    directory untouched. The trade the setting offers is output for disk, not
+ *    the account of what a task did.
  *  - **Safe to retry after an interruption.** Deleting a log is idempotent and
  *    a half-wiped directory is not ambiguous — every file left in it is still a
- *    log — so, unlike a part-removed worktree, there is nothing here that needs
- *    a mark written before the act. The timestamp goes on the row only once
+ *    log — so there is nothing here that needs a mark written before the
+ *    act. The timestamp goes on the row only once
  *    nothing eligible is left, which makes the two readings exact: a row with
  *    one has nothing of its own to delete, and a row without one is looked at
  *    again. A wipe stopped half way therefore costs a retry, not a decision.
  *
  * **It wipes nothing a reader would want.** A pass is eligible only when it is
- * `completed` and its publication has settled, which at the point the runner
- * calls this means its commit, its required push, its row and the write to the
- * user's checklist are all durable. Everything else — failed, blocked,
+ * `completed` and owes no checklist write, which at the point the runner calls
+ * this means its checks, its row and the write to the user's checklist are all
+ * durable. Everything else — failed, blocked,
  * interrupted, still running — keeps every byte it wrote, which is section K,
  * item 12's promise and is enforced here rather than at the call site so that a
  * later caller cannot opt out of it. The `running` case is not only a matter of
@@ -75,6 +75,7 @@ final class LogWiper
         private readonly LogDirectory $logs,
         private readonly LogSettings $settings,
         private readonly GenerationStore $generations,
+        private readonly ?ChecklistStore $checklists = null,
     ) {
     }
 
@@ -84,12 +85,14 @@ final class LogWiper
     public static function forProject(
         Configuration $configuration,
         GenerationStore $generations,
+        ?ChecklistStore $checklists = null,
         ?Secrets $secrets = null,
     ): self {
         return new self(
             LogDirectory::in($configuration->projectRoot(), $secrets),
             $configuration->logs(),
             $generations,
+            $checklists,
         );
     }
 
@@ -97,9 +100,9 @@ final class LogWiper
      * Delete one pass's eligible logs, or say why they are being kept.
      *
      * @param GenerationRecord $record the row **as the store now holds it**:
-     *        whether a pass's logs may go turns on the pass being completed and
-     *        its publication settled, and a caller's older copy would be
-     *        answering about a moment before either became true
+     *        whether a pass's logs may go turns on the pass being completed,
+     *        and a caller's older copy would be answering about a moment before
+     *        that became true
      * @param OutputSink|null $sink where the outcome is noted, when there is
      *        one worth noting. Usually the terminal and not the attempt's log,
      *        for the obvious reason: the file a note about the deletion would
@@ -160,12 +163,14 @@ final class LogWiper
             return LogRetentionReason::Unsuccessful;
         }
 
-        // A completed pass has settled its publication by construction, since
-        // the box is not ticked until it has. Asked rather than assumed, for
-        // the reason every other condition at the end of a pass is: the one
-        // irreversible thing this package does to its own records should not
-        // depend on nobody ever reordering the code above it.
-        if (!$record->isFinalizable()) {
+        // A completed pass has its checklist write settled by construction,
+        // since the row is not completed until the box is written. Asked rather
+        // than assumed, for the reason every other condition at the end of a
+        // pass is: the one irreversible thing this package does to its own
+        // records should not depend on nobody ever reordering the code above
+        // it. A caller with no checklist store to ask is taken at its word
+        // about the state, which is the one fact the row itself carries.
+        if ($this->checklists?->outstandingFor($record) !== null) {
             return LogRetentionReason::Unsettled;
         }
 

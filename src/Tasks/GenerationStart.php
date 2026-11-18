@@ -53,17 +53,6 @@ enum GenerationStart: string
     }
 
     /**
-     * Whether this pass needs a branch created for it.
-     *
-     * False only for a continuation, which inherits the open generation's
-     * branch; both of the others start from the configured base reference.
-     */
-    public function startsNewBranch(): bool
-    {
-        return $this !== self::Continued;
-    }
-
-    /**
      * Whether attempt counters carry over from what is already recorded.
      *
      * A continuation keeps counting towards the per-task attempt limit of

@@ -70,7 +70,7 @@ final class DurableOutcomeTest extends TestCase
     public function the_outcome_is_read_back_out_of_the_row(): void
     {
         $pass = $this->givenAPass();
-        $this->journal->generations()->complete($this->givenACommit($pass));
+        $this->journal->generations()->complete($pass);
 
         // What the loop is holding: the row as it stood before it was closed.
         $durable = DurableOutcome::ofTask($this->journal, $this->resultFor($pass));
@@ -93,7 +93,7 @@ final class DurableOutcomeTest extends TestCase
     public function a_row_that_agrees_reports_no_claim(): void
     {
         $pass = $this->givenAPass();
-        $completed = $this->journal->generations()->complete($this->givenACommit($pass));
+        $completed = $this->journal->generations()->complete($pass);
 
         $durable = DurableOutcome::ofTask($this->journal, $this->resultFor($completed, 'completed'));
 
@@ -109,12 +109,11 @@ final class DurableOutcomeTest extends TestCase
     public function it_publishes_what_the_finalization_rests_on(): void
     {
         $pass = $this->givenAPass();
-        $committed = $this->givenACommit($pass);
-        $this->journal->generations()->complete($committed);
+        $this->journal->generations()->complete($pass);
 
-        $published = DurableOutcome::ofTask($this->journal, $this->resultFor($committed))->toArray();
+        $published = DurableOutcome::ofTask($this->journal, $this->resultFor($pass))->toArray();
 
-        self::assertSame(str_repeat('b', 40), $published['commit']);
+        self::assertSame('completed', $published['state']);
         self::assertFalse($published['checklist_write_owed']);
         self::assertNotNull($published['finished_at']);
     }
@@ -238,9 +237,6 @@ final class DurableOutcomeTest extends TestCase
             TaskGeneration::first($snapshot->id()),
             $snapshot,
             AgentRecord::ofDefinition(AgentDefinition::builtIn('codex')),
-            'HEAD',
-            str_repeat('a', 40),
-            null,
             $this->givenARun()->rowId(),
         );
 
@@ -256,15 +252,6 @@ final class DurableOutcomeTest extends TestCase
         return TaskResult::of($this->task(), GenerationRecord::fromRow(
             $this->row($record->slug(), $claimed),
         ));
-    }
-
-    /**
-     * The commit a pass has to have before the store will let it complete,
-     * which is the gate of section G, item 7 and not this item's to restate.
-     */
-    private function givenACommit(GenerationRecord $pass): GenerationRecord
-    {
-        return $this->journal->generations()->recordCommit($pass, str_repeat('b', 40));
     }
 
     /**
@@ -286,16 +273,6 @@ final class DurableOutcomeTest extends TestCase
             'agent' => 'codex',
             'adapter' => 'codex',
             'agent_settings' => '{"executable":"codex"}',
-            'base_reference' => 'HEAD',
-            'base_sha' => str_repeat('a', 40),
-            'branch' => null,
-            'commit_sha' => null,
-            'no_change' => 0,
-            'push_state' => 'not_required',
-            'push_remote' => null,
-            'push_error' => null,
-            'worktree_path' => null,
-            'owns_worktree' => 0,
             'blocker' => null,
             'started_at' => '2026-11-09T10:00:00+00:00',
             'updated_at' => '2026-11-09T10:01:00+00:00',
@@ -326,8 +303,8 @@ final class DurableOutcomeTest extends TestCase
             $this->database->execute(
                 'INSERT INTO runs
                      (run_id, state, agent, adapter, agent_source, agent_settings, configuration,
-                      checks, tasks_path, base_reference, started_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                      checks, tasks_path, started_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [
                     'RUN-0001',
                     'running',
@@ -338,7 +315,6 @@ final class DurableOutcomeTest extends TestCase
                     '{}',
                     '[]',
                     '.ralph/tasks.md',
-                    'HEAD',
                     '2026-11-09T10:00:00+00:00',
                     '2026-11-09T10:00:00+00:00',
                 ],

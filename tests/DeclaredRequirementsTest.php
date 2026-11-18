@@ -78,15 +78,6 @@ final class DeclaredRequirementsTest extends TestCase
     }
 
     #[Test]
-    public function the_minimum_git_version_is_a_version_number(): void
-    {
-        // Preflight compares against it with version_compare(), and reports it
-        // to the user as the requirement, so it has to be a plain three-part
-        // version rather than a constraint.
-        self::assertMatchesRegularExpression('/^\d+\.\d+\.\d+$/', Ralph::MINIMUM_GIT_VERSION);
-    }
-
-    #[Test]
     public function the_version_is_a_released_version_number(): void
     {
         // A release is tagged `v` + this constant, so the two can only agree if

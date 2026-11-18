@@ -35,7 +35,7 @@ use Celyes\RalphPhp\Tasks\TaskList;
  * checklist states them, because that is the order they are worked in and the
  * order the user is reading them in. Each row carries what the state store has
  * against that task: the pass's state and phase, how many attempts it has had,
- * the branch it owns, the commit it produced and how its checks came out.
+ * and how its checks came out.
  *
  * **The counts come before the detail, and the checks come from the store.**
  * How much of the checklist is done and how much is left is the first thing
@@ -45,7 +45,7 @@ use Celyes\RalphPhp\Tasks\TaskList;
  * claims. The run section names the frozen checks; the task rows say how they
  * came out.
  *
- * **A checked box and a verified commit are not the same claim.** An item the
+ * **A checked box and a verified task are not the same claim.** An item the
  * user ticked by hand is shown as theirs and an item a run carried through is
  * shown as the runner's (PROJECT.md section C, item 5), because "done" with no
  * commit behind it is exactly the thing this package must not pass off as its
@@ -100,7 +100,7 @@ final class StatusCommand extends ProjectCommand
 
     public function summary(): string
     {
-        return 'Display tasks, IDs, state, attempts, branches, and commit references.';
+        return 'Display tasks, IDs, state, attempts and check results.';
     }
 
     /**
@@ -124,19 +124,19 @@ final class StatusCommand extends ProjectCommand
             '  the configuration in force, the checklist it reads, and the selected agent',
             '  how many tasks are completed and how many remain',
             '  the latest run: its identifier, state, agent, limits used, and why it stopped',
-            '  every task in checklist order, with its identifier, state, phase, attempts,',
-            '  branch, commit, and what its verification commands decided',
+            '  every task in checklist order, with its identifier, state, phase, attempts',
+            '  and what its verification commands decided',
             '',
             'A task checked off by a verified run is reported as the runner\'s; one ticked by',
-            'hand is reported as yours, because a box with no commit behind it is not work',
+            'hand is reported as yours, because a box with no checks behind it is not work',
             'this package can vouch for.',
             '',
             'Options:',
             '',
-            '  --json  Print the same report as one JSON document, with a schema version,',
-            '          unabbreviated commit SHAs and full task descriptions, for a script',
-            '          to read. Problems still go to standard error, so the document on',
-            '          standard output stays machine-readable.',
+            '  --json  Print the same report as one JSON document, with a schema version',
+            '          and full task descriptions, for a script to read. Problems still go',
+            '          to standard error, so the document on standard output stays',
+            '          machine-readable.',
             '',
             'Nothing is written and no agent is started, so this is safe to run at any time,',
             'including while a run is going on in another terminal.',
@@ -314,10 +314,6 @@ final class StatusCommand extends ProjectCommand
             'phase' => $record?->phase()?->value,
             'generation' => $record?->generation()->number(),
             'attempts' => $record?->attempts() ?? 0,
-            'branch' => $record?->branch(),
-            'commit' => $record?->commitSha(),
-            'no_change' => $record?->isNoChange(),
-            'push' => $record?->push()->state()->value,
             'blocker' => $record?->blocker()?->toStorage(),
             // The attempt the verdicts below belong to, named rather than
             // implied: "the last one" is only useful if a reader can tell
@@ -472,30 +468,13 @@ final class StatusCommand extends ProjectCommand
         ));
         $output->line(sprintf('  %s  %s', $style->label('agent      '), $run->agent()->describe()));
         $output->line(sprintf(
-            '  %s  %s at %s',
-            $style->label('base       '),
-            $run->baseReference(),
-            $run->baseSha() === null
-                ? $style->muted('no commit recorded')
-                : $style->identifier(substr($run->baseSha(), 0, 12)),
-        ));
-        $output->line(sprintf(
-            '  %s  %s',
-            $style->label('branches   '),
-            // The mode the run froze, not the one configured now: a project
-            // that switched modes since has not moved this run's commits.
-            $run->sharedBranch() === null
-                ? $run->branchStrategy()->label()
-                : sprintf('%s, %s', $run->branchStrategy()->label(), $run->sharedBranch()),
-        ));
-        $output->line(sprintf(
             '  %s  %s',
             $style->label('checks     '),
             // A run may freeze none: `checks` is empty until a project says how
             // it is verified. Said in words rather than left as a blank value,
             // because a blank one reads as "status could not find out".
             $run->checkNames() === []
-                ? $style->muted('none configured — tasks were decided on the agent\'s result and the commit')
+                ? $style->muted('none configured — tasks were decided on the agent\'s own result')
                 : implode(', ', $run->checkNames()),
         ));
         $output->line(sprintf(
@@ -579,11 +558,10 @@ final class StatusCommand extends ProjectCommand
 
         $output->line($style->heading('Tasks'));
         $output->line($style->label(sprintf(
-            '  %-11s  %-13s  %-8s  %-12s  %s',
+            '  %-11s  %-13s  %-8s  %s',
             'state',
             'id',
             'attempts',
-            'commit',
             'task',
         )));
 
@@ -596,16 +574,11 @@ final class StatusCommand extends ProjectCommand
                 $passes[] = $record;
             }
 
-            $sha = $record?->commitSha();
-
             $output->line(sprintf(
-                '  %s  %s  %-8s  %s  %s',
+                '  %s  %s  %-8s  %s',
                 $this->paintState($this->stateOf($task, $tasks, $record), $task, $tasks, $record, $style),
                 $style->column($task->id()->value(), 13, $style->identifier(...)),
                 $record === null ? '-' : (string) $record->attempts(),
-                $sha === null
-                    ? $style->column('-', 12, $style->muted(...))
-                    : $style->column(substr($sha, 0, 12), 12, $style->identifier(...)),
                 $this->shorten($task->description()),
             ));
 
@@ -730,20 +703,8 @@ final class StatusCommand extends ProjectCommand
                 : sprintf('%s: %s', $record->generation()->label(), $where);
         }
 
-        if ($record->hasBranch()) {
-            $notes[] = 'branch ' . (string) $record->branch();
-        }
-
         foreach ($this->checks($record, $journal) as $note) {
             $notes[] = $note;
-        }
-
-        if ($record->isNoChange()) {
-            $notes[] = 'verified with no change needed';
-        }
-
-        if (!$record->push()->isSatisfied()) {
-            $notes[] = 'push ' . $record->push()->describe();
         }
 
         $blocker = $record->blocker();

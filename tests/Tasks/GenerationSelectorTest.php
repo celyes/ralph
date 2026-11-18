@@ -52,10 +52,8 @@ final class GenerationSelectorTest extends TestCase
         self::assertSame(GenerationStart::FirstRun, $selection->start());
         self::assertSame(1, $selection->number());
         self::assertFalse($selection->isReopening());
-        self::assertTrue($selection->startsNewBranch());
         self::assertNull($selection->continues());
         self::assertSame([], $selection->preserved());
-        self::assertSame([], $selection->reservedBranches());
         self::assertSame([], $selection->notes());
     }
 
@@ -65,7 +63,7 @@ final class GenerationSelectorTest extends TestCase
     #[Test]
     public function reopening_a_finished_task_starts_the_next_generation(): void
     {
-        $history = GenerationHistory::of(self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'));
+        $history = GenerationHistory::of(self::finished(1));
 
         $selection = $this->selector->select(self::id(), $history);
 
@@ -81,35 +79,30 @@ final class GenerationSelectorTest extends TestCase
      * replaced by the new one.
      */
     #[Test]
-    public function the_completed_pass_is_preserved_with_its_branch_and_commit(): void
+    public function the_completed_pass_is_preserved(): void
     {
-        $finished = self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d');
+        $finished = self::finished(1);
 
         $selection = $this->selector->select(self::id(), GenerationHistory::of($finished));
 
         self::assertSame([$finished], $selection->preserved());
         self::assertSame([$finished], $selection->completed());
-        self::assertSame('a1b2c3d', $selection->previousCommit());
-        self::assertSame(['ralph/TASK-19E0214A-add-a-flag'], $selection->reservedBranches());
     }
 
     /**
-     * The new pass may not be handed the branch the verified work lives on.
+     * What the new pass is written down as, said in the notes: the earlier
+     * generations keep what they recorded, and this one is a generation of its
+     * own.
      */
     #[Test]
-    public function the_earlier_branch_is_reserved_against_the_new_generation(): void
+    public function the_notes_say_what_the_earlier_generations_keep(): void
     {
-        $selection = $this->selector->select(
-            self::id(),
-            GenerationHistory::of(self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d')),
-        );
+        $selection = $this->selector->select(self::id(), GenerationHistory::of(self::finished(1)));
 
-        self::assertTrue($selection->isReserved('ralph/TASK-19E0214A-add-a-flag'));
-        self::assertFalse($selection->isReserved('ralph/TASK-19E0214A-g2-add-a-flag'));
-        self::assertStringContainsString(
-            'ralph/TASK-19E0214A-add-a-flag',
-            implode("\n", $selection->notes()),
-        );
+        $notes = implode("\n", $selection->notes());
+
+        self::assertStringContainsString('earlier generation', $notes);
+        self::assertStringContainsString('TASK-19E0214A-g2', $notes);
     }
 
     /**
@@ -120,8 +113,8 @@ final class GenerationSelectorTest extends TestCase
     public function reopening_a_task_that_was_already_reopened_keeps_counting(): void
     {
         $history = GenerationHistory::of(
-            self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'),
-            self::finished(2, 'ralph/TASK-19E0214A-g2-add-a-flag', 'e4f5a6b'),
+            self::finished(1),
+            self::finished(2),
         );
 
         $selection = $this->selector->select(self::id(), $history);
@@ -129,28 +122,23 @@ final class GenerationSelectorTest extends TestCase
         self::assertSame(3, $selection->number());
         self::assertSame('TASK-19E0214A-g3', $selection->generation()->slug());
         self::assertCount(2, $selection->preserved());
-        self::assertSame('e4f5a6b', $selection->previousCommit());
         self::assertSame(2, $history->completedCountOf(self::id()));
     }
 
     /**
      * The distinction a retry turns on: an unfinished pass is the same pass
-     * continuing, on the branch it already owns.
+     * continuing, with the attempts it has already spent.
      */
     #[Test]
     public function an_unfinished_pass_is_continued_rather_than_reopened(): void
     {
-        $open = RecordedGeneration::open(
-            TaskGeneration::first(self::id()),
-            'ralph/TASK-19E0214A-add-a-flag',
-        );
+        $open = RecordedGeneration::open(TaskGeneration::first(self::id()));
 
         $selection = $this->selector->select(self::id(), GenerationHistory::of($open));
 
         self::assertSame(GenerationStart::Continued, $selection->start());
         self::assertSame(1, $selection->number());
         self::assertFalse($selection->isReopening());
-        self::assertFalse($selection->startsNewBranch());
         self::assertTrue($selection->start()->keepsAttemptCount());
         self::assertSame($open, $selection->continues());
         self::assertSame([], $selection->preserved());
@@ -163,11 +151,8 @@ final class GenerationSelectorTest extends TestCase
     #[Test]
     public function resuming_a_reopened_task_continues_its_own_generation(): void
     {
-        $finished = self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d');
-        $interrupted = RecordedGeneration::open(
-            TaskGeneration::of(self::id(), 2),
-            'ralph/TASK-19E0214A-g2-add-a-flag',
-        );
+        $finished = self::finished(1);
+        $interrupted = RecordedGeneration::open(TaskGeneration::of(self::id(), 2));
 
         $selection = $this->selector->select(
             self::id(),
@@ -178,7 +163,6 @@ final class GenerationSelectorTest extends TestCase
         self::assertSame(2, $selection->number());
         self::assertSame($interrupted, $selection->continues());
         self::assertSame([$finished], $selection->preserved());
-        self::assertSame(['ralph/TASK-19E0214A-add-a-flag'], $selection->reservedBranches());
     }
 
     /**
@@ -190,18 +174,18 @@ final class GenerationSelectorTest extends TestCase
     {
         $selection = $this->selector->select(
             self::id(),
-            GenerationHistory::of(self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d')),
+            GenerationHistory::of(self::finished(1)),
         );
 
         self::assertFalse($selection->start()->keepsAttemptCount());
     }
 
     /**
-     * A pass that completed with nothing to change (PROJECT.md section G, item
-     * 6) is still a completed pass to reopen from.
+     * A task reopened from a pass that recorded nothing beyond its completion
+     * is still a reopening.
      */
     #[Test]
-    public function a_pass_completed_without_a_commit_is_still_reopened_from(): void
+    public function a_completed_pass_is_reopened_from_whatever_it_recorded(): void
     {
         $selection = $this->selector->select(
             self::id(),
@@ -210,26 +194,6 @@ final class GenerationSelectorTest extends TestCase
 
         self::assertTrue($selection->isReopening());
         self::assertSame(2, $selection->number());
-        self::assertNull($selection->previousCommit());
-        self::assertSame([], $selection->reservedBranches());
-    }
-
-    /**
-     * The commit a reviewer is shown is the most recent one, not the first.
-     */
-    #[Test]
-    public function the_previous_commit_is_the_latest_one_that_exists(): void
-    {
-        $selection = $this->selector->select(
-            self::id(),
-            GenerationHistory::of(
-                self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'),
-                RecordedGeneration::completed(TaskGeneration::of(self::id(), 2)),
-            ),
-        );
-
-        self::assertSame(3, $selection->number());
-        self::assertSame('a1b2c3d', $selection->previousCommit());
     }
 
     /**
@@ -259,7 +223,7 @@ final class GenerationSelectorTest extends TestCase
     #[Test]
     public function the_checkbox_does_not_decide_the_generation(): void
     {
-        $history = GenerationHistory::of(self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'));
+        $history = GenerationHistory::of(self::finished(1));
 
         $ticked = self::task('Add a --dry-run option', true);
         $unticked = self::task('Add a --dry-run option', false);
@@ -281,7 +245,7 @@ final class GenerationSelectorTest extends TestCase
         $other = TaskId::fromString('TASK-ABCDEF12');
 
         $history = GenerationHistory::of(
-            self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'),
+            self::finished(1),
             RecordedGeneration::open(TaskGeneration::first($other)),
         );
 
@@ -304,7 +268,6 @@ final class GenerationSelectorTest extends TestCase
         self::assertFalse($history->hasOpen(self::id()));
         self::assertFalse($history->isComplete(self::id()));
         self::assertSame([], $history->generationsOf(self::id()));
-        self::assertSame([], $history->branchesOf(self::id()));
         self::assertSame([], $history->records());
         self::assertSame([], $history->tasks());
         self::assertTrue($history->verified()->isEmpty());
@@ -316,52 +279,25 @@ final class GenerationSelectorTest extends TestCase
     #[Test]
     public function a_history_is_not_changed_by_recording_a_pass(): void
     {
-        $history = GenerationHistory::of(self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'));
+        $history = GenerationHistory::of(self::finished(1));
 
-        $later = $history->with(RecordedGeneration::completed(
-            TaskGeneration::of(self::id(), 2),
-            'ralph/TASK-19E0214A-g2-add-a-flag',
-            'e4f5a6b',
-        ));
+        $later = $history->with(RecordedGeneration::completed(TaskGeneration::of(self::id(), 2)));
 
         self::assertSame(1, $history->countOf(self::id()));
         self::assertSame(2, $later->countOf(self::id()));
         self::assertTrue($history->knows(self::id()));
-        self::assertSame(
-            ['ralph/TASK-19E0214A-add-a-flag', 'ralph/TASK-19E0214A-g2-add-a-flag'],
-            $later->branchesOf(self::id()),
-        );
     }
 
     /**
      * Records arrive from a database in whatever order the query returned them.
      */
-    /**
-     * A pass that recorded no branch — one that stopped before it got that far,
-     * or completed with nothing to change — reserves nothing, and must not
-     * leave an empty name among the branches a new pass has to avoid.
-     */
-    #[Test]
-    public function passes_with_no_branch_are_left_out_of_the_reserved_branches(): void
-    {
-        $history = GenerationHistory::of(
-            RecordedGeneration::completed(TaskGeneration::first(self::id())),
-            self::finished(2, 'ralph/TASK-19E0214A-g2-add-a-flag', 'e4f5a6b'),
-        );
-
-        self::assertSame(['ralph/TASK-19E0214A-g2-add-a-flag'], $history->branchesOf(self::id()));
-        self::assertSame(
-            ['ralph/TASK-19E0214A-g2-add-a-flag'],
-            $this->selector->select(self::id(), $history)->reservedBranches(),
-        );
-    }
 
     #[Test]
     public function passes_are_ordered_by_generation_however_they_arrive(): void
     {
         $history = GenerationHistory::of(
-            self::finished(2, 'ralph/TASK-19E0214A-g2-add-a-flag', 'e4f5a6b'),
-            self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'),
+            self::finished(2),
+            self::finished(1),
         );
 
         self::assertSame([1, 2], array_map(
@@ -378,7 +314,7 @@ final class GenerationSelectorTest extends TestCase
         $this->expectExceptionMessage('is recorded twice');
 
         GenerationHistory::of(
-            self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'),
+            self::finished(1),
             RecordedGeneration::open(TaskGeneration::first(self::id())),
         );
     }
@@ -395,7 +331,7 @@ final class GenerationSelectorTest extends TestCase
 
         GenerationHistory::of(
             RecordedGeneration::open(TaskGeneration::first(self::id())),
-            self::finished(2, 'ralph/TASK-19E0214A-g2-add-a-flag', 'e4f5a6b'),
+            self::finished(2),
         );
     }
 
@@ -408,8 +344,8 @@ final class GenerationSelectorTest extends TestCase
         $other = TaskId::fromString('TASK-ABCDEF12');
 
         $history = GenerationHistory::of(
-            self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'),
-            self::finished(2, 'ralph/TASK-19E0214A-g2-add-a-flag', 'e4f5a6b'),
+            self::finished(1),
+            self::finished(2),
         );
 
         self::assertSame(3, $this->selector->select(self::id(), $history)->number());
@@ -433,7 +369,7 @@ final class GenerationSelectorTest extends TestCase
         $this->expectExceptionMessage('reopened rather than continued');
 
         GenerationSelection::continuing(
-            self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'),
+            self::finished(1),
         );
     }
 
@@ -456,7 +392,7 @@ final class GenerationSelectorTest extends TestCase
     #[Test]
     public function the_reason_names_the_task_and_the_pass(): void
     {
-        $history = GenerationHistory::of(self::finished(1, 'ralph/TASK-19E0214A-add-a-flag', 'a1b2c3d'));
+        $history = GenerationHistory::of(self::finished(1));
 
         self::assertSame(
             'TASK-19E0214A has not been run before.',
@@ -488,13 +424,9 @@ final class GenerationSelectorTest extends TestCase
         return TaskId::fromString('TASK-19E0214A');
     }
 
-    private static function finished(int $number, string $branch, string $commit): RecordedGeneration
+    private static function finished(int $number): RecordedGeneration
     {
-        return RecordedGeneration::completed(
-            TaskGeneration::of(self::id(), $number),
-            $branch,
-            $commit,
-        );
+        return RecordedGeneration::completed(TaskGeneration::of(self::id(), $number));
     }
 
     private static function task(string $description, bool $checked): Task

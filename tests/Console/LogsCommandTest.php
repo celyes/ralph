@@ -37,7 +37,7 @@ final class LogsCommandTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and the logs are of a real run.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = LoopProject::create();

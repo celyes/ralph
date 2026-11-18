@@ -29,7 +29,7 @@ use PHPUnit\Framework\TestCase;
  * what it reported on would have changed the answer. It works before anything
  * else does, because a diagnostic that needs a working project is no use to a
  * user whose project is not working. And it distinguishes a box this package
- * verified from a box somebody ticked, because "done" with no commit behind it
+ * verified from a box somebody ticked, because "done" with no checks behind it
  * is the one claim the package must not make on a user's behalf (PROJECT.md
  * section C, item 5).
  */
@@ -45,7 +45,7 @@ final class StatusCommandTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and the report is of a real repository.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = LoopProject::create();
@@ -79,7 +79,7 @@ final class StatusCommandTest extends TestCase
         // The pending task, with the identifier `ralph logs` and `ralph retry`
         // are named with.
         self::assertMatchesRegularExpression(
-            '/pending\s+TASK-[0-9A-F]{8}\s+-\s+-\s+Add a --dry-run option/',
+            '/pending\s+TASK-[0-9A-F]{8}\s+-\s+Add a --dry-run option/',
             $result->standardOutput,
             $result->describe(),
         );
@@ -89,11 +89,10 @@ final class StatusCommandTest extends TestCase
     }
 
     /**
-     * After a task passed: the run, and the task's state, attempts, branch and
-     * commit.
+     * After a task passed: the run, and the task's state and attempts.
      */
     #[Test]
-    public function it_reports_the_run_and_the_commit_a_verified_task_produced(): void
+    public function it_reports_the_run_and_what_a_verified_task_rests_on(): void
     {
         $this->project
             ->withWorker(FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"]))
@@ -126,17 +125,6 @@ final class StatusCommandTest extends TestCase
         self::assertStringContainsString('stopped      every pending task was completed', $result->standardOutput);
         self::assertStringContainsString('next         ', $result->standardOutput);
 
-        // The commit column is the commit the repository actually has on the
-        // task's branch, not a claim read back out of the same row that wrote
-        // it.
-        $branch = $this->project->taskBranches()[0] ?? '';
-
-        self::assertStringContainsString('branch ' . $branch, $result->standardOutput, $result->describe());
-        self::assertStringContainsString(
-            substr($this->project->headOf($branch), 0, 12),
-            $result->standardOutput,
-            $result->describe(),
-        );
         self::assertMatchesRegularExpression('/completed\s+TASK-[0-9A-F]{8}\s+1\s+/', $result->standardOutput);
 
         // What the single configured check decided, not just that it exists:
@@ -165,7 +153,7 @@ final class StatusCommandTest extends TestCase
         // would send a reader looking for a question to answer.
         self::assertSame(ExitCode::EXECUTION, $result->exitCode, $result->describe());
         self::assertStringContainsString('— a task ran out of attempts', $result->standardOutput, $result->describe());
-        self::assertMatchesRegularExpression('/failed\s+TASK-[0-9A-F]{8}\s+1\s+-\s+/', $result->standardOutput);
+        self::assertMatchesRegularExpression('/failed\s+TASK-[0-9A-F]{8}\s+1\s+/', $result->standardOutput);
 
         // The phase is reported as one the pass stopped in rather than as one
         // something is still doing.
@@ -235,7 +223,7 @@ final class StatusCommandTest extends TestCase
             $result->describe(),
         );
         self::assertMatchesRegularExpression(
-            '/done \(by you\)\s+TASK-[0-9A-F]{8}\s+-\s+-\s+Document the import command/',
+            '/done \(by you\)\s+TASK-[0-9A-F]{8}\s+-\s+Document the import command/',
             $result->standardOutput,
             $result->describe(),
         );
@@ -330,7 +318,6 @@ final class StatusCommandTest extends TestCase
         self::assertCount(1, $tasks);
 
         $task = $tasks[0];
-        $branch = $this->project->taskBranches()[0] ?? '';
 
         self::assertSame(self::TASK, $task->string('description'), $result->describe());
         self::assertMatchesRegularExpression('/^TASK-[0-9A-F]{8}$/', $task->string('task'));
@@ -341,11 +328,7 @@ final class StatusCommandTest extends TestCase
         self::assertSame('runner_verified', $task->string('completion'), $result->describe());
         self::assertSame('completed', $task->string('state'));
         self::assertSame(1, $task->integer('attempts'));
-        self::assertSame($branch, $task->string('branch'));
-
-        // The commit whole, not the twelve characters the table has room for:
-        // the other twenty-eight cannot be recovered from the short form.
-        self::assertSame($this->project->headOf($branch), $task->string('commit'), $result->describe());
+        self::assertTrue($task->boolean('checked'), $result->describe());
 
         // The verdicts behind the box, with the attempt they belong to named.
         self::assertSame(1, $task->integer('attempt'));

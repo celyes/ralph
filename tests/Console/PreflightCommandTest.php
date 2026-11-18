@@ -27,7 +27,7 @@ final class PreflightCommandTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and the command reports on a real repository.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = TemporaryProject::create();
@@ -51,7 +51,7 @@ final class PreflightCommandTest extends TestCase
         self::assertStringContainsString('Preflight checks for ' . $this->project->root(), $result->standardOutput);
         self::assertStringContainsString('agent          codex (adapter "codex"', $result->standardOutput);
 
-        $expected = ['php', 'extensions', 'git', 'repository', 'base', 'identity', 'agent', 'agent-version', 'workspace', 'checks'];
+        $expected = ['php', 'extensions', 'agent', 'agent-version', 'checks'];
 
         foreach ($expected as $check) {
             self::assertMatchesRegularExpression(
@@ -67,18 +67,17 @@ final class PreflightCommandTest extends TestCase
     #[Test]
     public function a_failed_check_exits_with_the_configuration_status_and_explains_itself_on_stderr(): void
     {
-        // A project that is not a repository, with the default agent, which is
-        // not installed here either.
+        // A project with the default agent, which is not installed here.
         $result = Cli::run(['preflight'], $this->project->root());
 
         self::assertSame(ExitCode::CONFIGURATION, $result->exitCode, $result->describe());
 
-        self::assertStringContainsString('fail  repository', $result->standardOutput, $result->describe());
-        self::assertStringContainsString('skip  base', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('fail  agent', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('skip  agent-version', $result->standardOutput, $result->describe());
 
-        self::assertStringContainsString('is not in a Git repository', $result->errorOutput, $result->describe());
-        self::assertStringContainsString('Run "git init"', $result->errorOutput, $result->describe());
-        self::assertStringContainsString('checks failed, so a run cannot start', $result->errorOutput, $result->describe());
+        self::assertStringContainsString('cannot be run', $result->errorOutput, $result->describe());
+        self::assertStringContainsString('agents.codex.executable', $result->errorOutput, $result->describe());
+        self::assertStringContainsString('check failed, so a run cannot start', $result->errorOutput, $result->describe());
     }
 
     #[Test]
@@ -94,10 +93,10 @@ final class PreflightCommandTest extends TestCase
             $result->standardOutput,
             $result->describe(),
         );
-        // Every check is still answered: the repository is the project's own,
+        // Every check is still answered: the extensions are this build's own,
         // and the agent is whichever "codex" the machine has — which is why
         // this test asserts on the report rather than on the exit status.
-        self::assertMatchesRegularExpression('/^  pass  repository /m', $result->standardOutput, $result->describe());
+        self::assertMatchesRegularExpression('/^  pass  extensions /m', $result->standardOutput, $result->describe());
         self::assertMatchesRegularExpression('/^  ....  agent /m', $result->standardOutput, $result->describe());
     }
 
@@ -189,11 +188,6 @@ final class PreflightCommandTest extends TestCase
                 'claude' => ['executable' => 'ralph-no-such-agent'],
             ],
             'checks' => [['name' => 'tests', 'command' => [PHP_BINARY, '-v']]],
-            // A preparation command this machine certainly has, for the same
-            // reason the check is PHP's own binary: the default "composer
-            // install" would report a project with no composer.json, and this
-            // project is meant to be entirely ready.
-            'workspace' => ['prepare' => [['name' => 'dependencies', 'command' => [PHP_BINARY, '-v']]]],
         ]);
     }
 }

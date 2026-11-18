@@ -17,7 +17,7 @@ use Random\RandomException;
  * The `runs` rows: one per invocation of the loop.
  *
  * Opened before the first task is looked at, because everything the run must
- * hold still — the agent, the frozen checks, the base reference, the task file
+ * hold still — the agent, the frozen checks, the task file
  * — has to be written down before any of it is used, and because a generation
  * and an attempt both carry the run they belong to.
  *
@@ -80,19 +80,13 @@ final class RunStore
      * @param Configuration  $configuration the settings as read, frozen here —
      *        the verification commands among them, as a
      *        {@see VerificationSnapshot}
-     * @param string|null    $baseSha       the resolved base commit, when the
-     *        reference has already been resolved
-     *
      * @throws StateException         when the row cannot be written
      * @throws ConfigurationException when the configuration states no usable
      *         set of checks to freeze
      */
-    public function open(
-        AgentSelection $agent,
-        Configuration $configuration,
-        ?string $baseSha = null,
-    ): RunRecord {
-        return $this->insert($agent, $configuration, $baseSha, null);
+    public function open(AgentSelection $agent, Configuration $configuration): RunRecord
+    {
+        return $this->insert($agent, $configuration, null);
     }
 
     /**
@@ -118,7 +112,7 @@ final class RunStore
      * `ralph resume` — that has to *explain* a refused change of agent, naming
      * what to type instead (section H, item 6). What is checked here is only
      * that the two agree: a continuation recording an agent other than the one
-     * its predecessor used would attribute that run's commits and its cost to a
+     * its predecessor used would attribute that run's work and its cost to a
      * tool that did not produce them, and the column is the only record of
      * which did. The settings are not compared, only the agent and its adapter
      * — see {@see AgentRecord::isSameAgent()}.
@@ -141,7 +135,6 @@ final class RunStore
         RunRecord $previous,
         AgentSelection $agent,
         Configuration $configuration,
-        ?string $baseSha = null,
     ): RunRecord {
         if ($previous->state() === LifecycleState::Completed) {
             throw new StateException(
@@ -176,7 +169,7 @@ final class RunStore
             );
         }
 
-        return $this->insert($agent, $configuration, $baseSha ?? $previous->baseSha(), $previous);
+        return $this->insert($agent, $configuration, $previous);
     }
 
     /**
@@ -189,7 +182,6 @@ final class RunStore
     private function insert(
         AgentSelection $agent,
         Configuration $configuration,
-        ?string $baseSha,
         ?RunRecord $previous,
     ): RunRecord {
         $record = AgentRecord::of($agent);
@@ -199,9 +191,9 @@ final class RunStore
         $this->database->execute(
             'INSERT INTO runs
                  (run_id, state, agent, adapter, agent_source, agent_settings, configuration,
-                  checks, tasks_path, base_reference, base_sha, host, pid, resumed_from,
+                  checks, tasks_path, host, pid, resumed_from,
                   iterations_used, active_seconds, started_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 $this->identifier($now),
                 LifecycleState::Running->value,
@@ -216,8 +208,6 @@ final class RunStore
                 // `.ralph/config.json` cannot reach a run already under way.
                 $this->encode(VerificationSnapshot::of($configuration)->toStorage()),
                 $configuration->tasksFile(),
-                $configuration->git()->baseReference(),
-                $baseSha,
                 $this->host(),
                 getmypid() === false ? null : getmypid(),
                 $previous?->rowId(),
@@ -346,73 +336,6 @@ final class RunStore
         }
 
         return $chain;
-    }
-
-    /**
-     * Record the base commit, once the reference has been resolved.
-     *
-     * @throws StateException when the SHA is blank or the row cannot be written
-     */
-    public function recordBase(RunRecord $run, string $baseSha): RunRecord
-    {
-        if (trim($baseSha) === '') {
-            throw new StateException('A run cannot record a blank base commit.');
-        }
-
-        return $this->write($run, ['base_sha' => trim($baseSha)]);
-    }
-
-    /**
-     * Record the branch a shared-branch run established, once and for all.
-     *
-     * The persisted identity of PROJECT.md section K, item 3. Written after the
-     * branch has been created or validated and before the first task of the run
-     * is taken on, so that every pass — and every resume of the run — commits
-     * to the branch the run established rather than to the one the settings
-     * would name today.
-     *
-     * Recording the same branch twice is allowed and does nothing: a resume
-     * validates the branch again before it continues, and arriving at the same
-     * answer must not be an error. A *different* branch is refused rather than
-     * overwritten, because the first one may already hold the run's commits and
-     * a row quietly renamed onto another branch would leave them with nothing
-     * naming them.
-     *
-     * @throws StateException when the branch is blank, when the run already
-     *                        established a different one, or when the row
-     *                        cannot be written
-     */
-    public function recordSharedBranch(RunRecord $run, string $branch): RunRecord
-    {
-        $name = trim($branch);
-
-        if ($name === '') {
-            throw new StateException('A run cannot record a blank shared branch.');
-        }
-
-        $established = $run->establishedSharedBranch();
-
-        if ($established === $name) {
-            return $run;
-        }
-
-        if ($established !== null) {
-            throw new StateException(
-                sprintf(
-                    'Run %s already commits to the shared branch "%s" and cannot also commit to "%s".',
-                    $run->runId(),
-                    $established,
-                    $name,
-                ),
-                [
-                    'The branch a shared-branch run commits to is established once, before its first task '
-                        . '(PROJECT.md section K, item 3), so that a resume continues on the branch holding the commits.',
-                    sprintf('Finish or stop run %s, then start a new run to commit to "%s".', $run->runId(), $name),
-                ],
-            );
-        }
-
-        return $this->write($run, ['shared_branch' => $name]);
     }
 
     /**

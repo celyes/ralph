@@ -54,9 +54,9 @@ final class Templates
 
         Add the work you want done as top-level Markdown checklist items. {$name} reads
         this file from top to bottom, starts the first unchecked item, and checks it off
-        only after the verification commands configured under `checks` pass and the
-        change is committed. `checks` starts empty, so until you add one a task is
-        checked off on the agent's own reported result and its commit alone.
+        only after the verification commands configured under `checks` pass over what the
+        agent changed. `checks` starts empty, so until you add one a task is checked off
+        on the agent's own reported result alone.
 
         Indented bullets under an item are passed to the agent as implementation details
         or acceptance criteria:
@@ -72,8 +72,8 @@ final class Templates
         - It describes one change, small enough to verify on its own.
         - It says how the change is verified, not only what it should do.
         - It names the files or areas involved, when you already know them.
-        - It stands on its own: this release does not build one task on top of another
-          task's unmerged branch.
+        - It is readable beside the others: every task of a run works in this checkout,
+          so a later one sees what the earlier ones did — and inherits their mistakes.
 
         Headings and ordinary prose are ignored, as is anything inside a fenced code
         block — which is why the example above is not picked up as a task. Items already
@@ -131,26 +131,17 @@ final class Templates
         `{$config}`; this section is for what a human or an agent needs to know
         around them.
 
-        Each task is implemented in its own linked worktree, which Git creates with the
-        project's tracked files and nothing else — no `vendor/`, and none of the local
-        files no commit carries. `workspace.prepare` in `{$config}` lists the
-        commands that close that gap, such as `composer install`, and
-        `workspace.copy` lists the files taken from your own checkout, such as a local
-        `.env`. Both start empty, so add to them only what your project actually needs;
-        mention here anything a person would still have to do by hand.
-
-        A `workspace.copy` file is also kept out of the task's commit, because the
-        setting's own definition is a file that exists on this machine and in no commit:
-        list a credential there and it reaches the agent without reaching the branch.
-        {$name}'s own files are excluded from a commit too, as is anything your
-        `.gitignore` covers — so a build directory that is *not* ignored will be
-        committed, and the staged file list printed before each commit is where to
-        notice it.
+        Each task is implemented in this checkout, on whatever branch you have checked
+        out, so the agent and the checks use the dependencies and the configuration you
+        already have installed. Nothing is branched, committed or pushed: a task's
+        changes are left in the working tree, and reading them with `git diff` and
+        committing them is yours to do. Mention here anything a person has to do by hand
+        before the checks can pass.
 
         ## Conventions
 
         Code style, directory layout, naming, how errors are handled, how tests are
-        written, what is committed and what is generated.
+        written, what is tracked and what is generated.
 
         ## Architecture and important files
 

@@ -142,25 +142,16 @@ final class ExampleProjectTest extends TestCase
         self::assertSame(['codex', 'claude'], $configuration->agentNames());
         self::assertContains($configuration->defaultAgent(), $configuration->agentNames());
 
-        // The two commands the example's README promises, and which the run
-        // below really executes.
+        // The command the example's README promises, and which the run below
+        // really executes.
         $checks = $configuration->checks();
         self::assertCount(1, $checks);
         self::assertSame(['composer', 'test'], $checks[0]->command());
-
-        $prepare = $configuration->workspace()->prepare();
-        self::assertCount(1, $prepare);
-        self::assertSame(['composer', 'install', '--no-interaction'], $prepare[0]->command());
-        self::assertSame([], $configuration->workspace()->copy(), 'The example needs no file from the reader\'s checkout.');
 
         // One iteration per task it ships: an example that stopped at its
         // iteration limit halfway through its own checklist would read as a
         // failure.
         self::assertSame(count(self::TASKS), $configuration->limits()->iterations());
-
-        // Nothing is pushed by an example run: the reader has no remote for a
-        // directory they copied a minute ago.
-        self::assertFalse($configuration->git()->push()->isEnabled());
 
         // Every key the file sets is a key the current configuration has. An
         // unknown one is already rejected by the loader; this is the other
@@ -227,7 +218,7 @@ final class ExampleProjectTest extends TestCase
             );
         }
 
-        foreach (['runtime', 'runtime/logs', 'runtime/memory', 'runtime/worktrees'] as $relative) {
+        foreach (['runtime', 'runtime/logs', 'runtime/memory'] as $relative) {
             self::assertDirectoryExists($project . '/.ralph/' . $relative);
         }
 
@@ -261,16 +252,15 @@ final class ExampleProjectTest extends TestCase
 
     /**
      * The whole point of the example, run: one task from the checklist to a
-     * commit and a ticked box, verified by the example's own suite in the
-     * task's own worktree.
+     * ticked box, verified by the example's own suite in the reader's own
+     * checkout.
      *
      * The agent is the fixture worker rather than Codex or Claude Code, and
      * what it writes is the smallest change that makes the example's checklist
      * item true — not a reference answer to it. What is being tested is the
-     * example's configuration: that `composer install` makes a bare worktree a
-     * project PHPUnit runs in, and that `composer test` there is a check Ralph
-     * PHP can gate a commit on. Real agents on these tasks are section J,
-     * item 11.
+     * example's configuration: that `composer test` in the project is a check
+     * Ralph PHP can gate a ticked box on. Real agents on these tasks are
+     * section J, item 11.
      */
     #[Test]
     #[Group('example-run')]
@@ -281,12 +271,19 @@ final class ExampleProjectTest extends TestCase
         }
 
         if (Composer::binary() === null) {
-            self::markTestSkipped('Composer is not installed, so the example\'s workspace cannot be prepared.');
+            self::markTestSkipped('Composer is not installed, so the example\'s suite cannot be installed.');
         }
 
         $project = $this->repositoryFromTheExample();
         $tools = TemporaryDirectory::create('ralph-example-tools');
         $this->temporary[] = $tools;
+
+        // What the example's README tells the reader to do before their first
+        // run, and what the package no longer does for them: the checks run in
+        // the project itself (section K, item 1), so the project has to be
+        // installed.
+        $install = Composer::run(['install'], $project, $tools);
+        self::assertSame(0, $install->exitCode, $install->describe());
 
         $worker = FixtureWorker::install($tools, [
             FixtureStep::success($this->slugLengthImplementation())
@@ -295,10 +292,10 @@ final class ExampleProjectTest extends TestCase
 
         // Two changes to the shipped configuration, and no more: the agent is
         // the fixture worker, and the run is allowed one task rather than
-        // three. The checks, the workspace preparation, the branch prefix and
-        // the attempt limit are the example's own. One task, because the
-        // fixture implements this one, and a fixture repeating that work
-        // against the next item would tick off a task nobody did.
+        // three. The checks and the attempt limit are the example's own. One
+        // task, because the fixture implements this one, and a fixture
+        // repeating that work against the next item would tick off a task
+        // nobody did.
         $this->configureOneTaskWith($project, $worker->path());
 
         $run = Cli::run(['run'], $project, timeout: self::RUN_TIMEOUT_SECONDS);
@@ -315,26 +312,18 @@ final class ExampleProjectTest extends TestCase
         self::assertSame(Completion::RunnerVerified->value, $first->string('completion'), $run->describe());
         self::assertTrue($first->boolean('checked'), 'The finished task was not ticked off: ' . $run->describe());
 
-        $commit = $first->string('commit');
-        $branch = $first->string('branch');
+        // The change is in the copy the reader made, uncommitted, beside the
+        // ticked box — which is the whole of what a run leaves behind now
+        // (PROJECT.md section K, item 1).
+        $changed = Git::run($project, 'status', '--porcelain')->standardOutputLines();
+        sort($changed);
 
-        self::assertStringStartsWith('ralph/', $branch);
-
-        // The commit is in the repository the reader copied, on the task's own
-        // branch, and it carries the example's change rather than an empty
-        // tree.
         self::assertSame(
-            $commit,
-            trim(Git::run($project, 'rev-parse', $branch)->standardOutput),
-            'The task branch does not point at the recorded commit.',
+            [' M .ralph/tasks.md', ' M src/Slugger.php', '?? tests/SluggerMaximumLengthTest.php'],
+            $changed,
+            $run->describe(),
         );
-
-        $files = Git::run($project, 'show', '--name-only', '--format=', $commit)->standardOutputLines();
-        self::assertContains('src/Slugger.php', $files, $run->describe());
-
-        // The reader's own checkout holds the tick and nothing else: no
-        // worktree, no vendor directory, no runtime data in the commit.
-        self::assertNotContains('.ralph/tasks.md', $files, 'The run committed the controlling checkout\'s checklist.');
+        self::assertStringContainsString('maxLength', (string) file_get_contents($project . '/src/Slugger.php'));
         self::assertStringContainsString(
             '- [x] ' . self::TASKS[0],
             (string) file_get_contents($project . '/.ralph/tasks.md'),

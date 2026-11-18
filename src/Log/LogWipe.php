@@ -10,8 +10,7 @@ use InvalidArgumentException;
  * What a wipe actually did to one pass's log files.
  *
  * The event, where {@see LogRetentionReason} is the decision — the same split
- * {@see \Celyes\RalphPhp\Git\WorktreeCleanup} keeps from
- * {@see \Celyes\RalphPhp\Git\WorkspaceRetention}, and for the same reason: a
+ * the workspace cleanup of earlier releases drew, and for the same reason: a
  * deletion that was wanted and a deletion that happened are not the same fact,
  * and a caller holding only the first would tell a user that files had gone
  * when a permission had kept them.

@@ -258,7 +258,7 @@ final class CommandVerifier implements Verifier
      * ({@see \Celyes\RalphPhp\Preflight\Check\VerificationCheck}); this asks it
      * of the workspace, which is a different answer for a check that runs a
      * project's own `vendor/bin` binary — the one case where "it worked in the
-     * checkout" and "it works in the worktree" genuinely come apart, and the
+     * checkout" and "it works for the run" genuinely come apart, and the
      * reason section F, item 5 prepares a workspace at all.
      *
      * @throws VerificationException when nothing executable answers to the name

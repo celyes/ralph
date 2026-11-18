@@ -28,7 +28,6 @@ use Celyes\RalphPhp\State\ChecklistMarker;
 use Celyes\RalphPhp\State\ChecklistUpdateState;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Phase;
-use Celyes\RalphPhp\State\PushState;
 use Celyes\RalphPhp\State\StateBootstrap;
 use Celyes\RalphPhp\State\StopKind;
 use Celyes\RalphPhp\State\TaskRecord;
@@ -101,17 +100,10 @@ final class RunnerTest extends TestCase
      */
     private string $tools;
 
-    /**
-     * Bare repositories a case added as a remote, to be removed afterwards.
-     *
-     * @var list<string>
-     */
-    private array $remotes = [];
-
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and the loop commits in real worktrees.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = TemporaryProject::create();
@@ -134,23 +126,16 @@ final class RunnerTest extends TestCase
         // put it back before the next one starts in an interrupted one.
         Interruptions::release();
 
-        Git::tryRun($this->project->root(), 'worktree', 'prune');
         TemporaryDirectory::remove($this->tools);
         $this->project->remove();
-
-        foreach ($this->remotes as $remote) {
-            TemporaryDirectory::remove($remote);
-        }
-
-        $this->remotes = [];
     }
 
     /**
-     * The whole item, in one case: a pending task is selected, worked on,
-     * verified, committed and checked off.
+     * The whole item, in one case: a pending task is selected, worked on in the
+     * user's own checkout, verified and checked off.
      */
     #[Test]
-    public function a_pending_task_is_prepared_implemented_verified_committed_and_checked_off(): void
+    public function a_pending_task_is_prepared_implemented_verified_and_checked_off(): void
     {
         $this->givenTasks([self::FIRST]);
         $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
@@ -166,14 +151,6 @@ final class RunnerTest extends TestCase
         self::assertTrue($result->wasVerified());
         self::assertSame(1, $result->attempts());
 
-        // The commit a reviewer will see, read out of Git rather than from the
-        // value that claims it.
-        $sha = (string) $result->commitSha();
-        self::assertSame(1, preg_match('/^[0-9a-f]{40}$/', $sha));
-        self::assertSame($sha, $this->tipOf((string) $result->branch()));
-        self::assertSame(['src/Import.php'], $this->filesIn($sha));
-        self::assertStringContainsString($result->taskId()->value(), $this->messageOf($sha));
-
         // The checklist on disk, which is what the user reads.
         self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
 
@@ -182,7 +159,6 @@ final class RunnerTest extends TestCase
         $pass = $journal->generations()->get($result->generation());
         self::assertSame(LifecycleState::Completed, $pass->state());
         self::assertNull($pass->phase());
-        self::assertSame($sha, $pass->commitSha());
         self::assertSame(
             Completion::RunnerVerified,
             $journal->tasks()->get($result->taskId())->completion(),
@@ -195,14 +171,18 @@ final class RunnerTest extends TestCase
         self::assertNotNull($attempt->logPath());
         self::assertFileExists((string) $attempt->logPath());
 
-        // The checkbox edit is the one change a run makes to the user's
-        // checkout, and it is left uncommitted: HEAD and the branch are where
-        // they were, and the checklist is the only dirty path. The task's own
-        // commit lives on the task branch, not here.
+        // What the run left in the user's checkout: the agent's edit and the
+        // ticked box, both uncommitted, on the branch that was already checked
+        // out (section K, item 1). Nothing was branched and nothing was
+        // committed, so HEAD is where it was.
         $after = $this->snapshotOfTheCheckout();
         self::assertSame($before['head'], $after['head']);
         self::assertSame($before['branch'], $after['branch']);
-        self::assertSame('M .ralph/tasks.md', trim($after['status']));
+        self::assertSame(
+            [' M .ralph/tasks.md', ' M src/Import.php'],
+            $this->workingTreeChanges(),
+        );
+        self::assertStringContainsString('// --dry-run', $this->fileInTheCheckout('src/Import.php'));
     }
 
     /**
@@ -250,17 +230,16 @@ final class RunnerTest extends TestCase
 
         $written = (string) file_get_contents($record);
 
-        // Each condition on ticking a box, with this pass's answer to it.
+        // The condition on ticking a box, with this pass's answer to it.
         self::assertStringContainsString('- [x] **Verification passed', $written);
-        self::assertStringContainsString('- [x] **An implementation is recorded', $written);
-        self::assertStringContainsString('- [x] **Publication is settled', $written);
 
         // The checks the package ran, named with the command it ran them with.
         self::assertStringContainsString('**tests** — `php -v`', $written);
 
-        // The commit a reviewer will read, and what is in it.
-        self::assertStringContainsString((string) $result->commitSha(), $written);
-        self::assertStringContainsString('`src/Import.php`', $written);
+        // Where the work is, which is the question a reviewer arrives with now
+        // that the package commits nothing.
+        self::assertStringContainsString('Nothing was branched, committed or pushed.', $written);
+        self::assertStringContainsString('`git diff`', $written);
 
         // The agent that produced it, by name and without a credential.
         self::assertStringContainsString('Carried out by ', $written);
@@ -284,7 +263,7 @@ final class RunnerTest extends TestCase
      * agent's work in it and before anything is staged.
      */
     #[Test]
-    public function the_checks_run_against_the_task_workspace_the_agent_changed(): void
+    public function the_checks_run_against_the_checkout_the_agent_changed(): void
     {
         $this->givenTasks([self::FIRST]);
         $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// the agent was here\n"])]);
@@ -298,15 +277,14 @@ final class RunnerTest extends TestCase
             $verifier->sawInWorkspace['src/Import.php'] ?? '',
         );
 
-        // The workspace, not the user's checkout, and not the project root.
-        self::assertStringStartsWith(
-            $this->project->path('.ralph/runtime/worktrees'),
-            $verifier->calls[0]['directory'],
-        );
-        self::assertSame(
-            "<?php\n",
-            (string) file_get_contents($this->project->path('src/Import.php')),
-            'The user\'s own checkout is not where the agent works.',
+        // The project itself, which is where the agent worked: the checks are
+        // run over the same files a reviewer is about to read (section K,
+        // item 1).
+        self::assertSame($this->project->root(), $verifier->calls[0]['directory']);
+        self::assertStringContainsString(
+            '// the agent was here',
+            $this->fileInTheCheckout('src/Import.php'),
+            'The user\'s own checkout is where the agent works.',
         );
 
         // And what it was handed is the run's frozen checks, by name.
@@ -358,19 +336,21 @@ final class RunnerTest extends TestCase
         self::assertSame(Completion::UserCompleted, $imported->completion());
         self::assertSame([], $journal->generations()->forTask($imported->id()));
 
-        // Two commits, one per task, on the one branch the run shares — and in
-        // the order the file lists them, the second built on the first.
-        self::assertSame($report->results()[0]->branch(), $report->results()[1]->branch());
-        self::assertNotSame($report->results()[0]->commitSha(), $report->results()[1]->commitSha());
+        // Both tasks worked in the one checkout, in the order the file lists
+        // them, and both left their changes there: the second task saw what the
+        // first had done, which is what working in place buys (section K,
+        // item 1).
         self::assertSame(
-            $report->results()[0]->commitSha(),
-            $this->parentOf((string) $report->results()[1]->commitSha()),
+            [' M .ralph/tasks.md', ' M README.md', ' M src/Import.php'],
+            $this->workingTreeChanges(),
         );
+        self::assertCount(1, $this->branches(), 'The run created a branch.');
+        self::assertSame([], $this->commitsBeyondBase(), 'The run made a commit.');
     }
 
     /**
-     * A failing check leaves the task unchecked, keeps nothing out of the
-     * repository, and keeps the workspace for whoever has to look at it.
+     * A failing check leaves the task unchecked, commits nothing, and leaves
+     * the agent's changes where whoever has to look at them will find them.
      */
     #[Test]
     public function a_failing_check_leaves_the_task_unchecked_and_keeps_the_work_for_inspection(): void
@@ -384,8 +364,6 @@ final class RunnerTest extends TestCase
         self::assertFalse($result->isCompleted());
         self::assertFalse($result->wasChecked());
         self::assertTrue($result->isFailure());
-        self::assertNull($result->commitSha());
-        self::assertFalse($result->isNoChange());
 
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
         self::assertSame([], $this->commitsBeyondBase());
@@ -397,8 +375,12 @@ final class RunnerTest extends TestCase
         self::assertNotNull($pass->blocker());
         self::assertStringContainsString('verification failed', (string) $pass->blocker()?->reason());
 
-        // The workspace stays, and the evidence is stored for the next attempt.
-        self::assertDirectoryExists((string) $pass->worktree()->path());
+        // What the agent wrote stays where it wrote it, and the evidence is
+        // stored for the next attempt.
+        self::assertStringContainsString(
+            '// not good enough',
+            $this->fileInTheCheckout('src/Import.php'),
+        );
 
         $attempt = $journal->attempts()->latestFor($pass);
         self::assertNotNull($attempt);
@@ -444,12 +426,13 @@ final class RunnerTest extends TestCase
         $second = $this->loopOver(ScriptedVerifier::passing(), ['limits' => ['attempts_per_task' => 2]]);
         $result = $second->results()[0];
 
-        // The same pass, continued: one generation, two attempts, one commit.
+        // The same pass, continued: one generation, two attempts, nothing
+        // committed by either of them.
         self::assertSame($first->results()[0]->generation()->number(), $result->generation()->number());
         self::assertSame(2, $result->attempts());
         self::assertTrue($result->isCompleted());
         self::assertTrue($result->wasChecked());
-        self::assertCount(1, $this->commitsBeyondBase());
+        self::assertSame([], $this->commitsBeyondBase());
 
         $attempts = $worker->attempts();
         self::assertCount(2, $attempts);
@@ -483,13 +466,13 @@ final class RunnerTest extends TestCase
         );
         $result = $report->results()[0];
 
-        // One pass, two attempts, one commit, and the box ticked at the end of
-        // it rather than after the attempt that passed nothing.
+        // One pass, two attempts, and the box ticked at the end of it rather
+        // than after the attempt that passed nothing.
         self::assertSame(2, $result->attempts());
         self::assertTrue($result->isCompleted());
         self::assertTrue($result->wasChecked());
         self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
-        self::assertCount(1, $this->commitsBeyondBase());
+        self::assertSame([], $this->commitsBeyondBase());
 
         // What the second attempt was told, read out of the briefing the worker
         // actually received.
@@ -504,14 +487,12 @@ final class RunnerTest extends TestCase
         );
         self::assertStringContainsString('attempt 2 follows', $terminal->standardOutput());
 
-        // The retry continues in the workspace the failing attempt left, so the
-        // work that was kept is part of what is committed.
-        self::assertSame(['src/DryRun.php', 'src/Import.php'], $this->filesIn((string) $result->commitSha()));
-
-        // And that workspace is still the pass's own, so completing the task
-        // removes the checkout as it would for a task that passed first time.
-        self::assertDirectoryDoesNotExist(
-            (string) $this->journal()->generations()->get($result->generation())->worktree()->path(),
+        // The retry continues in the same checkout the failing attempt worked
+        // in, so what the first attempt wrote is still there beside what the
+        // second added — and the user has both to read.
+        self::assertSame(
+            [' M .ralph/tasks.md', ' M src/Import.php', '?? src/DryRun.php'],
+            $this->workingTreeChanges(),
         );
     }
 
@@ -533,7 +514,6 @@ final class RunnerTest extends TestCase
         self::assertSame(3, $failed->attempts());
         self::assertTrue($failed->isFailure());
         self::assertFalse($failed->wasChecked());
-        self::assertNull($failed->commitSha());
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
 
         // Three attempts at the first task and one at the second, each one
@@ -548,7 +528,7 @@ final class RunnerTest extends TestCase
         // independent work and is taken on and finished.
         self::assertCount(2, $report->results());
         self::assertTrue($report->results()[1]->isCompleted());
-        self::assertCount(1, $this->commitsBeyondBase());
+        self::assertSame([], $this->commitsBeyondBase());
 
         // Each attempt is on the record, and each one of them failed.
         $journal = $this->journal();
@@ -597,14 +577,13 @@ final class RunnerTest extends TestCase
         $failed = $report->results()[0];
         self::assertTrue($failed->isFailure());
         self::assertFalse($failed->wasChecked());
-        self::assertNull($failed->commitSha());
         self::assertSame(1, $failed->attempts());
         self::assertStringContainsString('verification failed', (string) $failed->blocker()?->reason());
 
         // Neither box is ticked, and nothing was committed.
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
         self::assertStringContainsString('- [ ] ' . self::SECOND, $this->tasksFile());
-        self::assertCount(0, $this->commitsBeyondBase());
+        self::assertSame([], $this->commitsBeyondBase());
 
         $stop = $report->stop();
         self::assertSame(StopKind::Failed, $stop->kind());
@@ -784,7 +763,7 @@ final class RunnerTest extends TestCase
         self::assertStringContainsString('attempt limit of 2 per task is spent', $blocker);
         self::assertStringContainsString('limits.attempts_per_task', $blocker);
         self::assertStringContainsString('restate the task in .ralph/tasks.md', $blocker);
-        self::assertStringContainsString((string) $given->record()->worktree()->path(), $blocker);
+        self::assertStringContainsString('left in the working tree', $blocker);
 
         // Both halves are on the row, so they outlive the process that printed
         // them.
@@ -852,146 +831,6 @@ final class RunnerTest extends TestCase
 
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
         self::assertStringContainsString('- [x] ' . self::SECOND, $this->tasksFile());
-    }
-
-    /**
-     * A task the checks already pass without any change is a verified
-     * no-change result, and not an empty commit.
-     *
-     * Section G, item 6, and the evidence half of it: what a reviewer can read
-     * instead of the commit that was deliberately not made.
-     */
-    #[Test]
-    public function a_task_that_was_already_satisfied_completes_without_a_commit(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $this->givenAWorker([FixtureStep::success()->saying('nothing to do: it already has one')]);
-
-        $terminal = new CapturingOutput();
-        $report = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
-        $result = $report->results()[0];
-
-        self::assertTrue($result->isCompleted());
-        self::assertTrue($result->isNoChange());
-        self::assertNull($result->commitSha());
-        self::assertTrue($result->wasChecked());
-        self::assertSame([], $this->commitsBeyondBase(), 'Not an empty commit.');
-        self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
-
-        $pass = $this->journal()->generations()->get($result->generation());
-        self::assertTrue($pass->isNoChange());
-        self::assertTrue($pass->hasImplementation());
-
-        // The case the ticked box rests on, made at the moment of the decision
-        // and carried on the result.
-        $satisfaction = $result->satisfaction();
-        self::assertNotNull($satisfaction);
-        self::assertTrue($satisfaction->isJustified());
-        self::assertTrue($satisfaction->isAtBase());
-        self::assertSame($this->headOfTheCheckout(), $satisfaction->head());
-        self::assertStringContainsString('1 check(s) passed', $result->reason());
-
-        // And written down beside the attempt's logs, because there is no
-        // commit for `git show` to be pointed at.
-        $record = (string) $satisfaction->recordPath();
-        self::assertSame(
-            $this->project->path(sprintf(
-                '.ralph/runtime/logs/%s/attempt-01-satisfied.md',
-                $pass->generation()->slug(),
-            )),
-            $record,
-        );
-        self::assertFileExists($record);
-
-        $written = (string) file_get_contents($record);
-        self::assertStringContainsString('already satisfied', $written);
-        self::assertStringContainsString('**tests** — `php -v`', $written);
-        self::assertStringContainsString('nothing to do: it already has one', $written);
-        self::assertStringContainsString('Nothing in them has been checked', $written);
-        self::assertStringContainsString('does not say that any configured check tests', $written);
-
-        self::assertStringContainsString('already satisfied', $terminal->standardOutput());
-    }
-
-    /**
-     * A worker that ticked the checklist inside its own workspace and changed
-     * nothing else is not a satisfied task.
-     *
-     * The case an empty index cannot be read as "already done" on its own, and
-     * the reason section G, item 6 asks for evidence rather than for the
-     * outcome: everything a green run can say is true here — the checks
-     * passed, there is nothing to commit — and completing it would make a
-     * model-written checkbox into verified execution state, which section D,
-     * item 6 forbids.
-     */
-    #[Test]
-    public function a_worker_that_only_edited_ralphs_own_files_does_not_complete_the_task(): void
-    {
-        $this->givenTasks([self::FIRST, self::SECOND]);
-
-        // The checklist as the worker would leave it: its own box ticked, in
-        // the copy inside its workspace, and no other change anywhere.
-        $this->givenAWorker([FixtureStep::success([
-            '.ralph/tasks.md' => "# Tasks\n\n- [x] " . self::FIRST . "\n- [ ] " . self::SECOND . "\n",
-        ])->saying('done — I have ticked it off')]);
-        $before = $this->snapshotOfTheCheckout();
-
-        $terminal = new CapturingOutput();
-        $report = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
-
-        self::assertCount(1, $report->results(), 'A blocked task stops the run.');
-        $result = $report->results()[0];
-
-        // Blocked, not completed and not failed: the checks passed, so there is
-        // nothing a further attempt would be told, and whether the task is
-        // really done is a question for a person.
-        self::assertTrue($result->isBlocked());
-        self::assertTrue($result->stopsTheRun());
-        self::assertTrue($result->wasVerified());
-        self::assertFalse($result->isNoChange());
-        self::assertFalse($result->wasChecked());
-        self::assertNull($result->commitSha());
-
-        // The user's checklist still says the work is pending, which is the
-        // whole point: the agent's tick was a claim in a directory nobody
-        // commits from.
-        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
-        self::assertSame([], $this->commitsBeyondBase());
-        self::assertSame($before, $this->snapshotOfTheCheckout());
-
-        $journal = $this->journal();
-        $pass = $journal->generations()->get($result->generation());
-        self::assertSame(LifecycleState::Blocked, $pass->state());
-        self::assertSame(Phase::Verifying, $pass->phase(), 'It never entered committing.');
-        self::assertStringContainsString(
-            'Ralph PHP\'s own files (.ralph/tasks.md)',
-            (string) $pass->blocker()?->reason(),
-        );
-        self::assertStringContainsString('ralph retry', (string) $pass->blocker()?->nextAction());
-
-        // What was found is on the attempt's row and in the record, and the
-        // workspace is kept so both can be read against the files.
-        $attempt = $journal->attempts()->get($pass, 1);
-        self::assertNotNull($attempt);
-        self::assertStringContainsString(
-            'no-change outcome refused',
-            (string) $attempt->evidence()?->toMarkdown(),
-        );
-        self::assertDirectoryExists((string) $pass->worktree()->path());
-
-        $record = $this->project->path(sprintf(
-            '.ralph/runtime/logs/%s/attempt-01-satisfied.md',
-            $pass->generation()->slug(),
-        ));
-        self::assertFileExists($record);
-
-        $written = (string) file_get_contents($record);
-        self::assertStringContainsString('## Why it was refused', $written);
-        self::assertStringContainsString('## Changes kept out of the commit', $written);
-        self::assertStringContainsString('.ralph/tasks.md', $written);
-        self::assertStringContainsString('done — I have ticked it off', $written);
-
-        self::assertStringContainsString('not supported', $terminal->standardOutput());
     }
 
     /**
@@ -1082,8 +921,8 @@ final class RunnerTest extends TestCase
         self::assertSame(StopKind::Limit, $run->stopKind());
         self::assertStringContainsString('limits.run_timeout', (string) $run->stopAction());
 
-        // One commit, for the one task that ran.
-        self::assertCount(1, $this->commitsBeyondBase());
+        // And nothing committed, for the one task that ran.
+        self::assertSame([], $this->commitsBeyondBase());
     }
 
     /**
@@ -1146,11 +985,11 @@ final class RunnerTest extends TestCase
         self::assertSame($earlier->rowId(), $generations[0]->runId());
         self::assertSame(LifecycleState::Completed, $generations[0]->state());
 
-        // On disk: both boxes ticked, one commit per task.
+        // On disk: both boxes ticked, and both tasks' changes left for review.
         $markdown = $this->tasksFile();
         self::assertStringContainsString('- [x] ' . self::FIRST, $markdown);
         self::assertStringContainsString('- [x] ' . self::SECOND, $markdown);
-        self::assertCount(2, $this->commitsBeyondBase());
+        self::assertSame([], $this->commitsBeyondBase());
     }
 
     /**
@@ -1174,28 +1013,6 @@ final class RunnerTest extends TestCase
     }
 
     /**
-     * The run is refused before anything is written when the user has
-     * uncommitted work of their own.
-     */
-    #[Test]
-    public function unrelated_uncommitted_changes_refuse_the_run_before_it_starts(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $this->givenAWorker();
-        $this->project->write('src/Import.php', "<?php\n\n// mine, not committed\n");
-
-        try {
-            $this->loopOver(ScriptedVerifier::passing());
-            self::fail('A run was allowed over the user\'s own uncommitted work.');
-        } catch (CheckoutException $refusal) {
-            self::assertStringContainsString('src/Import.php', $refusal->getMessage());
-        }
-
-        self::assertFileDoesNotExist($this->project->path('.ralph/runtime/state.sqlite'));
-        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
-    }
-
-    /**
      * Checks that cannot be run at all are a setup failure, not a verdict: the
      * run ends, and its row says why.
      */
@@ -1210,7 +1027,6 @@ final class RunnerTest extends TestCase
 
         self::assertTrue($result->isFailure());
         self::assertFalse($result->wasChecked());
-        self::assertNull($result->commitSha());
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
 
         $pass = $this->journal()->generations()->get($result->generation());
@@ -1267,7 +1083,7 @@ final class RunnerTest extends TestCase
      * do not have to ask the configuration what it has become.
      */
     #[Test]
-    public function the_run_records_the_agent_the_base_and_the_frozen_checks(): void
+    public function the_run_records_the_agent_and_the_frozen_checks(): void
     {
         $this->givenTasks([self::FIRST]);
         $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// done\n"])]);
@@ -1277,8 +1093,6 @@ final class RunnerTest extends TestCase
 
         self::assertSame('fixture', $run->agent()->name());
         self::assertSame('codex', $run->agent()->adapter());
-        self::assertSame('HEAD', $run->baseReference());
-        self::assertSame($this->headOfTheCheckout(), $run->baseSha());
         self::assertSame($this->project->path('.ralph/tasks.md'), $run->tasksPath());
         self::assertSame(['tests'], $run->checkNames());
         self::assertSame(1, $run->iterations());
@@ -1289,176 +1103,6 @@ final class RunnerTest extends TestCase
         $pass = $this->journal()->generations()->get($report->results()[0]->generation());
         self::assertSame('fixture', $pass->agent()->name());
         self::assertSame($run->rowId(), $pass->runId());
-    }
-
-    /**
-     * A completed pass's workspace is removed; a failed one's is kept. Both are
-     * the cleaner's decision, taken with the pass's final record.
-     */
-    #[Test]
-    public function a_completed_passs_workspace_is_removed_and_a_failed_ones_is_kept(): void
-    {
-        $this->givenTasks([self::FIRST, self::SECOND]);
-        $this->givenAWorker([
-            FixtureStep::success(['src/Import.php' => "<?php\n\n// one\n"]),
-            FixtureStep::success(['README.md' => "An example project.\n\n## Import\n"]),
-        ]);
-
-        $report = $this->loopOver(ScriptedVerifier::scripted([true, false]));
-
-        $completed = $report->results()[0];
-        $failed = $report->results()[1];
-
-        self::assertTrue($completed->isCompleted());
-        self::assertTrue($failed->isFailure());
-
-        // The completed pass's workspace is named by the cleanup it recorded,
-        // not by its row: cleanup clears the row's path, so reading it back
-        // afterwards gives nothing and asserts nothing.
-        $removed = (string) $completed->completion()?->cleanup()?->path();
-        self::assertNotSame('', $removed);
-        self::assertDirectoryDoesNotExist($removed);
-        self::assertNotContains($removed, $this->registeredWorktrees());
-
-        $journal = $this->journal();
-        self::assertNull($journal->generations()->get($completed->generation())->worktree()->path());
-
-        $kept = (string) $journal->generations()->get($failed->generation())->worktree()->path();
-        self::assertNotSame('', $kept);
-        self::assertDirectoryExists($kept);
-        self::assertContains($kept, $this->registeredWorktrees());
-
-        // The completed pass's branch and commit survive the workspace.
-        self::assertSame($completed->commitSha(), $this->tipOf((string) $completed->branch()));
-    }
-
-    /**
-     * The workspace is removed as the last step of a completion, after
-     * everything the task's work depends on is durable (PROJECT.md section K,
-     * item 6).
-     *
-     * The order is the guarantee, so the case is built so that every step
-     * before the removal really happens: a real bare remote, so the push is a
-     * real `git push` that really has to succeed, and the box really written in
-     * the user's file. Only then is the directory asserted gone — and gone from
-     * `git worktree list` as well as from the disk, because the registration
-     * Git keeps is the half that makes `git worktree add` refuse the path next
-     * time.
-     *
-     * What survives it is asserted beside it: the branch, the commit, the
-     * commit on the remote, and the row — which keeps the commit, the branch
-     * and the publication and stops naming a directory that is no longer there.
-     */
-    #[Test]
-    public function a_completed_passs_workspace_goes_once_the_commit_the_push_and_the_tick_are_durable(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
-        $remote = $this->givenABareRemote();
-
-        $result = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'))->results()[0];
-
-        // Everything the removal had to wait for.
-        self::assertTrue($result->isCompleted());
-        self::assertTrue($result->wasChecked());
-        self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
-        self::assertSame($result->commitSha(), $this->remoteTipOf($remote, (string) $result->branch()));
-
-        // The workspace, named by the cleanup the completion recorded rather
-        // than by a path reconstructed here.
-        $cleanup = $result->completion()?->cleanup();
-        self::assertNotNull($cleanup, 'A completed pass records what became of its workspace.');
-        self::assertTrue($cleanup->wasRemoved());
-
-        $workspace = (string) $cleanup->path();
-        self::assertStringStartsWith($this->project->path('.ralph/runtime/worktrees'), $workspace);
-        self::assertDirectoryDoesNotExist($workspace);
-        self::assertNotContains($workspace, $this->registeredWorktrees(), 'Git still has the worktree.');
-
-        // The row keeps what a reviewer needs and stops pointing at a
-        // directory that has gone.
-        $pass = $this->journal()->generations()->get($result->generation());
-        self::assertSame(LifecycleState::Completed, $pass->state());
-        self::assertNull($pass->worktree()->path());
-        self::assertFalse($pass->worktree()->isOwned());
-        self::assertSame($result->commitSha(), $pass->commitSha());
-        self::assertSame(PushState::Published, $pass->push()->state());
-
-        // And the work is still where the record says it is.
-        self::assertSame($result->commitSha(), $this->tipOf((string) $result->branch()));
-    }
-
-    /**
-     * A pass that still owes its publication keeps its workspace, and loses it
-     * when the publication lands.
-     *
-     * The ordering of section K, item 6 read from the other direction: the
-     * removal is part of a *completion*, so a pass that got as far as the
-     * commit and no further has nothing removed. The second run finishes the
-     * same pass by retrying only the push ({@see
-     * self::a_pass_owing_a_publication_is_finished_by_retrying_only_the_push()}),
-     * and the workspace goes then — a pass finished on a resume owes its
-     * workspace no differently for having been finished a run later.
-     */
-    #[Test]
-    public function a_pass_owing_a_publication_keeps_its_workspace_until_the_push_lands(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
-
-        // `origin` is configured and absent, so the push fails after the commit.
-        $failed = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'))->results()[0];
-
-        self::assertFalse($failed->isCompleted());
-
-        $pass = $this->journal()->generations()->get($failed->generation());
-        $workspace = (string) $pass->worktree()->path();
-
-        self::assertTrue($pass->awaitsPublication());
-        self::assertDirectoryExists($workspace, 'An unfinished pass keeps its workspace.');
-        self::assertContains($workspace, $this->registeredWorktrees());
-
-        // The user adds the remote, and the resume finishes the pass.
-        $remote = $this->givenABareRemote();
-        $result = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'))->results()[0];
-
-        self::assertTrue($result->isCompleted());
-        self::assertTrue($result->wasChecked());
-        self::assertSame($failed->commitSha(), $this->remoteTipOf($remote, (string) $result->branch()));
-
-        // The same directory, now that the completion is durable.
-        self::assertDirectoryDoesNotExist($workspace);
-        self::assertNotContains($workspace, $this->registeredWorktrees());
-        self::assertNull(
-            $this->journal()->generations()->get($result->generation())->worktree()->path(),
-        );
-    }
-
-    /**
-     * The record of the tick says where the workspace went.
-     *
-     * The completion record is what `ralph logs` sends a reader to, and after
-     * this item it is also the answer to "where is the checkout the work was
-     * written in". A reviewer who goes looking for it should find the removal
-     * stated as a step that was taken on purpose, after the commit, with the
-     * commit named as the place the work is now.
-     */
-    #[Test]
-    public function the_record_of_the_tick_says_where_the_workspace_went(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
-
-        $result = $this->loopOver(ScriptedVerifier::passing())->results()[0];
-        $record = (string) $result->completion()?->recordPath();
-
-        self::assertFileExists($record);
-        $written = (string) file_get_contents($record);
-
-        self::assertStringContainsString('## The workspace', $written);
-        self::assertStringContainsString((string) $result->completion()?->cleanup()?->path(), $written);
-        self::assertStringContainsString('was removed', $written);
-        self::assertStringContainsString((string) $result->branch(), $written);
     }
 
     /**
@@ -1504,7 +1148,7 @@ final class RunnerTest extends TestCase
                 'src/Import.php' => "<?php\n\n// one\n",
                 // The project's own configuration, four directories above a
                 // task workspace: the file the next run will read.
-                '../../../../.ralph/config.json' => self::REPLACED_CHECKS,
+                '.ralph/config.json' => self::REPLACED_CHECKS,
             ]),
             FixtureStep::success(['README.md' => "An example project.\n\n## Import\n"]),
         ]);
@@ -1560,7 +1204,7 @@ final class RunnerTest extends TestCase
         $this->givenTasks([self::FIRST]);
         $this->givenAWorker([FixtureStep::success([
             'src/Import.php' => "<?php\n\n// done\n",
-            '../../../../.ralph/config.json' => '{ this is no longer JSON',
+            '.ralph/config.json' => '{ this is no longer JSON',
         ])]);
 
         $terminal = new CapturingOutput();
@@ -1576,96 +1220,6 @@ final class RunnerTest extends TestCase
         self::assertTrue($drift->hasChanged());
         self::assertStringContainsString('not valid JSON', (string) $drift->unreadableReason());
         self::assertStringContainsString('unreadable:', $terminal->standardOutput());
-    }
-
-    /**
-     * The other half of the frozen checks, end to end: a green run whose diff
-     * deleted the test that would have failed.
-     *
-     * Section G, item 5. Item 3 stops a worker choosing *which* commands judge
-     * its work; nothing there stops it choosing what those commands then find.
-     * The verifier here passes — which is the point, since a case where the
-     * checks failed would prove nothing about this — so everything asserted
-     * below follows from the diff alone.
-     */
-    #[Test]
-    public function a_diff_that_deletes_the_projects_tests_is_not_committed(): void
-    {
-        $this->project->write('tests/ImportTest.php', <<<'PHP'
-            <?php
-
-            final class ImportTest
-            {
-                public function testItImports(): void
-                {
-                    self::assertTrue(import());
-                }
-            }
-
-            PHP);
-        Git::run($this->project->root(), 'add', '--all');
-        Git::commit($this->project->root(), 'Add the import test');
-
-        $this->givenTasks([self::FIRST, self::SECOND]);
-        $this->givenAWorker([FixtureStep::success([
-            'src/Import.php' => "<?php\n\n// --dry-run\n",
-            'tests/ImportTest.php' => null,
-        ])]);
-        $before = $this->snapshotOfTheCheckout();
-
-        $terminal = new CapturingOutput();
-        $report = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
-
-        self::assertCount(1, $report->results(), 'A blocked task stops the run.');
-        $result = $report->results()[0];
-
-        // Blocked rather than failed: the checks passed, so there is nothing
-        // for another attempt to act on, and what is in question is a judgement
-        // only a person can make.
-        self::assertTrue($result->isBlocked());
-        self::assertTrue($result->stopsTheRun());
-        self::assertTrue($result->wasVerified(), 'The checks passed; the diff is what stopped it.');
-
-        // The three things that must not have happened.
-        self::assertNull($result->commitSha());
-        self::assertFalse($result->wasChecked());
-        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
-
-        $journal = $this->journal();
-        $pass = $journal->generations()->get($result->generation());
-
-        self::assertSame(LifecycleState::Blocked, $pass->state());
-        self::assertSame(Phase::Verifying, $pass->phase(), 'It never entered committing.');
-        self::assertStringContainsString('weakens', (string) $pass->blocker()?->reason());
-        self::assertStringContainsString('not comprehensive', (string) $pass->blocker()?->nextAction());
-
-        // The work is kept twice over: the workspace with the diff still
-        // staged, and the patch as a file a reviewer can read on its own.
-        $workspace = (string) $pass->worktree()->path();
-        self::assertDirectoryExists($workspace);
-        self::assertSame(
-            ['src/Import.php', 'tests/ImportTest.php'],
-            $this->stagedIn($workspace),
-        );
-
-        $diff = $this->project->path(sprintf(
-            '.ralph/runtime/logs/%s/attempt-01-staged.diff',
-            $pass->generation()->slug(),
-        ));
-        self::assertFileExists($diff);
-        self::assertStringContainsString(
-            '-    public function testItImports(): void',
-            (string) file_get_contents($diff),
-        );
-
-        // The attempt's row carries what was found, for the next person rather
-        // than for the next attempt.
-        $attempt = $journal->attempts()->get($pass, 1);
-        self::assertNotNull($attempt);
-        self::assertStringContainsString('a test file removed', (string) $attempt->evidence()?->toMarkdown());
-
-        self::assertStringContainsString('weakens', $terminal->standardOutput());
-        self::assertSame($before, $this->snapshotOfTheCheckout());
     }
 
     /**
@@ -1691,14 +1245,11 @@ final class RunnerTest extends TestCase
 
         $result = $report->results()[0];
 
-        // The work: committed, verified, and not thrown away.
+        // The work: done, verified, and not thrown away.
         self::assertTrue($result->wasVerified());
         self::assertFalse($result->wasChecked());
         self::assertFalse($result->isCompleted());
-        self::assertCount(1, $this->commitsBeyondBase());
-
-        $sha = (string) $result->commitSha();
-        self::assertSame($sha, $this->tipOf((string) $result->branch()));
+        self::assertStringContainsString('// --dry-run', $this->fileInTheCheckout('src/Import.php'));
 
         // The box is as the user left it.
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
@@ -1707,7 +1258,6 @@ final class RunnerTest extends TestCase
         $pass = $journal->generations()->get($result->generation());
         self::assertSame(LifecycleState::Blocked, $pass->state());
         self::assertSame(Phase::Finalizing, $pass->phase());
-        self::assertTrue($pass->isFinalizable(), 'The Git side of the tick is already satisfied.');
         self::assertStringContainsString(
             'pending finalization',
             (string) $pass->blocker()?->nextAction(),
@@ -1763,11 +1313,10 @@ final class RunnerTest extends TestCase
         $second = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal);
         $result = $second->results()[0];
 
-        // The same pass, the same attempt, the same commit.
+        // The same pass, the same attempt, and the work not asked for again.
         self::assertSame($blocked->generation()->number(), $result->generation()->number());
         self::assertSame(1, $result->attempts());
-        self::assertSame($blocked->commitSha(), $result->commitSha());
-        self::assertCount(1, $this->commitsBeyondBase());
+        self::assertSame([], $this->commitsBeyondBase());
 
         // The agent was invoked once, by the run that implemented the task.
         self::assertCount(1, $worker->attempts());
@@ -1907,8 +1456,7 @@ final class RunnerTest extends TestCase
         self::assertSame($blocked->generation()->number(), $result->generation()->number());
         self::assertCount(1, $worker->attempts(), 'The agent was not invoked again.');
         self::assertSame(1, $result->attempts());
-        self::assertSame($blocked->commitSha(), $result->commitSha());
-        self::assertCount(1, $this->commitsBeyondBase());
+        self::assertSame([], $this->commitsBeyondBase());
 
         // And the box is as the user left it.
         self::assertFalse($result->wasChecked());
@@ -1934,237 +1482,6 @@ final class RunnerTest extends TestCase
         self::assertSame(
             Completion::Pending,
             $journal->tasks()->get($result->taskId())->completion(),
-        );
-    }
-
-    /**
-     * A push the remote refuses leaves the pass owing its publication and
-     * nothing else.
-     *
-     * Section H, item 7's precondition, and the state the resume below reads.
-     * The remote is deliberately absent — `origin` is in the configuration and
-     * not in the repository, which is the mistake a user actually makes when
-     * they turn pushing on. Everything before the push succeeded, so the three
-     * things that must survive it are asserted: the commit is on its branch at
-     * the SHA the row recorded, the row says the publication failed, and the
-     * box is as the user left it.
-     */
-    #[Test]
-    public function a_push_the_remote_refuses_leaves_the_pass_owing_only_its_publication(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
-
-        $terminal = new CapturingOutput();
-        $report = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'), $terminal);
-
-        $result = $report->results()[0];
-
-        // The work: committed, verified, and not thrown away.
-        self::assertTrue($result->wasVerified());
-        self::assertFalse($result->wasChecked());
-        self::assertFalse($result->isCompleted());
-        self::assertCount(1, $this->commitsBeyondBase());
-
-        $sha = (string) $result->commitSha();
-        self::assertSame($sha, $this->tipOf((string) $result->branch()));
-
-        // The box is as the user left it.
-        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
-
-        $journal = $this->journal();
-        $pass = $journal->generations()->get($result->generation());
-        self::assertSame(LifecycleState::Failed, $pass->state());
-        self::assertSame(Phase::Publishing, $pass->phase());
-        self::assertSame(PushState::Failed, $pass->push()->state());
-        self::assertSame('origin', $pass->push()->remote());
-        self::assertNotNull($pass->push()->error(), 'The reason the push failed is kept.');
-        self::assertTrue($pass->awaitsPublication(), 'The push is the only thing outstanding.');
-        self::assertFalse($pass->isFinalizable());
-        self::assertStringContainsString(
-            'retry the push alone',
-            (string) $pass->blocker()?->nextAction(),
-        );
-
-        // No checklist write was ever planned: the pass stopped before it.
-        self::assertNull($journal->checklists()->outstandingFor($pass));
-    }
-
-    /**
-     * The item itself: a resume retries the push and nothing before it.
-     *
-     * The agent is not invoked, no second commit appears, no attempt is spent,
-     * and the commit the first run made is the one that reaches the remote and
-     * the one the completed task points at. The worker is given no further
-     * steps on purpose — a run that reached it would fail rather than quietly
-     * produce a second implementation.
-     */
-    #[Test]
-    public function a_pass_owing_a_publication_is_finished_by_retrying_only_the_push(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
-
-        $first = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'));
-        $failed = $first->results()[0];
-        self::assertFalse($failed->wasChecked());
-
-        // The user adds the remote they had not got round to adding.
-        $remote = $this->givenABareRemote();
-
-        $terminal = new CapturingOutput();
-        $second = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'), $terminal);
-        $result = $second->results()[0];
-
-        // The same pass, the same attempt, the same commit.
-        self::assertSame($failed->generation()->number(), $result->generation()->number());
-        self::assertSame(1, $result->attempts());
-        self::assertSame($failed->commitSha(), $result->commitSha());
-        self::assertCount(1, $this->commitsBeyondBase(), 'One commit, not two.');
-
-        // The agent was invoked once, by the run that implemented the task.
-        self::assertCount(1, $worker->attempts());
-
-        // Read out of the remote rather than from the row that claims it.
-        self::assertSame(
-            $failed->commitSha(),
-            $this->remoteTipOf($remote, (string) $result->branch()),
-        );
-
-        // And now it is done.
-        self::assertTrue($result->isCompleted());
-        self::assertTrue($result->wasChecked());
-        self::assertStringContainsString('- [x] ' . self::FIRST, $this->tasksFile());
-
-        $journal = $this->journal();
-        $pass = $journal->generations()->get($result->generation());
-        self::assertSame(LifecycleState::Completed, $pass->state());
-        self::assertNull($pass->phase());
-        self::assertSame(PushState::Published, $pass->push()->state());
-        self::assertNull($pass->push()->error(), 'The refusal is not still on the row.');
-        self::assertNull($pass->blocker(), 'Nor the reason it stopped for.');
-        self::assertSame(
-            Completion::RunnerVerified,
-            $journal->tasks()->get($result->taskId())->completion(),
-        );
-
-        // The checks were not run again: the report the task completed on is
-        // the one the first run recorded.
-        self::assertTrue($result->wasVerified());
-        $attempt = $journal->attempts()->get($pass, 1);
-        self::assertNotNull($attempt);
-        self::assertCount(1, (new VerificationStore($journal->database()))->forAttempt($attempt));
-
-        // One plan for the box, made by the run that wrote it.
-        $applied = $journal->checklists()->latestFor($pass);
-        self::assertNotNull($applied);
-        self::assertSame(ChecklistUpdateState::Applied, $applied->state());
-        self::assertSame(1, $applied->attempts());
-        self::assertCount(1, $journal->checklists()->forGeneration($pass));
-
-        self::assertStringContainsString('retrying only the push', $terminal->standardOutput());
-    }
-
-    /**
-     * A remote that refuses twice is recorded twice, and still nothing is
-     * repeated.
-     *
-     * The failure mode this rules out is a resume that treats "the push failed
-     * again" as "the task failed", goes back to the agent, and commits the work
-     * a second time. The remote is never added here, so the second run's push
-     * is refused for the same reason the first one was.
-     */
-    #[Test]
-    public function a_publication_that_is_refused_again_repeats_no_implementation(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
-
-        $first = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'));
-        $failed = $first->results()[0];
-
-        $terminal = new CapturingOutput();
-        $second = $this->loopOver(ScriptedVerifier::passing(), $this->pushingTo('origin'), $terminal);
-        $result = $second->results()[0];
-
-        self::assertFalse($result->wasChecked());
-        self::assertSame($failed->commitSha(), $result->commitSha());
-        self::assertCount(1, $this->commitsBeyondBase(), 'The commit was not made again.');
-        self::assertCount(1, $worker->attempts(), 'The agent was not invoked again.');
-        self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
-
-        // Still owed, still retryable, and the attempt limit was not spent on
-        // somebody else's server.
-        $pass = $this->journal()->generations()->get($result->generation());
-        self::assertSame(LifecycleState::Failed, $pass->state());
-        self::assertSame(Phase::Publishing, $pass->phase());
-        self::assertTrue($pass->awaitsPublication());
-        self::assertSame(1, $pass->attempts());
-    }
-
-    /**
-     * A branch moved off the recorded commit while the push was owed stops the
-     * pass instead of publishing whatever is there now.
-     *
-     * {@see \Celyes\RalphPhp\Git\TaskPublisher} publishes the commit the row
-     * records and refuses anything else, and a resume has to carry that
-     * refusal rather than fall back to another attempt: what is on the branch
-     * now has passed no check of this run, and a remote other people fetch is
-     * the wrong place to find that out.
-     */
-    #[Test]
-    public function a_branch_moved_while_the_push_was_owed_blocks_rather_than_publishing(): void
-    {
-        $this->givenTasks([self::FIRST]);
-        $worker = $this->givenAWorker([FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run\n"])]);
-
-        // Per task: the refusal under test belongs to the pass, which carries
-        // it from phase to phase. A shared branch somebody has committed to is
-        // refused once per run instead, before a task is taken on, so the run
-        // would stop before reaching the publication this case is about.
-        $perTask = array_replace_recursive($this->pushingTo('origin'), ['git' => ['strategy' => 'per-task']]);
-
-        $first = $this->loopOver(ScriptedVerifier::passing(), $perTask);
-        $failed = $first->results()[0];
-        $branch = (string) $failed->branch();
-
-        $remote = $this->givenABareRemote();
-
-        // A failed pass keeps its worktree for inspection (section F, item 10),
-        // and a person who went to look made a commit of their own in it. The
-        // branch is now past the commit the row records.
-        $worktree = (string) $this->journal()
-            ->generations()
-            ->get($failed->generation())
-            ->worktree()
-            ->path();
-        file_put_contents($worktree . '/NOTES.md', "Mine.\n");
-        Git::run($worktree, 'add', 'NOTES.md');
-        Git::commit($worktree, 'Somebody looks at the work and adds to it');
-
-        $report = $this->loopOver(ScriptedVerifier::passing(), $perTask);
-        $result = $report->results()[0];
-
-        self::assertFalse($result->wasChecked());
-        self::assertCount(1, $worker->attempts(), 'The agent was not invoked again.');
-        self::assertNull($this->remoteTipOf($remote, $branch), 'Nothing reached the remote.');
-
-        // The commit itself is untouched, which is what the hints send a person
-        // to look at.
-        self::assertNotNull($failed->commitSha());
-        self::assertSame(
-            $failed->commitSha(),
-            trim(Git::run($this->project->root(), 'rev-parse', (string) $failed->commitSha())->standardOutput),
-        );
-
-        $pass = $this->journal()->generations()->get($result->generation());
-        self::assertSame(LifecycleState::Blocked, $pass->state());
-        self::assertTrue($pass->awaitsPublication(), 'The push is still owed.');
-        self::assertStringContainsString('could not be published', (string) $pass->blocker()?->reason());
-        self::assertStringContainsString('diverged', (string) $pass->blocker()?->reason());
-        self::assertStringContainsString(
-            'Nothing was implemented or committed again.',
-            (string) $pass->blocker()?->nextAction(),
         );
     }
 
@@ -2204,7 +1521,6 @@ final class RunnerTest extends TestCase
         self::assertFalse($result->isCompleted());
         self::assertFalse($result->wasChecked());
         self::assertTrue($result->stopsTheRun());
-        self::assertNull($result->commitSha(), 'An interrupted attempt committed something.');
         self::assertCount(1, $report->interrupted());
 
         // The worker, which was really stopped: it recorded the signal, and the
@@ -2241,14 +1557,11 @@ final class RunnerTest extends TestCase
         self::assertStringContainsString('ralph resume', (string) $run->stopAction());
         self::assertFalse($report->stoppedForAttention(), 'A stop the user asked for is not a problem to look into.');
 
-        // The files: the workspace is kept exactly as the stopped agent left
-        // it, which is the evidence a person needs (section F, item 10).
-        $workspace = (string) $pass->worktree()->path();
-        self::assertDirectoryExists($workspace);
-        self::assertStringContainsString('half done', (string) file_get_contents($workspace . '/src/Import.php'));
+        // The files: whatever the stopped agent had written is left exactly as
+        // it left it, which is the evidence a person needs.
+        self::assertStringContainsString('half done', $this->fileInTheCheckout('src/Import.php'));
 
-        // The user's checkout and checklist are untouched, and nothing was
-        // committed anywhere.
+        // Neither box is ticked, and nothing was committed anywhere.
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->tasksFile());
         self::assertStringContainsString('- [ ] ' . self::SECOND, $this->tasksFile());
         self::assertSame([], $this->commitsBeyondBase());
@@ -2696,10 +2009,6 @@ final class RunnerTest extends TestCase
             // become three cases — and how many attempts a case makes is
             // something its assertions depend on and should state.
             'limits' => ['attempts_per_task' => 1],
-            // Nothing to install and nothing to copy: the worker needs no
-            // dependencies, and preparation is section F, item 5's subject
-            // rather than this one's.
-            'workspace' => ['prepare' => [], 'copy' => []],
         ], $overrides);
     }
 
@@ -2858,134 +2167,59 @@ final class RunnerTest extends TestCase
     {
         return trim(Git::run($this->project->root(), 'rev-parse', 'HEAD')->standardOutput);
     }
-
     /**
-     * What is in a workspace's index, read back from Git.
+     * What the working tree holds that no commit does, as `git status` reports
+     * it.
      *
-     * `--no-renames`, because what is being asserted is the index's own
-     * contents: a rename reported as one path would hide whether the deletion
-     * it depends on is in there with it.
+     * The assertion the loop's promise now rests on: the agent edits the
+     * project in place, the tick is written into the user's own file, and
+     * nothing is committed (PROJECT.md section K, item 1).
      *
      * @return list<string>
      */
-    private function stagedIn(string $directory): array
+    private function workingTreeChanges(): array
     {
-        $output = trim(
-            Git::run($directory, 'diff', '--cached', '--name-only', '--no-renames')->standardOutput,
-        );
+        $lines = Git::run($this->project->root(), 'status', '--porcelain')->standardOutputLines();
 
-        if ($output === '') {
-            return [];
-        }
+        sort($lines);
 
-        $paths = explode("\n", $output);
-        sort($paths);
-
-        return array_map('trim', $paths);
+        return $lines;
     }
 
     /**
-     * The worktrees Git itself has registered for this repository.
-     *
-     * The half of a removal that is not visible on the filesystem: an
-     * administrative record left behind is what makes `git worktree add` refuse
-     * the path the next time a task wants it, so cleanup is only finished when
-     * this no longer names the directory (PROJECT.md section K, item 6).
+     * Every branch this repository has, for the claim that a run created none.
      *
      * @return list<string>
      */
-    private function registeredWorktrees(): array
+    private function branches(): array
     {
-        $paths = [];
+        $branches = Git::run($this->project->root(), 'branch', '--format=%(refname:short)')
+            ->standardOutputLines();
 
-        foreach (Git::run($this->project->root(), 'worktree', 'list', '--porcelain')->standardOutputLines() as $line) {
-            if (str_starts_with($line, 'worktree ')) {
-                $paths[] = substr($line, strlen('worktree '));
-            }
-        }
+        sort($branches);
 
-        return $paths;
-    }
-
-    private function tipOf(string $branch): ?string
-    {
-        $result = Git::tryRun($this->project->root(), 'rev-parse', '--verify', $branch);
-
-        return $result->exitCode === 0 ? trim($result->standardOutput) : null;
+        return $branches;
     }
 
     /**
-     * Publication turned on, aimed at a remote by name.
-     *
-     * The name is all the configuration carries: whether a repository has a
-     * remote by that name is a fact about the repository, which is what makes
-     * "pushing is on and `origin` does not exist yet" something a case can set
-     * up by saying nothing more.
-     *
-     * @return array<string, mixed>
+     * A file in the user's checkout, which is where the work now happens.
      */
-    private function pushingTo(string $remote): array
+    private function fileInTheCheckout(string $relative): string
     {
-        return ['git' => ['push' => ['enabled' => true, 'remote' => $remote]]];
+        return (string) file_get_contents($this->project->path($relative));
     }
-
     /**
-     * A bare repository on the same disk, added to the project as `origin`.
+     * Commits this repository holds that the user's checkout cannot reach.
      *
-     * A real remote with a real `git push` behind it and no network or
-     * credentials involved (PROJECT.md section J, items 6 and 8).
-     */
-    private function givenABareRemote(): string
-    {
-        $remote = TemporaryDirectory::create('ralph-remote-');
-        $this->remotes[] = $remote;
-
-        Git::initialise($remote, bare: true);
-        Git::run($this->project->root(), 'remote', 'add', 'origin', $remote);
-
-        return $remote;
-    }
-
-    private function remoteTipOf(string $remote, string $branch): ?string
-    {
-        $result = Git::tryRun($remote, 'rev-parse', '--verify', '--quiet', 'refs/heads/' . $branch);
-
-        return $result->exitCode === 0 ? trim($result->standardOutput) : null;
-    }
-
-    /**
-     * Every commit in the repository that is not the base.
+     * Empty in every case, which is the point of asking: nothing the loop does
+     * produces a commit or moves a branch (PROJECT.md section K, item 1).
      *
      * @return list<string>
      */
     private function commitsBeyondBase(): array
     {
         $result = Git::run($this->project->root(), 'log', '--all', '--format=%H', 'HEAD..');
-        $lines = array_filter(array_map('trim', explode("\n", $result->standardOutput)));
-
-        return array_values($lines);
-    }
-
-    /**
-     * The commit a commit was made on top of.
-     */
-    private function parentOf(string $sha): string
-    {
-        return trim(Git::run($this->project->root(), 'rev-parse', $sha . '^')->standardOutput);
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function filesIn(string $sha): array
-    {
-        $result = Git::run($this->project->root(), 'show', '--name-only', '--format=', $sha);
 
         return array_values(array_filter(array_map('trim', explode("\n", $result->standardOutput))));
-    }
-
-    private function messageOf(string $sha): string
-    {
-        return Git::run($this->project->root(), 'show', '--no-patch', '--format=%B', $sha)->standardOutput;
     }
 }

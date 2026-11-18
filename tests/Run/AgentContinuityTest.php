@@ -541,7 +541,7 @@ final class AgentContinuityTest extends TestCase
 
         self::assertSame(ExitCode::SUCCESS, $help->exitCode, $help->describe());
         self::assertStringContainsString(
-            'continues with the agent and settings recorded for the original run',
+            'with the agent and the settings',
             $help->standardOutput,
             $help->describe(),
         );

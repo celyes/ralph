@@ -25,7 +25,7 @@ use Celyes\RalphPhp\Exception\RalphException;
  * identically, and the run must stop with an explanation. Invoking it happens
  * once per attempt, and nearly everything that goes wrong there is an outcome
  * the loop records and may retry. Keeping them apart is also what lets the
- * runner report an unusable agent before it creates a worktree or a branch.
+ * runner report an unusable agent before it briefs one.
  *
  * A provider holds no state about a run. It may be asked for an adapter more
  * than once — one per run — and each answer must be independently usable.

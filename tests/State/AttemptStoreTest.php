@@ -663,9 +663,6 @@ final class AttemptStoreTest extends TestCase
             TaskGeneration::first($snapshot->id()),
             $snapshot,
             AgentRecord::ofDefinition(AgentDefinition::builtIn('codex')),
-            'main',
-            'a1b2c3d4e5f6',
-            null,
             $this->runId,
         );
     }
@@ -710,8 +707,8 @@ final class AttemptStoreTest extends TestCase
         $this->database->execute(
             'INSERT INTO runs
                  (run_id, state, agent, adapter, agent_source, agent_settings, configuration,
-                  checks, tasks_path, base_reference, started_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                  checks, tasks_path, started_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 sprintf('RUN-%04d', $this->runs + 1),
                 'running',
@@ -722,7 +719,6 @@ final class AttemptStoreTest extends TestCase
                 '{}',
                 $checks,
                 '.ralph/tasks.md',
-                'main',
                 '2026-11-01T09:30:00+00:00',
                 '2026-11-01T09:30:00+00:00',
             ],
