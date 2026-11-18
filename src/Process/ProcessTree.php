@@ -11,7 +11,7 @@ namespace Celyes\RalphPhp\Process;
  * in practice. A coding agent's CLI is rarely one process: it spawns a language
  * server, a test run, a `git` of its own, sometimes a shell around all of them.
  * Signalling only the process the loop itself started leaves those behind — still
- * holding the task worktree open, still writing files the runner is about to
+ * holding the project open, still writing files the runner is about to
  * stage — and a run that reported itself stopped while they were running would
  * be exactly the state H, item 1's lock exists to make impossible.
  *

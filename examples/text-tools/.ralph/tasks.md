@@ -5,7 +5,8 @@ one stands on its own: it touches its own files and is verified by this
 package's own suite, `composer test`.
 
 The checkbox below is ticked by the runner, not by you — a task is checked off
-only after the suite passes on its branch and the change is committed.
+only after the suite passes over the change it made. Nothing is committed:
+reading the result and committing it is yours to do.
 
 ## The work
 

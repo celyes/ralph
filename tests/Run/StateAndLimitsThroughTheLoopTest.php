@@ -70,7 +70,7 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and a run commits in real worktrees.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = LoopProject::create();
@@ -137,7 +137,7 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
             $this->project->path('.ralph/runtime/state.sqlite'),
             'A refused setting does not get as far as creating a state store.',
         );
-        self::assertSame([], $this->project->taskBranches());
+        self::assertSame([], $this->project->workingTreeChanges());
         self::assertSame($before, $this->project->checklist());
     }
 
@@ -167,8 +167,7 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
         self::assertSame(ExitCode::LIMIT, $this->project->ralph(['run'])->exitCode);
 
         $finished = $this->pass(self::FIRST);
-        $branch = (string) $finished->branch();
-        $commit = (string) $finished->commitSha();
+        $finishedAt = (string) $finished->finishedAt()?->value();
         $checklist = $this->project->checklist();
 
         // The user leaves a blank argument in the check command, which is the
@@ -181,11 +180,11 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
         self::assertSame(ExitCode::CONFIGURATION, $refused->exitCode, $refused->describe());
         self::assertStringContainsString('"checks.0.command.1"', $refused->errorOutput, $refused->describe());
 
-        // Nothing moved: the finished pass, its branch, its commit and the
-        // file are as the first run left them.
+        // Nothing moved: the file is as the first run left it, and the agent
+        // was never invoked again. The store is read below rather than here —
+        // reading it means loading the settings, and for these few lines there
+        // are none this package will accept.
         self::assertSame($checklist, $this->project->checklist());
-        self::assertSame([$branch], $this->project->taskBranches());
-        self::assertSame($commit, $this->project->headOf($branch));
 
         // Put back, the setting is the whole of the recovery.
         $this->project->editConfiguration();
@@ -201,7 +200,11 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
 
         self::assertSame(ExitCode::SUCCESS, $carried->exitCode, $carried->describe());
         self::assertStringContainsString('1 of 1 tasks completed', $carried->standardOutput, $carried->describe());
-        self::assertSame($commit, $this->pass(self::FIRST)->commitSha(), 'The finished pass is still the finished pass.');
+        self::assertSame(
+            $finishedAt,
+            (string) $this->pass(self::FIRST)->finishedAt()?->value(),
+            'The finished pass is still the finished pass.',
+        );
         self::assertCount(1, $this->project->journal()->generations()->forTask($this->identify(self::FIRST)));
         self::assertStringContainsString('- [x] ' . self::SECOND, $this->project->checklist());
     }
@@ -254,13 +257,12 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
         // leave a pass to account for that no agent was ever asked about.
         self::assertSame([], $this->project->journal()->generations()->forTask($this->identify(self::FOURTH)));
 
-        // Only the completed pass earned a box, a branch and a commit.
+        // Only the completed pass earned a box.
         $checklist = $this->project->checklist();
         self::assertStringContainsString('- [x] ' . self::FIRST, $checklist);
         self::assertStringContainsString('- [ ] ' . self::SECOND, $checklist);
         self::assertStringContainsString('- [ ] ' . self::THIRD, $checklist);
         self::assertStringContainsString('- [ ] ' . self::FOURTH, $checklist);
-        self::assertCount(1, $this->project->taskBranches());
 
         // And the same four answers come back out of the store, through a
         // second process that only read it.
@@ -324,11 +326,9 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
         $pass = $this->pass(self::FIRST);
         self::assertSame(LifecycleState::Failed, $pass->state());
         self::assertSame(Phase::Executing, $pass->phase(), 'The pass stopped where it was: waiting for the agent.');
-        self::assertNull($pass->commitSha(), 'An attempt that never finished has nothing to commit.');
 
-        // The half-written work is kept where a person can look at it, and the
-        // box stays empty.
-        self::assertDirectoryExists($this->project->path('.ralph/runtime/worktrees/' . $this->identify(self::FIRST)->value()));
+        // Whatever the stopped agent had written is left where it wrote it,
+        // and the box stays empty.
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->project->checklist());
     }
 
@@ -380,9 +380,8 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
         }
 
         // Spent attempts are a reason to stop retrying, not a reason to tick a
-        // box or to claim a commit.
+        // box.
         self::assertStringContainsString('- [ ] ' . self::FIRST, $this->project->checklist());
-        self::assertSame([], $this->project->commitsOn((string) $pass->branch()));
         self::assertSame(
             Completion::Pending,
             $this->completionOf(self::FIRST),
@@ -447,12 +446,11 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
         self::assertSame(0, $row->carriedIterations());
 
         // And the first run's completed task was not offered to the agent
-        // again: two tasks, one pass each, and a commit each on the branch the
-        // two runs share.
+        // again: two tasks, one pass each, and both runs' work left in the one
+        // checkout.
         self::assertCount(1, $this->project->journal()->generations()->forTask($this->identify(self::FIRST)));
         self::assertCount(1, $this->project->journal()->generations()->forTask($this->identify(self::SECOND)));
-        self::assertSame(['ralph/shared'], $this->project->taskBranches());
-        self::assertCount(2, $this->project->commitsOn('ralph/shared'));
+        self::assertNotSame([], $this->project->workingTreeChanges());
     }
 
     /**
@@ -493,7 +491,6 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
 
         // The task in hand was carried through, budget or no budget.
         self::assertSame(LifecycleState::Completed, $this->pass(self::FIRST)->state());
-        self::assertNotNull($this->pass(self::FIRST)->commitSha());
         self::assertStringContainsString('- [x] ' . self::FIRST, $this->project->checklist());
 
         // The next one was not opened, and what the run spent is on the record
@@ -544,11 +541,9 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
         // The imported item has nothing behind it, and no attempt was spent on
         // finding that out: it was skipped, not run and found to be done.
         self::assertSame([], $this->project->journal()->generations()->forTask($this->identify(self::DONE)));
-        self::assertCount(1, $this->project->taskBranches());
 
         $verified = $this->pass(self::FIRST);
         self::assertSame(LifecycleState::Completed, $verified->state());
-        self::assertNotNull($verified->commitSha());
 
         // What a person reads: one sentence that splits the count, and a row
         // for each task saying on whose word it is done.
@@ -575,14 +570,14 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
             $reported[$task->string('description')] = [
                 'completion' => $task->string('completion'),
                 'attempts' => $task->integer('attempts'),
-                'has_commit' => !$task->isNull('commit'),
+                'checked' => $task->boolean('checked'),
             ];
         }
 
         self::assertSame(
             [
-                self::FIRST => ['completion' => 'runner_verified', 'attempts' => 1, 'has_commit' => true],
-                self::DONE => ['completion' => 'user_completed', 'attempts' => 0, 'has_commit' => false],
+                self::FIRST => ['completion' => 'runner_verified', 'attempts' => 1, 'checked' => true],
+                self::DONE => ['completion' => 'user_completed', 'attempts' => 0, 'checked' => true],
             ],
             $reported,
         );
@@ -597,7 +592,7 @@ final class StateAndLimitsThroughTheLoopTest extends TestCase
     }
 
     /**
-     * The newest pass at a task, where its state, branch and commit live.
+     * The newest pass at a task, where its state and its attempts live.
      */
     private function pass(string $description): GenerationRecord
     {

@@ -63,7 +63,7 @@ final class InitCommandTest extends TestCase
             $result->standardOutput,
             $result->describe(),
         );
-        self::assertDirectoryExists($this->project->path(Defaults::WORKTREES_DIRECTORY));
+        self::assertDirectoryExists($this->project->path(Defaults::MEMORY_DIRECTORY));
     }
 
     #[Test]
@@ -80,43 +80,24 @@ final class InitCommandTest extends TestCase
     }
 
     /**
-     * The step that keeps the first run from refusing.
+     * The steps do not tell the reader to commit anything.
      *
-     * `ralph init` appends its rules to a file the user owns, and a run will
-     * not start while the checkout holds uncommitted changes that are not the
-     * package's own — so without this step, following the printed list in order
-     * ends at a refusal caused by the step before it.
+     * An earlier release did, because a run refused to start while the checkout
+     * held changes it had not written and the ignore rules `init` had just
+     * appended were exactly such a change. A run now works in the checkout as
+     * it finds it (PROJECT.md section K, item 1), so the rules are an ordinary
+     * uncommitted change and the list goes straight from the settings to
+     * preflight.
      */
     #[Test]
-    public function the_next_steps_say_to_commit_the_ignore_rules_that_were_written(): void
+    public function the_next_steps_do_not_ask_for_a_commit(): void
     {
-        $result = Cli::run(['init'], $this->project->root());
-
-        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
-        self::assertStringContainsString('Commit .gitignore', $result->standardOutput, $result->describe());
-        self::assertStringContainsString(
-            'holds uncommitted changes it did not write',
-            $result->standardOutput,
-            $result->describe(),
-        );
-    }
-
-    /**
-     * And it is not printed when there is nothing to commit: on a second
-     * `ralph init` the rules are already in the file, so nothing was written
-     * and no step is owed. The files under `.ralph/` are the package's own, and
-     * an untracked one of those never stops a run.
-     */
-    #[Test]
-    public function the_commit_step_is_left_out_when_no_ignore_rules_were_written(): void
-    {
-        Cli::run(['init'], $this->project->root());
-
         $result = Cli::run(['init'], $this->project->root());
 
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertStringNotContainsString('Commit .gitignore', $result->standardOutput, $result->describe());
         self::assertStringContainsString('4. Run "ralph preflight"', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('5. Run "ralph run"', $result->standardOutput, $result->describe());
     }
 
     #[Test]

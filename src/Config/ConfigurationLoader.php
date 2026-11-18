@@ -40,8 +40,6 @@ final class ConfigurationLoader
         'agent',
         'agents',
         'checks',
-        'workspace',
-        'git',
         'limits',
         'logs',
     ];
@@ -144,8 +142,6 @@ final class ConfigurationLoader
             $raw->string('agent', Defaults::AGENT),
             $this->agents($raw),
             $this->checks($raw),
-            WorkspaceSettings::fromRaw($raw->section('workspace')),
-            GitSettings::fromRaw($raw->section('git')),
             Limits::fromRaw($raw->section('limits')),
             LogSettings::fromRaw($raw->section('logs')),
         ));

@@ -26,18 +26,14 @@ use Celyes\RalphPhp\Process\ExecutableFinder;
  * default, because the package does not know how a project is verified and
  * assuming `composer test` made it refuse to start on every project that
  * defines no such script. Such a run does work — it just decides a task on the
- * agent's result and the commit alone, which is what the warning says, where a
- * person reads it before the run rather than after it.
+ * agent's own reported result, which is what the warning says, where a person
+ * reads it before the run rather than after it.
  *
  * The commands are resolved, never executed. Running the suite here would
  * double the cost of every run and, worse, would report a project's existing
  * test failures as a Ralph PHP problem. The checks run per attempt, in the
- * task's own worktree, which is where their result means something.
- *
- * One further limitation, worth stating because the check cannot cover it: a
- * command that resolves here is resolved against this working tree. Preparing a
- * fresh worktree so the same command works there — installing dependencies,
- * providing test configuration — is the subject of PROJECT.md section F.
+ * project itself, which is both where the agent worked and where this check
+ * resolved them.
  */
 final class VerificationCheck implements PreflightCheck
 {
@@ -62,21 +58,20 @@ final class VerificationCheck implements PreflightCheck
             // Not a failure: `checks` is empty by default, because only a
             // project knows how it is verified, and a project is entitled to
             // run without any. A warning, though, and not a pass — what the run
-            // will do is check tasks off on the agent's own result and the
-            // commit it produced, which is a weaker thing than this package
-            // otherwise promises and is worth reading before a run rather than
-            // after one.
+            // will do is check tasks off on the agent's own reported result,
+            // which is a weaker thing than this package otherwise promises and
+            // is worth reading before a run rather than after one.
             return CheckResult::warning(
                 $this->id(),
                 'no verification commands are configured',
                 [
-                    '"checks" is empty, so nothing will be run against a task\'s workspace.',
-                    'A task will be checked off on the agent\'s reported result and its commit alone.',
+                    '"checks" is empty, so nothing will be run against what the agent changed.',
+                    'A task will be checked off on the agent\'s own reported result alone.',
                 ],
                 [
                     'Add the command this project is verified with under "checks", for example '
                         . '{"name": "tests", "command": ["composer", "test"]}.',
-                    'Review the commits a run like this produces before merging them.',
+                    'Read the changes a run like this leaves in your working tree before you commit them.',
                 ],
             );
         }

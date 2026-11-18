@@ -46,7 +46,7 @@ ralph init && ralph preflight && ralph run
 ```
 
 `composer test` is what Ralph PHP verifies each task with, so a task is checked
-off only once this suite passes on its own branch.
+off only once this suite passes over the change in this directory.
 
 ## Licence
 

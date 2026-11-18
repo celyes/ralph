@@ -97,19 +97,17 @@ final class ExitCode
      *
      * The blocking status of section I, item 5. It covers a task whose agent
      * asked a question, and every refusal the runner makes *after* work has
-     * happened: a worker that moved commits or branches the package will not
-     * put back, a checklist that was reworded mid-task, a checkbox write
-     * overtaken by somebody's edit, a verified change that could not be staged,
-     * committed or published.
+     * happened: a checklist that was reworded mid-task, a checkbox write
+     * overtaken by somebody's edit, a task whose criteria changed between the
+     * work and the tick.
      *
      * What those have in common — and what separates them from
      * {@see self::CONFIGURATION} — is that an agent has run and the result is
-     * sitting in a worktree, an index or a branch. Nothing is undone, nothing
-     * is retried on its own, and the next action is on the run's record and in
-     * `ralph status`.
+     * sitting in the working tree. Nothing is undone, nothing is retried on its
+     * own, and the next action is on the run's record and in `ralph status`.
      *
-     * Not a failure of the work: whatever was verified is committed and
-     * recorded. It is a status of its own because a caller that cannot tell
+     * Not a failure of the work: whatever was verified is recorded as
+     * verified. It is a status of its own because a caller that cannot tell
      * "the checklist is done" from "the run stopped short" would have to read
      * prose to find out.
      *

@@ -3,6 +3,11 @@
 /.phpunit.cache/
 /phpunit.xml
 
+# Ralph PHP's own runtime data: the state database, the logs and the memory
+# notes. "ralph init" writes this rule too; it ships here so that a copy of the
+# example reads cleanly in "git status" from the first run.
+/.ralph/runtime/
+
 # This example tracks its task checklist, so that the checkbox Ralph PHP ticks
 # shows up as a change you can read. "ralph init" sees the negation and leaves
 # it alone.

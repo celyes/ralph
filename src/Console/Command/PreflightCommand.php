@@ -28,7 +28,7 @@ use Celyes\RalphPhp\Support\Secrets;
  * run refuses to start.
  *
  * Every check is reported, not only the failures, because the passing ones are
- * the answer to "which agent, which base commit, which checks would this
+ * the answer to "which agent, which checks would this
  * actually use". Failures are then repeated with their details and hints, so a
  * long report does not bury the part the user has to act on.
  */
@@ -69,10 +69,6 @@ final class PreflightCommand implements CommandInterface
             '',
             '  php            the PHP version running ralph',
             '  extensions     the PHP extensions the package requires',
-            '  git            that git is installed and new enough',
-            '  repository     that this directory is the root of a non-bare working tree',
-            '  base           that "git.base" names a commit task branches can start from',
-            '  identity       that git can determine a commit author and committer',
             '  agent          that the selected agent\'s executable and credentials are present',
             '  agent-version  that the installed agent CLI is new enough for its adapter',
             '  checks         that every configured verification command could run',

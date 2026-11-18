@@ -11,7 +11,7 @@ use Celyes\RalphPhp\Run\RunIntent;
 /**
  * `ralph retry TASK-ID`: try one task again, keeping what it already has.
  *
- * The pass is continued rather than replaced, so its attempts, logs, branch and
+ * The pass is continued rather than replaced, so its attempts, logs and
  * blocker details stay where they are and the next attempt is told what the
  * last one failed on. What the retry grants is the configured attempt allowance
  * again: a task whose attempts ran out is the commonest thing there is to
@@ -43,7 +43,7 @@ final class RetryCommand extends LoopCommand
             'Usage: ralph retry TASK-ID',
             '',
             'Starts a new attempt at one task, continuing the pass that stopped: its earlier',
-            'attempts, logs, branch and blocker details are kept, and the new attempt is',
+            'attempts, logs and blocker details are kept, and the new attempt is',
             'given the recorded failure as evidence. The configured per-task attempt',
             'allowance starts again, so a task that ran out of attempts can be tried.',
             '',
@@ -57,15 +57,15 @@ final class RetryCommand extends LoopCommand
             '               stopped instead of attempting it again',
             '  never run    use "ralph run", which takes pending tasks in file order',
             '  checked off  untick the item and run "ralph run": the work is taken on as a',
-            '               new pass with its own branch, and the finished one keeps its',
-            '               commit and its evidence',
+            '               new pass of its own, and the finished one keeps its attempts',
+            '               and its evidence',
             '',
             'Run "ralph status" to list the tasks with their identifiers and states, and',
             '"ralph logs TASK-ID" to read what the earlier attempts did.',
             '',
-            'Exits as "ralph run" does: 0 when the task was verified, committed and checked',
-            'off, 1 when it spent its attempts again, 75 when it stopped on a decision, and',
-            '130 when it was stopped from outside.',
+            'Exits as "ralph run" does: 0 when the task was verified and checked off, 1',
+            'when it spent its attempts again, 75 when it stopped on a decision, and 130',
+            'when it was stopped from outside.',
         ];
     }
 

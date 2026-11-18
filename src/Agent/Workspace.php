@@ -13,25 +13,23 @@ use InvalidArgumentException;
  * program, and the two ways that goes wrong are both about this path: the
  * command inherits the PHP process's own working directory because nobody
  * passed one, or it is given a relative path that resolves against whatever
- * that happens to be. Either one lets a task edit the controlling checkout
- * instead of its own worktree — a repository the runner has promised not to
- * touch (PROJECT.md section F, item 1). Requiring this type is what makes "an
- * explicit working directory" (section E, item 2) something the signature says
- * rather than something each adapter remembers.
+ * that happens to be. Either one lets a task be carried out somewhere other
+ * than the directory the runner handed it. Requiring this type is what makes
+ * "an explicit working directory" (PROJECT.md section E, item 2) something the
+ * signature says rather than something each adapter remembers.
  *
  * So the invariants hold at construction: absolute, and a directory that is
- * there now. The isolated worktree per task is section F's job; this is only
- * the handle the adapter is given, which is also why an adapter cannot create
- * one out of a path it invented — it is handed the workspace the runner
- * prepared.
+ * there now. Which directory that is belongs to the runner — the project
+ * itself, since section K, item 1 — and this is only the handle the adapter is
+ * given, which is also why an adapter cannot make one out of a path it
+ * invented.
  *
  * The path is **not** canonicalised. Resolving symlinks would change the text
- * of a path the runner recorded with a worktree and a branch, and the state
- * store, the logs and `git worktree list` all have to keep agreeing about which
- * directory a task owns; a path that reads differently in the database than on
- * the command line is a reconciliation problem nobody needs. Trailing
- * separators are removed, because those are a formatting difference rather than
- * a different directory.
+ * of a path the runner recorded, and the state store, the logs and the terminal
+ * all have to keep agreeing about which directory a task was carried out in; a
+ * path that reads differently in the database than on the command line is a
+ * puzzle nobody needs. Trailing separators are removed, because those are a
+ * formatting difference rather than a different directory.
  */
 final class Workspace
 {

@@ -268,7 +268,7 @@ final class RepositoryLockTest extends TestCase
             $hints = implode("\n", $refusal->hints());
             self::assertStringContainsString('run-20261101-120000-aaaaaa', $hints);
             self::assertStringContainsString('worker process 5150 unaccounted for', $hints);
-            self::assertStringContainsString('may still be writing in a task worktree', $hints);
+            self::assertStringContainsString('may still be writing in this project', $hints);
             self::assertStringContainsString('Stop process 5150', $hints);
         }
     }

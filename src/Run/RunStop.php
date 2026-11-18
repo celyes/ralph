@@ -100,21 +100,15 @@ final class RunStop
 
     /**
      * Every pending task was taken on and every one of them passed.
-     *
-     * @param ?string $branch the one branch the run committed to, which is
-     *        what a shared-branch run leaves to review; null in per-task mode,
-     *        where there is a branch per task and naming them all here would
-     *        say less than `git branch --list` does
      */
-    public static function everythingCompleted(int $taken, string $tasksPath, ?string $branch = null): self
+    public static function everythingCompleted(int $taken, string $tasksPath): self
     {
         return self::of(
             StopKind::Finished,
             sprintf('every pending task was completed (%d task%s)', $taken, $taken === 1 ? '' : 's'),
             sprintf(
-                $branch === null
-                    ? 'Review the task branches, then add the next work to %s and run `ralph run`.'
-                    : 'Review ' . $branch . ', then add the next work to %s and run `ralph run`.',
+                'Review the changes with `git diff` and commit them, then add the next work to %s '
+                . 'and run `ralph run`.',
                 $tasksPath,
             ),
         );
@@ -165,11 +159,11 @@ final class RunStop
         );
 
         // The pass's own next action, where it recorded one. A pass that gave
-        // up on a task knows why it gave up — a failing check, a branch it
+        // up on a task knows why it gave up — a failing check, a box it
         // would not touch, a spent attempt limit — and each of those wants
         // something different done about it. Writing one sentence here for all
-        // of them would mean telling a user to retry a task whose branch is the
-        // problem.
+        // of them would mean telling a user to retry a task whose checklist is
+        // the problem.
         $action = $pass->blocker()?->nextAction() ?? sprintf(
             'Read `ralph logs %s` for what the pass did, then run `ralph retry %s`.',
             $id->value(),
@@ -258,33 +252,6 @@ final class RunStop
     }
 
     /**
-     * A resume could not put an interrupted pass back in step, so it took
-     * nothing on.
-     *
-     * The same kind of ending as {@see self::decision()} and for the same
-     * reason — somebody has to decide something — but found before the first
-     * task rather than during one. Kept as its own factory because the
-     * reconciliation names the pass rather than the task, and because what a
-     * user is owed here is the reading that stopped it: a worktree they still
-     * have, a branch something else moved, a commit nothing claimed.
-     */
-    public static function unreconciled(Recovery $recovery): self
-    {
-        $blocker = $recovery->blocker();
-
-        return self::of(
-            StopKind::Decision,
-            sprintf(
-                '%s could not be reconciled: %s',
-                $recovery->record()->slug(),
-                $blocker?->label() ?? 'the reconciliation stopped and recorded no reason',
-            ),
-            $recovery->nextAction(),
-            $recovery->record()->task(),
-        );
-    }
-
-    /**
      * The run's own budget is spent.
      *
      * @param int $pending tasks the run never took on, which are untouched and
@@ -331,8 +298,8 @@ final class RunStop
                     ? ''
                     : sprintf(', with %d task%s still pending', $pending, $pending === 1 ? '' : 's'),
             ),
-            'Run `ralph resume` to reconcile the stopped pass with the repository and carry on with '
-            . 'the agent this run used; nothing is implemented or committed twice.',
+            'Run `ralph resume` to continue the stopped pass with the agent this run used; nothing '
+            . 'that was already done and verified is asked for twice.',
         );
     }
 
@@ -340,9 +307,9 @@ final class RunStop
      * The run could not carry on, or stopped on something a person must settle.
      *
      * @param list<string> $hints the failure's own next actions, which are
-     *        where ambiguous ownership found during setup says what to do about
-     *        itself — a branch owned by unrelated work, a checkout with changes
-     *        that are not the run's to touch
+     *        where a refusal found during setup says what to do about itself —
+     *        a checklist that cannot be read, an agent whose executable is not
+     *        installed
      * @param StopKind     $kind  which of the two it was.
      *        {@see StopKind::Failed} by default, since most failures are; a
      *        refusal raised after an agent has run is

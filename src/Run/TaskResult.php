@@ -8,36 +8,32 @@ use Celyes\RalphPhp\State\AttemptRecord;
 use Celyes\RalphPhp\State\Blocker;
 use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\LifecycleState;
-use Celyes\RalphPhp\State\PushResult;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskGeneration;
 use Celyes\RalphPhp\Tasks\TaskId;
-use Celyes\RalphPhp\Verification\Satisfaction;
 use Celyes\RalphPhp\Verification\VerificationReport;
 
 /**
  * What one turn of the loop did with one task.
  *
  * The pass's own record is the authority for everything durable — the state,
- * the commit, the push, the blocker — so this holds that record rather than
- * copies of its columns. What it adds is the three things the database cannot
- * answer: the verification report the decision was made on, whether the
- * checklist's box was actually ticked, and — for a pass that staged nothing —
- * the case for or against completing it without a commit.
+ * the attempts, the blocker — so this holds that record rather than copies of
+ * its columns. What it adds is the two things the database cannot answer: the
+ * verification report the decision was made on, and whether the checklist's box
+ * was actually ticked.
  *
  * **`completion()` is the evidence behind the box, when there is one.** A pass
  * that reached the checklist write collected every condition the tick rests on
- * as one reading — the checks, the commit or the no-change case, the
- * publication, and the write itself — which is section G, item 7's "record
- * completion evidence together". It is carried here for both answers: a box
- * ticked, and a box deliberately left alone.
+ * as one reading — the checks and the write itself — which is section G,
+ * item 7's "record completion evidence together". It is carried here for both
+ * answers: a box ticked, and a box deliberately left alone.
  *
  * **`wasChecked()` is deliberately separate from the pass being complete.** A
- * pass can be verified, committed, pushed and complete, and the box still not
- * be ticked, because ticking it is a write to a file a user may own and may
- * have changed underneath. Keeping them apart is what lets the loop report
- * "done, but the checklist still says otherwise" rather than silently implying
- * one from the other.
+ * pass can be verified and complete and the box still not be ticked, because
+ * ticking it is a write to a file a user may own and may have changed
+ * underneath. Keeping them apart is what lets the loop report "done, but the
+ * checklist still says otherwise" rather than silently implying one from the
+ * other.
  */
 final class TaskResult
 {
@@ -48,7 +44,6 @@ final class TaskResult
         private readonly ?VerificationReport $verification,
         private readonly bool $checked,
         private readonly string $reason,
-        private readonly ?Satisfaction $satisfaction,
         private readonly ?CompletionEvidence $completion,
     ) {
     }
@@ -58,8 +53,6 @@ final class TaskResult
      *
      * @param bool   $checked whether the checklist's box was ticked
      * @param string $reason  one line on why the pass ended as it did
-     * @param Satisfaction|null $satisfaction the case for a pass that staged
-     *        nothing, where one was made
      * @param CompletionEvidence|null $completion what the tick rested on, for a
      *        pass that reached the checklist write — either answer
      */
@@ -70,19 +63,9 @@ final class TaskResult
         ?VerificationReport $verification = null,
         bool $checked = false,
         string $reason = '',
-        ?Satisfaction $satisfaction = null,
         ?CompletionEvidence $completion = null,
     ): self {
-        return new self(
-            $task,
-            $generation,
-            $attempt,
-            $verification,
-            $checked,
-            $reason,
-            $satisfaction,
-            $completion,
-        );
+        return new self($task, $generation, $attempt, $verification, $checked, $reason, $completion);
     }
 
     public function task(): Task
@@ -115,7 +98,7 @@ final class TaskResult
 
     /**
      * The attempt that was made, or null when the pass stopped before one
-     * could be — a workspace that could not be prepared, an exhausted attempt
+     * could be — a context file that could not be read, an exhausted attempt
      * limit.
      */
     public function attempt(): ?AttemptRecord
@@ -187,17 +170,15 @@ final class TaskResult
      *
      * Deliberately false for everything else. An agent that stopped to ask a
      * question is waiting on a person, and asking it again is not an answer. An
-     * execution error, a refused branch or drift the auditor would not put back
-     * left nothing to act on and will fail the same way. A commit the remote
-     * would not take is already implemented, and repeating the implementation
-     * is the one thing resume must not do (section H, item 7).
+     * execution error left nothing to act on and will fail the same way. A pass
+     * that earned its tick and could not write it has done the work, and
+     * repeating it is the one thing a resume must not do (section G, item 8).
      */
     public function invitesAnotherAttempt(): bool
     {
         return $this->isFailure()
             && $this->verification !== null
-            && $this->verification->failed()
-            && $this->commitSha() === null;
+            && $this->verification->failed();
     }
 
     /**
@@ -213,35 +194,6 @@ final class TaskResult
         return $this->verification !== null && $this->verification->passed();
     }
 
-    public function commitSha(): ?string
-    {
-        return $this->generation->commitSha();
-    }
-
-    /**
-     * Whether the task was found already satisfied, so there was nothing to
-     * commit.
-     */
-    public function isNoChange(): bool
-    {
-        return $this->generation->isNoChange();
-    }
-
-    /**
-     * The evidence behind a pass that staged nothing, or null when the pass
-     * never reached that question.
-     *
-     * Present for both answers to it: a task completed as a verified no-change
-     * outcome, and one stopped because the facts did not support completing it
-     * (PROJECT.md section G, item 6). The row is the authority for the state
-     * either way — this is what the database has no column for, and what
-     * {@see Satisfaction::recordPath()} has already been written to a file.
-     */
-    public function satisfaction(): ?Satisfaction
-    {
-        return $this->satisfaction;
-    }
-
     /**
      * What the ticked box rests on, or null when the pass never reached the
      * checklist write.
@@ -249,22 +201,12 @@ final class TaskResult
      * Present for both answers to it: a task checked off, and one carried to
      * the end of its pass and refused because a condition on ticking a box was
      * not met (PROJECT.md section G, item 7). The row is the authority for the
-     * state either way — this is the five layers of it read as one reading, and
+     * state either way — this is what the database has no column for, and
      * {@see CompletionEvidence::recordPath()} is where that reading was kept.
      */
     public function completion(): ?CompletionEvidence
     {
         return $this->completion;
-    }
-
-    public function branch(): ?string
-    {
-        return $this->generation->branch();
-    }
-
-    public function push(): PushResult
-    {
-        return $this->generation->push();
     }
 
     public function blocker(): ?Blocker
@@ -293,20 +235,12 @@ final class TaskResult
      */
     public function describe(): string
     {
-        $described = sprintf(
+        return sprintf(
             '%s %s: %s',
             $this->taskId()->value(),
             $this->state()->value,
             $this->reason === '' ? $this->state()->describe() : $this->reason,
         );
-
-        $sha = $this->commitSha();
-
-        if ($sha !== null) {
-            $described .= sprintf(' (%s on %s)', substr($sha, 0, 8), (string) $this->branch());
-        }
-
-        return $described;
     }
 
     /**
@@ -321,12 +255,7 @@ final class TaskResult
             'state' => $this->state()->value,
             'attempts' => $this->attempts(),
             'checked' => $this->checked,
-            'commit' => $this->commitSha(),
-            'branch' => $this->branch(),
-            'no_change' => $this->isNoChange(),
-            'satisfaction' => $this->satisfaction?->toArray(),
             'completion' => $this->completion?->toArray(),
-            'push' => $this->push()->state()->value,
             'verification' => $this->verification?->toArray(),
             'blocker' => $this->blocker()?->toStorage(),
             'reason' => $this->reason,

@@ -16,26 +16,18 @@ use InvalidArgumentException;
  * "finished" means.
  *
  * "Complete" is used in the strict sense PROJECT.md puts on ticking a box:
- * verification passed, a commit or a justified no-change result was recorded,
- * and any required push succeeded. A pass that is anything else — failed,
- * blocked, interrupted, still running — is open, and an open pass is continued
- * rather than superseded. The distinction is the one that decides whether a new
- * branch is created, which is why it is a property of the record and not
- * something re-derived from a lifecycle state the checklist layer would have to
- * know about.
- *
- * The branch is remembered because ownership outlives the run that created it.
- * A new generation must not be handed a branch an earlier generation owns, and
- * the only way to be sure of that is to know which branches are already taken
- * ({@see GenerationSelection::reservedBranches()}).
+ * the configured verification passed and the box was written. A pass that is
+ * anything else — failed, blocked, interrupted, still running — is open, and an
+ * open pass is continued rather than superseded. The distinction is the one
+ * that decides whether reopening starts a new generation, which is why it is a
+ * property of the record and not something re-derived from a lifecycle state
+ * the checklist layer would have to know about.
  */
 final class RecordedGeneration
 {
     private function __construct(
         private readonly TaskGeneration $generation,
         private readonly bool $complete,
-        private readonly ?string $branch,
-        private readonly ?string $commit,
         private readonly ?string $contentHash,
     ) {
     }
@@ -43,53 +35,31 @@ final class RecordedGeneration
     /**
      * A pass that carried the task all the way through.
      *
-     * @param string|null $commit the commit it produced, or null for a
-     *                            verified no-change outcome, which PROJECT.md
-     *                            section G, item 6 accepts as complete without
-     *                            an empty commit
      * @param string|null $contentHash what the task said at the time
      *                                 ({@see TaskSnapshot::contentHash()}), so
      *                                 a later pass can report whether the work
      *                                 being asked for has changed as well
      *
-     * @throws InvalidArgumentException when a branch or commit is given as an
+     * @throws InvalidArgumentException when the content hash is given as an
      *                                 empty string, which is a value the state
-     *                                 store never meant to record and would
-     *                                 later read as a usable ref
+     *                                 store never meant to record
      */
     public static function completed(
         TaskGeneration $generation,
-        ?string $branch = null,
-        ?string $commit = null,
         ?string $contentHash = null,
     ): self {
-        return new self(
-            $generation,
-            true,
-            self::reference($branch, 'branch'),
-            self::reference($commit, 'commit'),
-            self::reference($contentHash, 'content hash'),
-        );
+        return new self($generation, true, self::reference($contentHash, 'content hash'));
     }
 
     /**
      * A pass that stopped without finishing: failed, blocked, interrupted, or
      * still running.
      *
-     * @throws InvalidArgumentException when a reference is an empty string
+     * @throws InvalidArgumentException when the content hash is an empty string
      */
-    public static function open(
-        TaskGeneration $generation,
-        ?string $branch = null,
-        ?string $contentHash = null,
-    ): self {
-        return new self(
-            $generation,
-            false,
-            self::reference($branch, 'branch'),
-            null,
-            self::reference($contentHash, 'content hash'),
-        );
+    public static function open(TaskGeneration $generation, ?string $contentHash = null): self
+    {
+        return new self($generation, false, self::reference($contentHash, 'content hash'));
     }
 
     /**
@@ -134,26 +104,6 @@ final class RecordedGeneration
     }
 
     /**
-     * The branch the pass owns, when one was recorded.
-     */
-    public function branch(): ?string
-    {
-        return $this->branch;
-    }
-
-    /**
-     * The commit it produced, when there is one.
-     *
-     * Null covers two different things, and the difference is in
-     * {@see self::isComplete()}: a pass that never got as far as committing, and
-     * a complete pass whose task was already satisfied.
-     */
-    public function commit(): ?string
-    {
-        return $this->commit;
-    }
-
-    /**
      * What the task said when the pass ran, when it was recorded.
      */
     public function contentHash(): ?string
@@ -175,17 +125,6 @@ final class RecordedGeneration
     public function statesSameWork(TaskSnapshot $snapshot): bool
     {
         return $this->contentHash !== null && $this->contentHash === $snapshot->contentHash();
-    }
-
-    /**
-     * Whether this pass owns the named branch.
-     *
-     * Compared exactly: Git refs are case-sensitive, and a near-match is
-     * someone else's branch.
-     */
-    public function ownsBranch(string $branch): bool
-    {
-        return $this->branch !== null && $this->branch === $branch;
     }
 
     /**

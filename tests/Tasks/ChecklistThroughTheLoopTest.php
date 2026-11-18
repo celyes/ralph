@@ -57,7 +57,7 @@ final class ChecklistThroughTheLoopTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and a run commits in real worktrees.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = LoopProject::create();
@@ -146,10 +146,7 @@ final class ChecklistThroughTheLoopTest extends TestCase
         self::assertStringContainsString('2 of 2 tasks completed', $first->standardOutput, $first->describe());
 
         $done = $this->latestPass(self::FIRST);
-        $branch = (string) $done->branch();
-        $commit = (string) $done->commitSha();
-        self::assertNotSame('', $branch);
-        self::assertNotSame('', $commit);
+        self::assertSame(LifecycleState::Completed, $done->state());
 
         // The user rearranges the file: a task that was never there at the
         // top, the two finished ones below it in the other order, different
@@ -176,13 +173,7 @@ final class ChecklistThroughTheLoopTest extends TestCase
         self::assertTrue($after->task()->equals(TaskId::fromDescription(self::FIRST)));
         self::assertSame(1, $after->number());
         self::assertSame(LifecycleState::Completed, $after->state());
-        self::assertSame($branch, $after->branch());
-        self::assertSame($commit, $after->commitSha());
-        // Its commit is still on the branch it recorded. Still *on* rather
-        // than still the tip of: the run's tasks share a branch under the
-        // default, so the new task's commit is now the tip and the finished
-        // task's is the commit beneath it.
-        self::assertTrue($this->project->branchContains($branch, $commit));
+        self::assertSame($done->startedAt()->value(), $after->startedAt()->value());
         self::assertCount(
             1,
             $this->project->journal()->generations()->forTask($after->task()),
@@ -193,12 +184,11 @@ final class ChecklistThroughTheLoopTest extends TestCase
             'The run that verified it is still the one credited with it.',
         );
 
-        // And the one genuinely new task really was done: three commits, one
-        // per task, on the branch the runs share, none of them a second commit
-        // for work that was already finished.
-        $branches = $this->project->taskBranches();
-        self::assertSame(['ralph/shared'], $branches);
-        self::assertCount(3, $this->project->commitsOn('ralph/shared'));
+        // And the one genuinely new task really was done, in the user's own
+        // checkout and on the branch they had checked out: three passes, no
+        // branch of the package's making, and nothing committed.
+        self::assertCount(1, $this->project->taskBranches());
+        self::assertNotSame([], $this->project->workingTreeChanges());
 
         // The ticked lines the user wrote are left as the user wrote them, and
         // the new one is ticked in the style of the line it was written on.
@@ -227,21 +217,14 @@ final class ChecklistThroughTheLoopTest extends TestCase
                 FixtureStep::success(['src/Import.php' => "<?php\n\n// --dry-run, again\n"]),
             )
             ->withTasks([self::FIRST])
-            // Per task, because the guarantee under test is a per-task one:
-            // the reopened pass must not land on the branch holding the first
-            // pass's commit. Under the default both passes commit to the run's
-            // shared branch, in order, and what protects the first commit
-            // there is that nothing is reset or moved rather than that the
-            // names differ.
-            ->withConfiguration(['git' => ['strategy' => 'per-task']]);
+            ->withConfiguration();
 
         self::assertSame(ExitCode::SUCCESS, $this->project->ralph(['run'])->exitCode);
 
         $first = $this->project->journal()->generations()->latestFor(TaskId::fromDescription(self::FIRST));
         self::assertNotNull($first);
         self::assertSame(1, $first->number());
-        $firstBranch = (string) $first->branch();
-        $firstCommit = (string) $first->commitSha();
+        $firstFinished = (string) $first->finishedAt()?->value();
 
         // The user reopens it by hand, in the file, as the only way there is.
         $this->project->editChecklist("# Tasks\n\n- [ ] " . self::FIRST . "\n");
@@ -250,27 +233,27 @@ final class ChecklistThroughTheLoopTest extends TestCase
         self::assertSame(ExitCode::SUCCESS, $again->exitCode, $again->describe());
         self::assertStringContainsString('1 of 1 tasks completed', $again->standardOutput, $again->describe());
 
-        // A second pass at the same task, with its own branch and commit.
+        // A second pass at the same task, of its own.
         $generations = $this->project->journal()->generations()->forTask(TaskId::fromDescription(self::FIRST));
         self::assertCount(2, $generations);
 
         $second = $generations[1];
         self::assertSame(2, $second->number());
         self::assertSame(LifecycleState::Completed, $second->state());
-        self::assertNotSame($firstBranch, $second->branch());
-        self::assertNotSame($firstCommit, $second->commitSha());
         self::assertSame(1, $second->attempts(), 'A reopening does not inherit the first pass\'s attempts.');
 
-        // The first pass is left exactly where a reviewer left it.
+        // The first pass is left exactly as it was recorded: its own row, its
+        // own attempts, its own finishing time.
         self::assertSame(LifecycleState::Completed, $generations[0]->state());
-        self::assertSame($firstCommit, $generations[0]->commitSha());
-        self::assertSame($firstCommit, $this->project->headOf($firstBranch));
-        self::assertSame(
-            [$firstBranch, (string) $second->branch()],
-            $this->project->taskBranches(),
-            'Both passes keep their own branch.',
-        );
+        self::assertSame(1, $generations[0]->number());
+        self::assertSame($firstFinished, (string) $generations[0]->finishedAt()?->value());
 
+        // And the second pass's work is what the checkout now holds, which is
+        // the one copy of it there is (section K, item 1).
+        self::assertStringContainsString(
+            '// --dry-run, again',
+            (string) file_get_contents($this->project->path('src/Import.php')),
+        );
         self::assertStringContainsString('- [x] ' . self::FIRST, $this->project->checklist());
     }
 
@@ -297,9 +280,10 @@ final class ChecklistThroughTheLoopTest extends TestCase
         self::assertSame(ExitCode::CONFIGURATION, $result->exitCode, $result->describe());
         self::assertStringContainsString(self::FIRST, $result->allOutput(), $result->describe());
 
-        // Nothing was started: no branch, and the file is as the user left it.
-        self::assertSame([], $this->project->taskBranches());
+        // Nothing was started: the checklist is as the user left it, and the
+        // worker never wrote into the project.
         self::assertSame($before, $this->project->checklist());
+        self::assertSame([], $this->project->workingTreeChanges());
     }
 
     /**

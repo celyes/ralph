@@ -18,17 +18,21 @@ use RuntimeException;
  * A real project the `ralph` binary can be run in, and read back afterwards.
  *
  * What the five commands of PROJECT.md section I, item 1 need in order to be
- * tested as commands rather than as classes: a Git repository with a commit in
- * it, a checklist, a configuration naming the fixture worker as its agent, and
- * a way to invoke the binary with that directory as its working directory —
- * because the directory the user is standing in is how every one of them finds
- * the project.
+ * tested as commands rather than as classes: a checklist, a configuration
+ * naming the fixture worker as its agent, and a way to invoke the binary with
+ * that directory as its working directory — because the directory the user is
+ * standing in is how every one of them finds the project.
  *
- * Everything under the command is the real thing: real Git, the real state
- * store, the real verification commands (`php -v`, so a check that passes is a
- * process that really ran), and the fixture worker started as an executable
- * through the Codex adapter. No agent CLI, no credentials and no network
- * (section J, item 8).
+ * It is a Git repository with a commit in it, even though the package no longer
+ * uses Git (section K, item 1): that is what makes "the agent's changes were
+ * left in the working tree and nothing was committed" assertable
+ * ({@see self::workingTreeChanges()}, {@see self::taskBranches()}).
+ *
+ * Everything under the command is the real thing: the real state store, the
+ * real verification commands (`php -v`, so a check that passes is a process
+ * that really ran), and the fixture worker started as an executable through the
+ * Codex adapter. No agent CLI, no credentials and no network (section J,
+ * item 8).
  *
  * The run is a subprocess, which is the point. A command's working directory,
  * its exit status and the stream it printed a failure on are all behaviour the
@@ -71,14 +75,6 @@ final class LoopProject
      * The agent `agent` names by default, once a case has installed it.
      */
     private ?FixtureWorker $worker = null;
-
-    /**
-     * The bare repositories standing in for remotes, by the name the project's
-     * Git configuration knows each one by.
-     *
-     * @var array<string, string>
-     */
-    private array $remotes = [];
 
     private function __construct(
         private readonly TemporaryProject $project,
@@ -223,101 +219,6 @@ final class LoopProject
         @unlink($this->path(Defaults::ADAPTERS_FILE));
 
         return $this;
-    }
-
-    /**
-     * Give the project a remote to push to: a bare repository on the same disk.
-     *
-     * What PROJECT.md section J, item 6 asks a publication to be tested
-     * against. A bare repository is a real remote as far as `git push` is
-     * concerned — the real refspec, the real fast-forward rule, the real
-     * rejection message — and it needs no network, no server and no
-     * credentials (section J, item 8). What it cannot reproduce is an
-     * authentication failure or a slow link.
-     *
-     * It lives under {@see self::$tools}, outside the repository, so that the
-     * remote's own object store can never turn up in a diff a run stages, and
-     * so it is removed with everything else by {@see self::remove()}.
-     *
-     * @param string $name the name the repository knows it by, which is what
-     *        `git.push.remote` has to agree with
-     *
-     * @throws RuntimeException when the directory cannot be created
-     */
-    public function withBareRemote(string $name = 'origin'): self
-    {
-        $directory = $this->tools . DIRECTORY_SEPARATOR . $name . '.git';
-
-        if (!is_dir($directory) && !mkdir($directory, 0o700, true) && !is_dir($directory)) {
-            throw new RuntimeException('Unable to create ' . $directory . '.');
-        }
-
-        Git::initialise($directory, bare: true);
-        Git::run($this->root(), 'remote', 'add', $name, $directory);
-
-        $this->remotes[$name] = $directory;
-
-        return $this;
-    }
-
-    /**
-     * Where a remote this project was given actually is, to read it directly.
-     *
-     * Reading the remote repository rather than the pushing one is the point:
-     * `git ls-remote` and the local `refs/remotes/` both answer from the
-     * fetching side, and a publication is only published if the commit is in
-     * the other repository.
-     *
-     * @throws RuntimeException when the project was given no such remote
-     */
-    public function remote(string $name = 'origin'): string
-    {
-        return $this->remotes[$name]
-            ?? throw new RuntimeException('This project has no remote named "' . $name . '".');
-    }
-
-    /**
-     * The commit a branch points at in the remote, or null when it has no such
-     * branch.
-     *
-     * @throws RuntimeException when the project was given no such remote
-     */
-    public function remoteHeadOf(string $branch, string $remote = 'origin'): ?string
-    {
-        $result = Git::tryRun(
-            $this->remote($remote),
-            'rev-parse',
-            '--verify',
-            '--quiet',
-            'refs/heads/' . $branch,
-        );
-
-        return $result->exitCode === 0 ? trim($result->standardOutput) : null;
-    }
-
-    /**
-     * Every branch the remote holds, in a stable order.
-     *
-     * The whole set rather than a lookup: "the task branch was published" and
-     * "only the task branch was published" are different claims, and a push
-     * that sent the user's own branches too would only be caught by the
-     * second.
-     *
-     * @return list<string>
-     *
-     * @throws RuntimeException when the project was given no such remote
-     */
-    public function remoteBranches(string $remote = 'origin'): array
-    {
-        $branches = Git::run(
-            $this->remote($remote),
-            'branch',
-            '--format=%(refname:short)',
-        )->standardOutputLines();
-
-        sort($branches);
-
-        return $branches;
     }
 
     /**
@@ -623,35 +524,9 @@ final class LoopProject
     }
 
     /**
-     * The subject lines a branch adds to the checkout's history, newest first.
-     *
-     * The branch's own commits and not its ancestry: a task branch starts from
-     * the base commit, so its whole log is the project's history plus whatever
-     * the run put on it, and "committed once" is a statement about the latter.
-     *
-     * @return list<string>
-     */
-    public function commitsOn(string $branch): array
-    {
-        $log = Git::tryRun($this->root(), 'log', '--format=%s', 'HEAD..' . $branch);
-
-        return $log->exitCode === 0 ? $log->standardOutputLines() : [];
-    }
-
-    /**
-     * Whether a branch's history holds a commit.
-     *
-     * Not the same question as {@see headOf()}, and the one to ask of a branch
-     * a run's tasks share: a commit that is no longer the tip is still the
-     * commit of the task that made it.
-     */
-    public function branchContains(string $branch, string $sha): bool
-    {
-        return Git::tryRun($this->root(), 'merge-base', '--is-ancestor', $sha, $branch)->exitCode === 0;
-    }
-
-    /**
      * The commit a branch points at.
+     *
+     * For the claim a run has to be able to make now: that it moved nothing.
      */
     public function headOf(string $branch): string
     {
@@ -659,21 +534,45 @@ final class LoopProject
     }
 
     /**
-     * Branch names this project's runs created.
+     * Every branch this repository has, in a stable order.
+     *
+     * Named for what it is asked: "the run created no branch". A package that
+     * works in the user's own checkout creates none, and the whole set is what
+     * states that rather than the absence of one name.
      *
      * @return list<string>
      */
     public function taskBranches(): array
     {
-        return array_values(array_filter(
-            Git::run($this->root(), 'branch', '--format=%(refname:short)')->standardOutputLines(),
-            static fn (string $branch): bool => str_starts_with($branch, 'ralph/'),
-        ));
+        $branches = Git::run($this->root(), 'branch', '--format=%(refname:short)')->standardOutputLines();
+
+        sort($branches);
+
+        return $branches;
+    }
+
+    /**
+     * What the working tree holds that no commit does, as `git status` reports
+     * it: one `XY path` line per path, sorted.
+     *
+     * The other half of the same claim. The agent edits the project in place
+     * and nothing is committed (section K, item 1), so a task that did
+     * something leaves lines here — and `ralph run` adding a commit of its own
+     * would show up as their absence.
+     *
+     * @return list<string>
+     */
+    public function workingTreeChanges(): array
+    {
+        $lines = Git::run($this->root(), 'status', '--porcelain')->standardOutputLines();
+
+        sort($lines);
+
+        return $lines;
     }
 
     public function remove(): void
     {
-        Git::tryRun($this->root(), 'worktree', 'prune');
         TemporaryDirectory::remove($this->tools);
         $this->project->remove();
     }
@@ -710,17 +609,16 @@ final class LoopProject
             // and how many attempts a case makes is something its assertions
             // depend on and should state.
             'limits' => ['attempts_per_task' => 1],
-            // Nothing to install and nothing to copy: the worker needs no
-            // dependencies of its own.
-            'workspace' => ['prepare' => [], 'copy' => []],
         ], $overrides);
     }
 
     /**
      * Commit whatever was just written, as the user's own work.
      *
-     * Unrelated uncommitted changes are something a run refuses to start over
-     * (section F, item 1), so a project a test has set up is a committed one.
+     * Nothing requires it any more — the package neither reads nor writes Git
+     * (section K, item 1) — and it is still done, because it is what makes the
+     * working tree a run's own changes show up in: a project whose setup was
+     * left uncommitted would report the test's own files beside the agent's.
      */
     private function committing(): self
     {

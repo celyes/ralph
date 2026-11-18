@@ -4,17 +4,12 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Run;
 
-use Celyes\RalphPhp\Git\BaseCommit;
-use Celyes\RalphPhp\Git\StagedChanges;
-use Celyes\RalphPhp\Git\WorktreeCleanup;
 use Celyes\RalphPhp\State\AgentRecord;
 use Celyes\RalphPhp\State\FailureEvidence;
 use Celyes\RalphPhp\State\GenerationRecord;
-use Celyes\RalphPhp\State\PushResult;
 use Celyes\RalphPhp\Support\UnverifiedText;
 use Celyes\RalphPhp\Tasks\CheckboxEdit;
 use Celyes\RalphPhp\Tasks\TaskGeneration;
-use Celyes\RalphPhp\Verification\Satisfaction;
 use Celyes\RalphPhp\Verification\VerificationReport;
 
 /**
@@ -22,67 +17,50 @@ use Celyes\RalphPhp\Verification\VerificationReport;
  * item 7).
  *
  * The item has two halves. The first is a condition — a task is checked off
- * only after verification, the Git requirements and any required publication
- * have succeeded — and {@see self::unmet()} is that condition written down as
- * something a pass asks rather than something its control flow implies. The
- * second is *record completion evidence together*, and that is the reason this
- * class holds facts from four different layers instead of each layer reporting
- * its own.
+ * only after the configured verification has succeeded — and {@see self::unmet()}
+ * is that condition written down as something a pass asks rather than something
+ * its control flow implies. The second is *record completion evidence
+ * together*, and that is the reason this class holds facts from three different
+ * layers instead of each layer reporting its own.
  *
  * **Why the condition is asked again here.** Every one of these facts is
- * already true by the time {@see TaskPass} reaches the tick: the checks passed
- * or the pass returned, the commit was made or the no-change case was accepted,
- * the push succeeded or the pass stopped. So this re-reads what the sequence
- * has already established — deliberately. A box ticked in a user's own file is
- * the package's single outward claim, and the one thing that must not be able
- * to happen is for a later edit to that sequence to move the tick above one of
- * its conditions and for nothing to notice. The store refuses an unearned
- * {@see \Celyes\RalphPhp\State\GenerationStore::complete()} for the same reason
- * and is not enough on its own: it runs *after* the write to the user's file,
- * and it cannot see the verification report at all.
+ * already true by the time {@see TaskPass} reaches the tick: the checks passed,
+ * or the pass returned before it got this far. So this re-reads what the
+ * sequence has already established — deliberately. A box ticked in a user's own
+ * file is the package's single outward claim, and the one thing that must not
+ * be able to happen is for a later edit to that sequence to move the tick above
+ * its condition and for nothing to notice.
  *
- * **Why the evidence is one record and not five.** The facts behind a
+ * **Why the evidence is one record and not four.** The facts behind a
  * completion are scattered by the time the pass ends — the checks are rows in
- * `verification_results`, the commit is a SHA on the generation, the push is
- * three more columns, the agent's claim is on the attempt, and the tick is a
- * line in a Markdown file the package does not own. Each is reachable, and none
- * of them answers the question a reviewer actually arrives with: *why is this
- * box ticked?* So the answer is assembled at the moment it is true, written
- * beside the attempt's logs, and kept whether or not anyone asks.
+ * `verification_results`, the agent's claim is on the attempt, the state is a
+ * column on the generation, and the tick is a line in a Markdown file the
+ * package does not own. Each is reachable, and none of them answers the
+ * question a reviewer actually arrives with: *why is this box ticked?* So the
+ * answer is assembled at the moment it is true, written beside the attempt's
+ * logs, and kept whether or not anyone asks.
  *
- * **What is evidence and what is a claim.** The checks, the commit, the push
- * and the checkbox edit are things the package did and observed. What the agent
- * said is kept as {@see UnverifiedText} and reported as its words, never as a
- * reason — section D, item 6 — so a record of a completion cannot be mistaken
- * for the agent having certified it.
+ * **What is evidence and what is a claim.** The checks and the checkbox edit
+ * are things the package did and observed. What the agent said is kept as
+ * {@see UnverifiedText} and reported as its words, never as a reason —
+ * section D, item 6 — so a record of a completion cannot be mistaken for the
+ * agent having certified it.
  *
- * **What a clean record still is not.** It says the configured checks passed
- * against this diff, not that any of them tests what the task asked for. That
- * limit belongs to {@see Satisfaction} as well, and it is stated in
- * {@see self::toMarkdown()} where a reader meets it rather than only here.
+ * **What a clean record still is not.** It says the configured checks passed in
+ * the user's checkout with this work in it, not that any of them tests what the
+ * task asked for, and not that the changes have been reviewed. The work is left
+ * uncommitted in the working tree (section K, item 1), so the diff is there to
+ * be read; that limit is stated in {@see self::toMarkdown()} where a reader
+ * meets it rather than only here.
  */
 final class CompletionEvidence
 {
     /**
-     * Staged paths named individually in the record.
-     *
-     * The commit is the authority for the whole diff and `git show` prints it;
-     * this is an orientation, so a long refactor does not turn the record into
-     * a file listing.
-     */
-    public const int PATHS_IN_RECORD = 20;
-
-    /**
-     * @param GenerationRecord $record the pass as it stood once the commit and
-     *        the publication were settled and before the box was ticked — the
-     *        row whose columns this evidence is about
+     * @param GenerationRecord $record the pass as it stood once its checks had
+     *        passed and before the box was ticked — the row this evidence is
+     *        about
      * @param CheckboxEdit|null $edit the checklist write, once it has landed;
      *        null while the condition is still being asked
-     * @param WorktreeCleanup|null $cleanup what became of the task's
-     *        workspace, once finalization has got that far; null while the
-     *        conditions are still being asked, and for a completion that was
-     *        refused — a pass that earned no tick keeps its workspace, and
-     *        saying so under "what this rests on" would read as a step taken
      * @param string|null $recordPath where this was written for a person to
      *        read, when it was
      */
@@ -90,14 +68,10 @@ final class CompletionEvidence
         private readonly GenerationRecord $record,
         private readonly string $description,
         private readonly int $attempt,
-        private readonly BaseCommit $base,
         private readonly VerificationReport $verification,
-        private readonly StagedChanges $staged,
-        private readonly ?Satisfaction $satisfaction,
         private readonly UnverifiedText $claim,
         private readonly string $checklistPath,
         private readonly ?CheckboxEdit $edit,
-        private readonly ?WorktreeCleanup $cleanup,
         private readonly ?string $recordPath,
     ) {
     }
@@ -106,10 +80,6 @@ final class CompletionEvidence
      * Collect what one attempt earned, at the point the box is about to be
      * ticked.
      *
-     * @param StagedChanges $staged what staging decided the commit would
-     *        contain, which for a no-change outcome is nothing
-     * @param Satisfaction|null $satisfaction the case for a pass that staged
-     *        nothing; required for a no-change outcome and absent otherwise
      * @param string $checklistPath the task file the tick is a write to, as the
      *        user names it
      */
@@ -117,34 +87,18 @@ final class CompletionEvidence
         GenerationRecord $record,
         string $description,
         int $attempt,
-        BaseCommit $base,
         VerificationReport $verification,
-        StagedChanges $staged,
-        ?Satisfaction $satisfaction,
         UnverifiedText $claim,
         string $checklistPath,
     ): self {
-        return new self(
-            $record,
-            $description,
-            $attempt,
-            $base,
-            $verification,
-            $staged,
-            $satisfaction,
-            $claim,
-            $checklistPath,
-            null,
-            null,
-            null,
-        );
+        return new self($record, $description, $attempt, $verification, $claim, $checklistPath, null, null);
     }
 
     /**
      * The same evidence, with the checklist write that landed.
      *
      * Separate from collection because the two happen in that order and must:
-     * the conditions are read first and decide whether there is a write at all.
+     * the condition is read first and decides whether there is a write at all.
      */
     public function ticked(CheckboxEdit $edit): self
     {
@@ -152,44 +106,10 @@ final class CompletionEvidence
             $this->record,
             $this->description,
             $this->attempt,
-            $this->base,
             $this->verification,
-            $this->staged,
-            $this->satisfaction,
             $this->claim,
             $this->checklistPath,
             $edit,
-            $this->cleanup,
-            $this->recordPath,
-        );
-    }
-
-    /**
-     * The same evidence, with what finalization did to the task's workspace.
-     *
-     * The last of the ordered steps and the last thing added here, because the
-     * order is the guarantee: the commit, any required push, the pass's own row
-     * and the user's checklist are all durable before the workspace is touched,
-     * so nothing a removal could go wrong with can cost a task its work
-     * (PROJECT.md section K, item 6). Folding the outcome into the evidence is
-     * what makes the step part of the completion rather than a tidy-up beside
-     * it — a record that says a box was ticked also says whether the checkout
-     * the work was done in is still on disk, and where it is when it is.
-     */
-    public function cleanedUp(WorktreeCleanup $cleanup): self
-    {
-        return new self(
-            $this->record,
-            $this->description,
-            $this->attempt,
-            $this->base,
-            $this->verification,
-            $this->staged,
-            $this->satisfaction,
-            $this->claim,
-            $this->checklistPath,
-            $this->edit,
-            $cleanup,
             $this->recordPath,
         );
     }
@@ -203,14 +123,10 @@ final class CompletionEvidence
             $this->record,
             $this->description,
             $this->attempt,
-            $this->base,
             $this->verification,
-            $this->staged,
-            $this->satisfaction,
             $this->claim,
             $this->checklistPath,
             $this->edit,
-            $this->cleanup,
             $recordPath,
         );
     }
@@ -252,11 +168,6 @@ final class CompletionEvidence
         return $this->record->agent();
     }
 
-    public function base(): BaseCommit
-    {
-        return $this->base;
-    }
-
     /**
      * The checks, as they decided this work.
      */
@@ -266,48 +177,11 @@ final class CompletionEvidence
     }
 
     /**
-     * What the commit contains, or nothing for a no-change outcome.
-     */
-    public function staged(): StagedChanges
-    {
-        return $this->staged;
-    }
-
-    /**
-     * The case for a pass that staged nothing, where one was made.
-     */
-    public function satisfaction(): ?Satisfaction
-    {
-        return $this->satisfaction;
-    }
-
-    /**
      * What the agent said about the attempt. A claim, and kept as one.
      */
     public function claim(): UnverifiedText
     {
         return $this->claim;
-    }
-
-    public function commitSha(): ?string
-    {
-        return $this->record->commitSha();
-    }
-
-    /**
-     * Whether the task was already satisfied, so there is nothing to commit.
-     */
-    public function isNoChange(): bool
-    {
-        return $this->record->isNoChange();
-    }
-
-    /**
-     * Where publication stands.
-     */
-    public function push(): PushResult
-    {
-        return $this->record->push();
     }
 
     /**
@@ -335,25 +209,6 @@ final class CompletionEvidence
     }
 
     /**
-     * What became of the task's workspace, once finalization reached it.
-     */
-    public function cleanup(): ?WorktreeCleanup
-    {
-        return $this->cleanup;
-    }
-
-    /**
-     * Whether the task's workspace is gone from the filesystem and from Git.
-     *
-     * False while cleanup has not run, which is not the same as a workspace
-     * that stayed — {@see self::cleanup()} tells those apart.
-     */
-    public function workspaceWasRemoved(): bool
-    {
-        return $this->cleanup?->wasRemoved() === true;
-    }
-
-    /**
      * Where this was written for a person to read, or null when it was not.
      */
     public function recordPath(): ?string
@@ -364,9 +219,7 @@ final class CompletionEvidence
     /**
      * Every condition on ticking a box that this pass has not met, worst first.
      *
-     * Empty means the box may be ticked. The order is the order the conditions
-     * are reached in: unverified work makes everything after it moot, and an
-     * unrecorded implementation makes the push irrelevant.
+     * Empty means the box may be ticked.
      *
      * @return list<string>
      */
@@ -391,24 +244,6 @@ final class CompletionEvidence
                 'the configured checks did not pass (%s)',
                 $this->verification->describe(),
             );
-        }
-
-        if (!$this->record->hasImplementation()) {
-            $unmet[] = 'neither a commit nor a verified no-change result is recorded for this pass';
-        }
-
-        // A no-change outcome is the one completion with no commit to read, so
-        // its case is part of what the tick rests on rather than a note beside
-        // it: without the audit there is no evidence the task was already done
-        // (section G, item 6).
-        if ($this->isNoChange() && ($this->satisfaction === null || !$this->satisfaction->isJustified())) {
-            $unmet[] = $this->satisfaction === null
-                ? 'the pass recorded a no-change result with no evidence collected for it'
-                : 'the no-change result is contradicted: ' . $this->satisfaction->objections()[0];
-        }
-
-        if ($this->push()->isOutstanding()) {
-            $unmet[] = sprintf('publication is required and %s', $this->push()->describe());
         }
 
         return $unmet;
@@ -436,19 +271,12 @@ final class CompletionEvidence
     public function summary(): string
     {
         if ($this->isRefused()) {
-            return sprintf(
-                'the task is not checked off: %s',
-                $this->unmet()[0],
-            );
+            return sprintf('the task is not checked off: %s', $this->unmet()[0]);
         }
 
         return sprintf(
-            '%s, %s, and %s',
+            '%s, and the work is in the working tree for review',
             $this->verification->describe(),
-            $this->isNoChange()
-                ? 'nothing to commit'
-                : sprintf('committed as %s', $this->shortCommit()),
-            $this->push()->describe(),
         );
     }
 
@@ -459,37 +287,17 @@ final class CompletionEvidence
      */
     public function details(): array
     {
-        $details = [
-            sprintf('agent: %s', $this->agent()->describe()),
-            sprintf('base: %s', $this->base->describe()),
-        ];
+        $details = [sprintf('agent: %s', $this->agent()->describe())];
 
         foreach ($this->verification->details() as $check) {
             $details[] = 'check: ' . $check;
         }
 
-        $details[] = $this->isNoChange()
-            ? sprintf('commit: none — %s', $this->satisfaction?->summary() ?? 'the task was already satisfied')
-            : sprintf(
-                'commit: %s on %s (%s)',
-                $this->shortCommit(),
-                $this->record->branch() ?? 'no branch recorded',
-                $this->staged->summary(),
-            );
-
-        $details[] = 'publication: ' . $this->push()->describe();
         $details[] = sprintf(
             'checklist: %s%s',
             $this->checklistPath,
             $this->edit === null ? ' — not written yet' : sprintf(' line %d, now checked', $this->edit->line()),
         );
-
-        // Last, as it happened last. A line only once cleanup has run, so that
-        // the record of a refused completion does not list a step the pass
-        // never reached.
-        if ($this->cleanup !== null) {
-            $details[] = 'workspace: ' . $this->cleanup->describe();
-        }
 
         return $details;
     }
@@ -505,23 +313,15 @@ final class CompletionEvidence
             return [];
         }
 
-        $hints = [sprintf('The box in %s is left as you wrote it.', $this->checklistPath)];
-
-        if ($this->record->hasCommit()) {
-            $hints[] = sprintf(
-                'The commit %s is kept on %s and the implementation is not repeated.',
-                $this->shortCommit(),
-                $this->record->branch() ?? 'its branch',
-            );
-        }
-
-        $hints[] = sprintf(
-            'Run `ralph logs %s` for the attempt, then `ralph retry %s`.',
-            $this->record->task()->value(),
-            $this->record->task()->value(),
-        );
-
-        return $hints;
+        return [
+            sprintf('The box in %s is left as you wrote it.', $this->checklistPath),
+            'The agent\'s changes are left in the working tree: read them with `git diff`.',
+            sprintf(
+                'Run `ralph logs %s` for the attempt, then `ralph retry %s`.',
+                $this->record->task()->value(),
+                $this->record->task()->value(),
+            ),
+        ];
     }
 
     /**
@@ -529,8 +329,7 @@ final class CompletionEvidence
      *
      * One entry each, so what was missing is stored rather than a count of
      * things missing. An earned completion has nothing to say here: it is not a
-     * failure, and its evidence is the record file, the verification rows and
-     * the commit.
+     * failure, and its evidence is the record file and the verification rows.
      */
     public function evidence(): FailureEvidence
     {
@@ -549,10 +348,7 @@ final class CompletionEvidence
     public function describe(): string
     {
         if ($this->isEarned()) {
-            return sprintf(
-                'completed: %s',
-                $this->isNoChange() ? 'nothing to commit, and the checks agree' : 'verified and committed',
-            );
+            return 'completed: verified in the working tree';
         }
 
         return sprintf(
@@ -565,9 +361,9 @@ final class CompletionEvidence
     /**
      * The evidence as a file for a person to read.
      *
-     * Markdown, beside the attempt's logs, for the reason the no-change record
-     * is: this is read by whoever asks why a box is ticked, and a row in a
-     * database is not where that question gets asked.
+     * Markdown, beside the attempt's logs: this is read by whoever asks why a
+     * box is ticked, and a row in a database is not where that question gets
+     * asked.
      */
     public function toMarkdown(): string
     {
@@ -575,13 +371,9 @@ final class CompletionEvidence
             $this->heading(),
             $this->conditionsSection(),
             $this->checksSection(),
-            $this->gitSection(),
+            $this->changesSection(),
             $this->checklistSection(),
         ];
-
-        if ($this->cleanup !== null) {
-            $sections[] = $this->workspaceSection();
-        }
 
         if (!$this->claim->isEmpty()) {
             $sections[] = $this->claimSection();
@@ -603,32 +395,14 @@ final class CompletionEvidence
             'description' => $this->description,
             'attempt' => $this->attempt,
             'agent' => $this->agent()->name(),
-            'base' => ['reference' => $this->base->reference(), 'sha' => $this->base->sha()],
             'earned' => $this->isEarned(),
             'unmet' => $this->unmet(),
             'checked' => $this->wasChecked(),
             'checklist' => ['path' => $this->checklistPath, 'line' => $this->edit?->line()],
-            'commit' => $this->commitSha(),
-            'branch' => $this->record->branch(),
-            'no_change' => $this->isNoChange(),
-            'staged' => $this->staged->toArray(),
-            'push' => $this->push()->toColumns(),
-            'workspace' => $this->cleanup?->toArray(),
             'verification' => $this->verification->toArray(),
-            'satisfaction' => $this->satisfaction?->toArray(),
             'claim' => $this->claim->toStorage(),
             'record' => $this->recordPath,
         ];
-    }
-
-    /**
-     * The commit, short, or a word saying there is none.
-     */
-    private function shortCommit(): string
-    {
-        $sha = $this->commitSha();
-
-        return $sha === null ? 'no commit' : substr($sha, 0, BaseCommit::SHORT_LENGTH);
     }
 
     private function heading(): string
@@ -644,15 +418,14 @@ final class CompletionEvidence
             sprintf('> %s', $this->description),
             '',
             // The agent by name, because "which agent produced this" is the
-            // first thing asked of a commit nobody wrote by hand, and the row
+            // first thing asked of a change nobody wrote by hand, and the row
             // it comes from holds no credentials to leak here.
             sprintf('Carried out by %s.', $this->agent()->describe()),
             '',
             $this->isEarned()
                 ? 'This task is checked off in the checklist. PROJECT.md section G, item 7 allows that '
-                    . 'only once the configured checks have passed, a commit or a verified no-change '
-                    . 'result has been recorded, and any required publication has succeeded. What '
-                    . 'follows is each of those, as the package observed it.'
+                    . 'only once the configured checks have passed against the work. What follows is '
+                    . 'that, as the package observed it.'
                 : 'This task was carried through to the end of the pass and was not checked off. The '
                     . 'conditions below were read before the checklist would have been written, and '
                     . 'at least one of them did not hold.',
@@ -701,15 +474,6 @@ final class CompletionEvidence
                     : 'Verification passed',
                 $this->verification->describe(),
             ) => $this->verification->passed(),
-            sprintf(
-                'An implementation is recorded — %s',
-                $this->isNoChange()
-                    ? 'a verified no-change result'
-                    : sprintf('commit %s', $this->shortCommit()),
-            ) => $this->record->hasImplementation()
-                && (!$this->isNoChange() || $this->satisfaction?->isJustified() === true),
-            sprintf('Publication is settled — %s', $this->push()->describe())
-                => $this->push()->isSatisfied(),
         ];
     }
 
@@ -719,14 +483,14 @@ final class CompletionEvidence
             // The one completion no check stands behind, written out as such.
             // A reader of this record has to be able to tell it from one a
             // suite passed, because what it rests on is different: the agent
-            // reported a candidate implementation, and the commit below is
-            // what that implementation was.
+            // reported a candidate implementation, and the changes in the
+            // working tree are what that implementation was.
             return implode("\n", [
                 '## The checks',
                 '',
                 'None. This run froze an empty `checks` set, so no verification command was run and '
                     . 'nothing here was established by one. What the tick rests on is the agent\'s own '
-                    . 'result and the recorded commit — review the diff before merging it.',
+                    . 'result — read the diff before you commit it.',
                 '',
                 'Listing a command under `checks` in `.ralph/config.json` is what makes a later run '
                     . 'decide this question for itself.',
@@ -737,8 +501,8 @@ final class CompletionEvidence
             '## The checks',
             '',
             sprintf(
-                '%s, run by the package against the task\'s workspace — not by the agent, and not '
-                    . 'from the configuration as it stands now but from the set this run froze.',
+                '%s, run by the package in the project itself — not by the agent, and not from the '
+                    . 'configuration as it stands now but from the set this run froze.',
                 ucfirst($this->verification->describe()),
             ),
             '',
@@ -756,56 +520,23 @@ final class CompletionEvidence
         return implode("\n", $lines);
     }
 
-    private function gitSection(): string
+    /**
+     * Where the work is, which since section K, item 1 is one answer for every
+     * pass: in the user's checkout, uncommitted, on whatever branch they had
+     * checked out.
+     */
+    private function changesSection(): string
     {
-        if ($this->isNoChange()) {
-            return implode("\n", [
-                '## Git',
-                '',
-                'Nothing was committed: the task was found already satisfied, which section G, item 6 '
-                    . 'accepts as a verified outcome rather than an empty commit.',
-                '',
-                sprintf('- base: %s', $this->base->describe()),
-                sprintf('- publication: %s', $this->push()->describe()),
-                sprintf(
-                    '- evidence: %s',
-                    $this->satisfaction?->recordPath() ?? 'see the attempt\'s log',
-                ),
-            ]);
-        }
-
-        $lines = [
-            '## Git',
+        return implode("\n", [
+            '## The changes',
             '',
-            sprintf('- base: %s', $this->base->describe()),
-            sprintf('- branch: %s', $this->record->branch() ?? 'none recorded'),
-            sprintf('- commit: %s', $this->commitSha() ?? 'none recorded'),
-            sprintf('- staged: %s', $this->staged->summary()),
-            sprintf('- publication: %s', $this->push()->describe()),
-        ];
-
-        $paths = $this->staged->paths();
-
-        if ($paths !== []) {
-            $lines[] = '';
-            $lines[] = 'What the commit contains:';
-            $lines[] = '';
-
-            foreach (array_slice($paths, 0, self::PATHS_IN_RECORD) as $path) {
-                $lines[] = '- `' . $path . '`';
-            }
-
-            $remaining = count($paths) - self::PATHS_IN_RECORD;
-
-            if ($remaining > 0) {
-                $lines[] = sprintf('- and %d more', $remaining);
-            }
-
-            $lines[] = '';
-            $lines[] = sprintf('Read the whole diff with `git show %s`.', $this->shortCommit());
-        }
-
-        return implode("\n", $lines);
+            'Nothing was branched, committed or pushed. The agent worked in this checkout, on the '
+                . 'branch you had checked out, and the checks above passed with its changes in place.',
+            '',
+            '- read them with `git diff` (and `git status` for files it added)',
+            '- commit them yourself when you are satisfied with them',
+            '- `git checkout -- .` is what undoes them, and it undoes the work of this task',
+        ]);
     }
 
     private function checklistSection(): string
@@ -828,68 +559,6 @@ final class CompletionEvidence
                 $this->edit->line(),
             ),
         ]);
-    }
-
-    /**
-     * What finalization did to the checkout the work was done in.
-     *
-     * Written after the Git and checklist sections because that is the order
-     * the steps happened in, and a reader following the record down is reading
-     * the sequence the guarantee rests on: by the time this section's step was
-     * taken, everything above it was already durable.
-     */
-    private function workspaceSection(): string
-    {
-        $cleanup = $this->cleanup;
-
-        if ($cleanup === null) {
-            // Unreachable: the section is only assembled when there is one.
-            return '';
-        }
-
-        $lines = ['## The workspace', ''];
-
-        if ($cleanup->wasRemoved()) {
-            $lines[] = $cleanup->clearedRegistrationOnly()
-                ? sprintf(
-                    'The task\'s workspace at `%s` had already gone, and Git\'s record of it was '
-                        . 'cleared. Nothing was deleted by this run.',
-                    (string) $cleanup->path(),
-                )
-                : sprintf(
-                    'The task\'s workspace at `%s` was removed, along with its `git worktree` '
-                        . 'registration. It was removed only after the commit, any required push, '
-                        . 'this pass\'s row and the checklist write above were durable, so none of '
-                        . 'them depends on it.',
-                    (string) $cleanup->path(),
-                );
-
-            if (!$this->isNoChange()) {
-                $lines[] = '';
-                $lines[] = sprintf(
-                    'The work is on `%s` as commit %s; the checkout it was written in is not needed '
-                        . 'to read, review or merge it.',
-                    $this->record->branch() ?? 'its branch',
-                    $this->shortCommit(),
-                );
-            }
-
-            return implode("\n", $lines);
-        }
-
-        $lines[] = sprintf(
-            'The workspace at `%s` is still on disk: %s',
-            $cleanup->path() ?? 'its recorded path',
-            $cleanup->describe() . '.',
-        );
-
-        $lines[] = '';
-
-        foreach ([...$cleanup->details(), ...$cleanup->hints()] as $line) {
-            $lines[] = '- ' . $line;
-        }
-
-        return implode("\n", $lines);
     }
 
     private function claimSection(): string
@@ -919,8 +588,8 @@ final class CompletionEvidence
             '## What this is not',
             '',
             'The checks passing says the project is green with this work applied. It does not say '
-                . 'that any configured check tests what this task asked for — that is what reviewing '
-                . 'the commit is for, and a checked box is not a substitute for it.',
+                . 'that any configured check tests what this task asked for — that is what reading '
+                . 'the diff is for, and a checked box is not a substitute for it.',
             '',
             'Nor is the agent\'s report evidence. It is kept above because it is often the quickest '
                 . 'description of what changed, and it is never read as a reason.',

@@ -149,22 +149,6 @@ final class GenerationHistory
     }
 
     /**
-     * The branches the task's recorded passes own, oldest first.
-     *
-     * What a new generation must not be given. Passes that recorded no branch
-     * are left out: there is nothing to protect.
-     *
-     * @return list<string>
-     */
-    public function branchesOf(TaskId $task): array
-    {
-        return array_values(array_filter(array_map(
-            static fn (RecordedGeneration $pass): ?string => $pass->branch(),
-            $this->generationsOf($task),
-        )));
-    }
-
-    /**
      * The same history with one more pass in it.
      *
      * @throws InvalidArgumentException when the pass contradicts what is

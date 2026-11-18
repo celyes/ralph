@@ -19,7 +19,7 @@ use Celyes\RalphPhp\Support\SystemClock;
  * worker that has not stopped.
  *
  * PROJECT.md section H, item 1. Two runners in one repository would be sharing
- * a state database, a set of task branches, a worktree directory and the user's
+ * a state database, the user's working tree and the user's
  * one checklist file: they would hand the same pending task to two agents,
  * claim the same branch, and tick a box each for work only one of them did.
  * None of that is detectable after the fact, so it is prevented before anything
@@ -54,13 +54,13 @@ use Celyes\RalphPhp\Support\SystemClock;
  * - **A worker that outlived its runner.** A run stopped with Ctrl+C terminates
  *   the agent's process tree and confirms it; where it cannot, it leaves the
  *   record claiming the repository and naming the survivors (section H, item
- *   4). Those are a live agent writing in a task worktree, not an ambiguity, so
+ *   4). Those are a live agent writing in the project, not an ambiguity, so
  *   the refusal names the process to stop. One that has since exited is not
  *   found and the lock is taken over as usual.
  *
  * The same gate serves `run` and `resume`: the question "has the previous
  * runner stopped" has one answer and one safe way to get it, and a fresh run
- * started over a live runner's worktrees would do the same damage as a resume.
+ * started beside a live runner would do the same damage as a resume.
  * What differs is only the recorded purpose, so a refusal can say what is
  * already going on.
  */
@@ -259,7 +259,7 @@ final class RepositoryLock
                     sprintf('It records %s.', $previous->describe()),
                     'Ralph PHP stopped that worker and could not confirm it had gone, so it left the '
                         . 'repository claimed rather than release it over an agent that may still be '
-                        . 'writing in a task worktree.',
+                        . 'writing in this project.',
                     sprintf('Stop process %d, then run the command again; the lock is taken over '
                         . 'automatically once nothing it names is running.', $worker),
                 ],
@@ -304,7 +304,7 @@ final class RepositoryLock
      * this record had already stopped — its `flock` is free — but a run
      * interrupted with a worker it could not confirm dead names that worker
      * instead of releasing ({@see LockHolder::withWorkers()}), and starting
-     * here while it is alive would put a second agent in a worktree the first
+     * here while it is alive would put a second agent in the project the first
      * is still writing to.
      *
      * Workers that have since gone are simply not found, so the next command

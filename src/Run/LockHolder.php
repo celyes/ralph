@@ -173,7 +173,7 @@ final class LockHolder
      * that says the repository is still held, and by which processes. The
      * takeover check reads it and refuses while any of them is alive
      * ({@see RepositoryLock::acquire()}), so a resume cannot start on top of an
-     * agent that is still writing in a task worktree.
+     * agent that is still writing in the project.
      *
      * @param list<int> $workers
      */

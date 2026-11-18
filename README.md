@@ -10,21 +10,25 @@
   <a href="https://packagist.org/packages/celyes/ralph-php"><img src="https://img.shields.io/packagist/v/celyes/ralph-php?label=packagist&color=blue" alt="Latest version on Packagist"></a>
   <a href="https://packagist.org/packages/celyes/ralph-php/stats"><img src="https://img.shields.io/packagist/dt/celyes/ralph-php?label=installs&color=blue" alt="Installs"></a>
   <a href="https://github.com/celyes/ralph/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/celyes/ralph/ci.yml?branch=main&label=CI" alt="CI status"></a>
-  <img src="https://img.shields.io/badge/tests-2860%20passing-brightgreen" alt="2860 tests">
+  <img src="https://img.shields.io/badge/tests-2199%20passing-brightgreen" alt="2199 tests">
   <img src="https://img.shields.io/packagist/dependency-v/celyes/ralph-php/php?color=777bb4" alt="Required PHP version">
   <a href="LICENSE"><img src="https://img.shields.io/packagist/l/celyes/ralph-php?color=green" alt="MIT licensed"></a>
 </p>
 
 You keep a Markdown checklist of tasks. Ralph PHP works through it one task at a
-time. For each task it opens an isolated Git worktree, hands the task to a
-coding agent — Codex or Claude Code — runs your verification commands itself,
-commits what passed to the run's branch, and only then ticks the box. When
-something needs a person, it stops and says so.
+time. For each task it hands the task to a coding agent — Codex or Claude Code —
+which works in your checkout, on the branch you have checked out; then it runs
+your verification commands itself, and only then ticks the box. When something
+needs a person, it stops and says so.
 
-**The loop owns the work; the agent only implements it.** Task selection, state,
-Git and verification belong to Ralph PHP. That split is what makes a run
-bounded, resumable and reviewable: every commit it produces is one you can find,
-read and throw away.
+**It does nothing to Git.** No branch, no commit, no stash, no push. What a run
+leaves behind is changes in your working tree and ticked boxes in your
+checklist, so reviewing a run is `git diff` and committing it is yours to do.
+
+**The loop owns the work; the agent only implements it.** Task selection, state
+and verification belong to Ralph PHP. That split is what makes a run bounded,
+resumable and reviewable: nothing is checked off that your own checks did not
+pass.
 
 New here, read three things in order: [How it works](#how-it-works) for the
 shape of a run, [Getting started](#getting-started) for the five minutes of
@@ -36,30 +40,29 @@ on today. The rest is reference you can come back to.
 ### The loop, one phase at a time
 
 `ralph run` takes the checklist's pending tasks in file order. Each task goes
-through six phases, and the run names each one as it enters it:
+through four phases, and the run names each one as it enters it:
 
 | Phase | What happens | Who does the work |
 | --- | --- | --- |
-| **preparing** | A worktree is created for the task — off the run's branch by default, off the base commit under `per-task` — and the briefing is assembled: the task, your context file, and notes from earlier attempts. | Ralph PHP |
-| **executing** | The agent is started in that worktree with the briefing on its standard input. Its output is streamed to your terminal and to the task's log. | the agent |
-| **verifying** | Your `checks` commands are run in the worktree. Each command's output, exit code and duration are recorded. | Ralph PHP |
-| **committing** | The worktree's changes are staged and committed on the run's branch, with the task identifier in the commit trailers. | Ralph PHP |
-| **publishing** | The branch is pushed to your remote, if you enabled pushing. Skipped otherwise. | Ralph PHP |
+| **preparing** | The briefing is assembled: the task, your context file, and notes from earlier attempts. | Ralph PHP |
+| **executing** | The agent is started in your project directory with the briefing on its standard input. Its output is streamed to your terminal and to the task's log. | the agent |
+| **verifying** | Your `checks` commands are run in the same directory, by Ralph PHP rather than by the agent. Each command's output, exit code and duration are recorded. | Ralph PHP |
 | **finalizing** | The task's checkbox is ticked in `.ralph/tasks.md`. | Ralph PHP |
 
-The order matters: the box is ticked last, when there is already a commit to
-point at. Each phase is recorded as it begins, which is how `ralph resume` can
-tell that an interrupted task needs only its push retried rather than its agent
-run again.
+The order matters: the box is ticked last, when the checks have already passed
+over the work. Each phase is recorded as it begins, which is how `ralph resume`
+can tell that an interrupted task needs only its checkbox written rather than
+its agent run again.
 
 ### What stops a task, and what happens next
 
 | Situation | What Ralph PHP does |
 | --- | --- |
-| A check failed | Attempts the task again with the failure evidence in the next briefing, until `limits.attempts_per_task` runs out. The box stays unticked. |
+| A check failed | Attempts the task again with the failure evidence in the next briefing, until `limits.attempts_per_task` runs out. The box stays unticked and the agent's changes are left where they are. |
 | The agent asked a question | Ends the run. The answer is yours to give, so no further task is started. |
-| Something is ambiguous — a branch owned by unrelated work, a change that looks like it weakens your checks | Stops that task, keeps the worktree and the diff as evidence, and says what to look at. |
-| You pressed Ctrl+C | Stops the agent, records the interruption, keeps the files, exits 130. `ralph resume` picks it up. |
+| The task was reworded or removed while the agent worked | Stops that task without ticking anything, keeps your edit, and says what to look at. |
+| The checklist could not be written | Keeps the work and the passing checks, and leaves the pass owing one line in a file. `ralph run` again writes it and nothing else. |
+| You pressed Ctrl+C | Stops the agent, records the interruption, leaves the files as they are, exits 130. `ralph resume` picks it up. |
 | A limit was reached | Stops at a task boundary and exits 124. Running `ralph run` again carries on. |
 
 A task the loop gives up on does not take the rest of the run with it by
@@ -73,22 +76,23 @@ run](#bailing-out-of-a-run).
 | --- | --- |
 | **task** | One top-level `- [ ]` item in `.ralph/tasks.md`. Identified by a hash of its description, like `TASK-19E0214A`. |
 | **run** | One invocation of `ralph run`, processing tasks until they run out or a limit stops it. |
-| **pass** | One go at a single task, with its own worktree and a commit of its own. Unticking a completed task starts a second pass, whose names carry a `-g2` suffix. Also called a *generation*. |
+| **pass** | One go at a single task, with its own attempts, logs and evidence. Unticking a completed task starts a second pass, whose names carry a `-g2` suffix. Also called a *generation*. |
 | **attempt** | One invocation of the agent inside a pass. Failed checks buy another attempt; they do not start a new pass. |
-| **check** | One verification command from `checks`, run by Ralph PHP in the task's worktree, never by the agent. |
-| **workspace** | The linked Git worktree a pass works in, under `.ralph/runtime/worktrees/`. Your own checkout is never worked in. |
+| **check** | One verification command from `checks`, run by Ralph PHP in your project directory, never by the agent. |
+| **workspace** | Your project directory. The agent works there, the checks run there, and nothing isolates one task from another. |
 | **state** | Where a pass stands: `pending`, `running`, `completed`, `skipped`, `blocked`, `failed` or `interrupted`. |
 
 ### What it never does
 
-- **It never works in your checkout.** Nothing of yours is stashed, discarded or
-  committed. The only file of yours it writes is the checkbox of a task that
-  passed.
-- **It never merges, deploys, or opens a pull request.** It produces branches
-  and commits for you to review.
+- **It never touches Git.** Nothing of yours is branched, stashed, committed,
+  discarded or pushed. The agent's changes sit in your working tree exactly as
+  it left them, and the one file Ralph PHP writes itself is the checkbox of a
+  task that passed.
+- **It never merges, deploys, or opens a pull request.** It leaves changes for
+  you to read and commit.
 - **It never takes the agent's word for it.** A zero exit code, a confident
   summary, or a checkbox the agent ticked itself is not a completed task — only
-  passing checks and a real commit are.
+  passing checks are.
 - **It never silently switches agents.** A missing executable or an unsupported
   CLI version is an error, not a fallback.
 
@@ -101,27 +105,22 @@ output or your test suite's. On a terminal this is in colour — see
 ```
 $ ralph run
 run-20261111-222204-dcc43e: codex (adapter "codex", selected by the project configuration), processing pending tasks
-base HEAD (4f2a1c90b3d7)
 checks: tests (frozen aebd852638df)
-branch ralph/shared (new)
 
 [1/1] TASK-19E0214A Add a --dry-run option to the import command
---- workspace TASK-19E0214A in .ralph/runtime/worktrees/TASK-19E0214A, from HEAD (4f2a1c90b3d7) (created by this run)
+--- workspace /srv/project
 --- codex: TASK-19E0214A, attempt 1, agent codex: Add a --dry-run option to the import command (first of 3 attempts, up to 1800 seconds; context 1480 chars, 0 notes)
     … the agent's output, streamed as it arrives and copied to the task's log …
---- check tests: composer test (in .ralph/runtime/worktrees/TASK-19E0214A, timeout 600s)
+--- check tests: composer test (in /srv/project, timeout 600s)
     … your suite's output, run by Ralph PHP rather than by the agent …
 --- check tests passed in 12.4s
 --- verification: 1 of 1 checks passed in 12.4s
---- staging: 3 file(s) staged, +81 -4
---- checks audit: nothing weakened
---- commit: 9c3b7e1a2f40 TASK-19E0214A: Add a --dry-run option to the import command
---- completed: verified and committed
+--- completed: verified in the working tree
 ---   checklist: .ralph/tasks.md line 3, now checked
-TASK-19E0214A completed: verified and committed (9c3b7e1a on ralph/shared)
+TASK-19E0214A completed: verified in the working tree
 
 run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — every pending task was completed (1 task)
-  next: Review ralph/shared, then add the next work to .ralph/tasks.md and run `ralph run`.
+  next: Review the changes with `git diff` and commit them, then add the next work to .ralph/tasks.md and run `ralph run`.
 ```
 
 ## Contents
@@ -146,7 +145,7 @@ run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — e
 **Reference**
 
 - [Custom adapters](#custom-adapters)
-- [Git behaviour](#git-behaviour)
+- [Your checkout](#your-checkout)
 - [Context and memory](#context-and-memory)
 - [Verification](#verification)
 - [Limits](#limits)
@@ -166,7 +165,7 @@ run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — e
 | --- | --- |
 | PHP | 8.3 or newer |
 | Extensions | `json`, `mbstring`, `pdo`, `pdo_sqlite` (required); `pcntl`, `posix` (recommended — see below) |
-| Git | 2.24 or newer, with a working tree and a commit author identity |
+| Git | not required — Ralph PHP never runs it. You will want it to read and commit what a run produces |
 | Platform | Linux and WSL are the supported and tested targets |
 | An agent | the Codex CLI (0.40+) or the Claude Code CLI (2.0+), authenticated |
 
@@ -217,20 +216,25 @@ installed it into a project.
 ## Getting started
 
 ```bash
-cd your-php-project          # a Git repository with a clean working tree
+cd your-php-project          # whatever you have checked out is what gets worked on
 ralph init                   # writes .ralph/ and appends ignore rules
 $EDITOR .ralph/CONTEXT.md    # describe the project for the agent
 $EDITOR .ralph/tasks.md      # write one task
 $EDITOR .ralph/config.json   # add the command your project is verified with
-git commit -am "Ignore Ralph PHP runtime data"   # init edited .gitignore
 ralph preflight              # check this machine can do the work
 ralph run
+git diff                     # read what it did, then commit it yourself
 ```
 
 The `config.json` step is optional and worth doing. `checks` starts empty —
 Ralph PHP does not assume how your project is verified — and a run with no
-checks completes a task on the agent's own result and the commit it produced.
-See [Verification](#verification).
+checks completes a task on the agent's own reported result. See
+[Verification](#verification).
+
+Start from a clean working tree if you can. Nothing requires it, and it costs
+nothing to arrange: a run adds the agent's changes to whatever is already
+uncommitted, and `git diff` is much easier to read when everything in it is the
+run's.
 
 `ralph init` creates:
 
@@ -239,7 +243,7 @@ See [Verification](#verification).
 | `.ralph/config.json` | every setting, at its default value |
 | `.ralph/tasks.md` | the checklist, with instructions and no tasks |
 | `.ralph/CONTEXT.md` | project instructions passed to every attempt |
-| `.ralph/runtime/` | state, logs, memory and task worktrees |
+| `.ralph/runtime/` | state, logs and memory |
 
 and appends ignore rules for `.ralph/runtime/`, `.ralph/tasks.md` and the `.bak`
 files `--force` makes. Existing files are kept as they are; `ralph init
@@ -248,11 +252,8 @@ first. Your ignore file is never rewritten in either mode — missing rules are
 appended, and a rule you have negated with `!` is left negated, so tracking the
 checklist yourself is a decision `ralph init` will not undo.
 
-**Why you have to commit in the middle of that.** `ralph init` never runs
-`git`, so the ignore rules it appends are left as an uncommitted change in your
-checkout. A run refuses to start over changes it did not write
-([Git behaviour](#git-behaviour)), so that change has to be yours to deal with.
-`init` prints the commit as one of its next steps for exactly this reason.
+`ralph init` never runs `git` itself, so the ignore rules it appends are left
+as an uncommitted change for you to commit or discard like any other.
 
 ## Example project
 
@@ -264,11 +265,11 @@ loop on it:
 ```bash
 cp -r examples/text-tools /tmp/text-tools && cd /tmp/text-tools
 git init && git add --all && git commit -m "Import the example package"
-composer install
+composer install    # the checks run here, so the project has to be installed
 ralph init          # keeps the three .ralph/ files the example ships
-git commit -am "Ignore Ralph PHP runtime data"   # init edited .gitignore
 ralph preflight
-ralph run           # three tasks, three commits, one branch
+ralph run           # three tasks, worked on in this directory
+git diff            # everything the three tasks changed
 ```
 
 [`examples/README.md`](examples/README.md) walks through it: what the three
@@ -278,12 +279,14 @@ per task.
 
 [`docs/demonstrations.md`](docs/demonstrations.md) is what happened when that
 pass was actually run, twice: Claude Code 2.1.226 over all three tasks, with the
-commits, the verification output, the elapsed time, and what a person had to do
-— three interventions the first time, none the second.
+verification output, the elapsed time, and what a person had to do — three
+interventions the first time, none the second. Those runs were made by a release
+that still committed each task, so the commits they name are that release's;
+what the loop did either side of the commit is unchanged.
 
-The example has to be its own repository because each task is implemented in a
-linked worktree and committed to a branch the run creates — run it inside this
-checkout and that branch and those commits would be made here.
+Copy it out rather than running it in place: the agent edits the project it is
+pointed at, and pointing it at `examples/text-tools/` inside this checkout would
+have it edit this repository.
 
 ## Commands
 
@@ -296,7 +299,6 @@ checkout and that branch and those commits would be made here.
 | [`ralph logs TASK-ID`](#ralph-logs-task-id) | Read what the agent and the checks actually produced for one task. |
 | [`ralph resume`](#ralph-resume---agent-name---bail--no-bail) | Continue an interrupted run from the phase it stopped in. |
 | [`ralph retry TASK-ID`](#ralph-retry-task-id) | Have another go at one failed or blocked task, keeping its history. |
-| [`ralph clean`](#ralph-clean-task-id---all) | See the task workspaces being kept, and remove the ones you are finished with. |
 | [`ralph help`](#ralph-help-command-ralph-version) | Read the usage for the application or one command. |
 
 Every command takes `-h`/`--help` for its own usage, and `-v`/`--verbose` to
@@ -312,9 +314,7 @@ appends the ignore rules. Preserves existing files unless `--force` is given.
 
 ### `ralph preflight [--agent NAME]`
 
-Checks the PHP version, the required extensions, Git's presence and version,
-that this directory is a non-bare working tree, that `git.base` names a commit,
-that Git can determine an author and committer, that the selected agent's
+Checks the PHP version, the required extensions, that the selected agent's
 executable and credentials are present, that its CLI version is supported, and
 that every configured verification command could run.
 
@@ -327,8 +327,8 @@ checks before they start work.
 ### `ralph run [--agent NAME] [--bail|--no-bail]`
 
 The loop itself: the checklist's pending tasks in file order, one at a time,
-each through the six phases described in [How it works](#how-it-works). It is
-the only command that starts an agent, writes a commit, or ticks a box.
+each through the four phases described in [How it works](#how-it-works). It is
+the only command that starts an agent or ticks a box.
 
 `--bail` stops the run at the first task it gives up on instead of carrying on,
 and `--no-bail` carries on even when `limits.bail_on_failure` is set in the
@@ -340,10 +340,10 @@ See [Bailing out of a run](#bailing-out-of-a-run).
 Prints the configuration in force, the checklist it reads, the selected agent,
 how many tasks are done and how many remain, the latest run with its state and
 why it stopped, and then every task in checklist order with its identifier,
-state, phase, attempt count, branch, commit and check results.
+state, phase, attempt count and check results.
 
 A box ticked by a verified run is reported as the runner's; one ticked by hand is
-reported as yours, because a box with no commit behind it is not work this
+reported as yours, because a box with no checks behind it is not work this
 package can vouch for.
 
 `--json` prints the same report as one JSON document with a schema version,
@@ -358,18 +358,16 @@ not how the last run ended.
 
 Prints what was recorded for one task: each pass, newest first, and within a
 pass each attempt's worker output and the result of every check that ran. Files
-beside it are named rather than printed — the staged diff a stopped pass
-preserved, the evidence behind a no-change completion, the record behind a
-ticked box. A log that `logs.wipe_on_success` removed is reported as wiped, with
-the moment it went, rather than as a file that is missing. See
+beside it are named rather than printed — the record behind a ticked box. A log
+that `logs.wipe_on_success` removed is reported as wiped, with the moment it
+went, rather than as a file that is missing. See
 [Logs and diagnostics](#logs-and-diagnostics).
 
 ### `ralph resume [--agent NAME] [--bail|--no-bail]`
 
-Reconciles worktree, branch and recorded commit state after an interruption and
-continues with the agent and settings recorded for the original run. A task is
-picked up at the phase it stopped in, and nothing earlier is repeated. See
-[Recovery](#recovery).
+Continues an interrupted run with the agent and settings recorded for it. A
+task is picked up at the phase it stopped in, and nothing earlier is repeated.
+See [Recovery](#recovery).
 
 `--bail` and `--no-bail` work as they do for `run`, and are this resume's own
 decision: they shape the tasks still to come rather than the work already done.
@@ -378,69 +376,14 @@ The agent, unlike bailing, cannot be changed by a resume.
 ### `ralph retry TASK-ID`
 
 Starts a new attempt at one task, continuing the pass that stopped: its earlier
-attempts, logs, branch and blocker details are kept, and the new attempt is
-given the recorded failure as evidence. The per-task attempt allowance starts
-again, so a task that ran out of attempts can be tried. Only the named task is
-taken on.
+attempts, logs and blocker details are kept, and the new attempt is given the
+recorded failure as evidence. The per-task attempt allowance starts again, so a
+task that ran out of attempts can be tried. Only the named task is taken on.
 
 For a task that is *interrupted*, use `resume` instead — it finishes the pass
 from where it stopped rather than attempting it again. For a task that was
 checked off, untick the item and run `ralph run`: the work is taken on as a new
-pass with a commit of its own, and the finished one keeps its commit and
-evidence.
-
-### `ralph clean [TASK-ID] [--all]`
-
-Reports the task worktrees the project is holding under
-`.ralph/runtime/worktrees/`, and removes the ones you name.
-
-A pass that failed, was blocked or was interrupted keeps its worktree, because
-that directory is the evidence and what `ralph retry` carries on in
-([Git behaviour](#git-behaviour)). That is the right default and it accumulates:
-a project worked on for a week can hold a checkout per stopped task, each with
-its own `vendor/`. This is how you clear one up once you have read it, instead
-of `rm -rf`, which takes Git's registration with it and leaves `git worktree
-add` refusing the path afterwards.
-
-```console
-$ ralph clean                      # list; removes nothing
-$ ralph clean TASK-1A2B3C4D        # remove that task's kept worktrees
-$ ralph clean --all                # the same for every stopped pass
-```
-
-With no arguments it changes nothing at all: it lists each recorded workspace,
-says whether it could be removed and gives the reason for each one that could
-not. That is the opposite of most `clean` commands, deliberately — these
-directories can hold the only copy of something — and it is the only form that
-is safe to run during a run. The acting forms take the repository lock, so they
-refuse to start while another Ralph PHP is working here.
-
-**Uncommitted changes are never deleted, and no option overrides that.** The
-command does exactly one thing the run's own cleanup will not: it removes the
-worktree of a pass that *stopped*, which cleanup keeps for inspection. Every
-other protection stands — modified, staged or untracked files, a commit no
-record names, a commit its branch does not hold, a worktree Git has locked, a
-directory Ralph PHP did not create. A workspace kept for one of those is
-reported with the reason and the full path, and it is yours to clear up:
-
-```console
-$ git -C .ralph/runtime/worktrees/TASK-1A2B3C4D status   # decide what is wanted
-$ git -C .ralph/runtime/worktrees/TASK-1A2B3C4D reset --hard
-$ git -C .ralph/runtime/worktrees/TASK-1A2B3C4D clean -fd
-$ ralph clean TASK-1A2B3C4D
-```
-
-There is no `--force`, because it would be one word that deleted an unknown
-amount of your work.
-
-Cleaning a workspace deletes a directory, not the record of the work. The
-task's branch, its commit, its attempts, its logs and its verification results
-all stay exactly where they were, the item stays unticked, and `ralph retry
-TASK-ID` prepares a fresh workspace from the recorded base commit.
-
-Exits 0 when the listing printed or everything you asked about is gone, 75 when
-a workspace you asked about was kept — clearing it is then waiting on you — and
-78 when the project has nothing recorded or another runner holds it.
+pass, and the finished one keeps its attempts and its evidence.
 
 ### `ralph help [COMMAND]`, `ralph version`
 
@@ -488,11 +431,10 @@ are one task. A repeated description is an error rather than work done twice.
 
 **What makes a task work well here:** it describes one change small enough to
 verify on its own; it says how the change is verified, not only what it should
-do; and it names the files or areas involved when you know them. Under the
-default `git.strategy` the tasks of one run are committed to one branch in
-order, so a later task is given a workspace holding what the earlier ones
-committed and may build on it. Under `per-task` it may not: every task starts
-from the base commit, so each has to stand on its own.
+do; and it names the files or areas involved when you know them. Every task of a
+run works in the same checkout, in file order, so a later task sees what the
+earlier ones did and may build on it — and, equally, inherits a mistake an
+earlier one made.
 
 Avoid editing the file while a run is in progress. The runner rewrites the
 checkbox of the task it finishes, and it will notice a task that changed under
@@ -515,17 +457,6 @@ any work starts.
     "claude": {"adapter": "claude", "executable": "claude", "model": null, "arguments": [], "environment": []}
   },
   "checks": [],
-  "workspace": {
-    "prepare": [],
-    "copy": []
-  },
-  "git": {
-    "base": "HEAD",
-    "branch_prefix": "ralph/",
-    "strategy": "shared",
-    "shared_branch": null,
-    "push": {"enabled": false, "remote": "origin"}
-  },
   "limits": {
     "iterations": 10,
     "attempts_per_task": 3,
@@ -551,14 +482,6 @@ any work starts.
 | `agents.NAME.environment` | `[]` | **names** of environment variables the agent authenticates with |
 | `checks[]` | `[]` | verification commands, run in order, as argument arrays |
 | `checks[].timeout` | `600` | seconds one check may run |
-| `workspace.prepare[]` | `[]` | commands that make a fresh worktree usable |
-| `workspace.copy[]` | `[]` | files copied in from your checkout, such as a local `.env` |
-| `git.base` | `HEAD` | commit task branches start from |
-| `git.branch_prefix` | `ralph/` | prefix for generated branch names |
-| `git.strategy` | `shared` | `shared` commits every task of a run to one branch, in order; `per-task` gives every task its own branch — see [Git behaviour](#git-behaviour) |
-| `git.shared_branch` | `null` | the branch `shared` commits to; `null` derives `<branch_prefix>shared`, so `ralph/shared` |
-| `git.push.enabled` | `false` | whether to push the branch a task committed to |
-| `git.push.remote` | `origin` | remote to push to |
 | `limits.*` | see above | see [Limits](#limits) |
 | `logs.wipe_on_success` | `false` | whether a successful task's own log files are deleted once its completion is durable; see [Log retention](#logs-and-diagnostics) |
 
@@ -566,10 +489,17 @@ Commands are argument *arrays*, not shell strings: nothing is passed through a
 shell, so a task description cannot become part of a command line.
 
 Three paths are deliberately **not** configurable: `.ralph/runtime/state.sqlite`
-(the file that says which commit belongs to which task),
+(the file that says what has been done to which task),
 `.ralph/runtime/events.jsonl`, and `.ralph/adapters.php` (code this package
 executes). A configuration that could redirect any of them would be a
 configuration that can lose a task's history or change which code a run loads.
+
+There is no `git` section and no `workspace` section. Earlier releases had both:
+a base reference, a branch prefix, a per-task or shared branch strategy, a push
+remote, and commands to install dependencies into a fresh worktree. None of it
+exists any more — the work happens in your checkout, so there is nothing to
+prepare and nothing to publish. A configuration file that still carries either
+section is refused by name, which is the quickest way to find out.
 
 ## Agent setup
 
@@ -587,7 +517,7 @@ codex exec --cd WORKSPACE --sandbox workspace-write [--model M] [your arguments�
 
 `exec` is the headless form of the CLI; the briefing goes in on standard input,
 so a large context file cannot overflow an argument list; `--sandbox
-workspace-write` keeps writes inside the task worktree. Anything you put in
+workspace-write` keeps writes inside the project directory. Anything you put in
 `agents.codex.arguments` is appended last, so a repeated flag's final
 occurrence — yours — is the one Codex keeps.
 
@@ -667,9 +597,9 @@ agent.
 
 `ralph resume` uses the agent the interrupted run recorded, and refuses to
 change it; an edit to the agent settings since that run was opened is reported
-and not applied. To switch agents, reconcile the outstanding work and then start
+and not applied. To switch agents, deal with the outstanding work and then start
 a *new* run with `ralph run --agent NAME`. Completed tasks stay completed, and
-their commits and attempt history stay attributed to the agent that earned them.
+their attempt history stays attributed to the agent that earned them.
 
 ## Custom adapters
 
@@ -728,8 +658,8 @@ Notes worth having in advance:
   trust what comes back:
   1. **Report one of the defined outcomes** — candidate implementation, request
      for human input, execution error, or timeout — and never guess at a
-     candidate. These outcomes are what keep verification and Git behaviour
-     identical whichever agent ran.
+     candidate. These outcomes are what keep verification and the checklist
+     behaving identically whichever agent ran.
   2. **Stop within the time budget it was given.**
   3. **Work only in the workspace it was handed**, launched with an argument
      array rather than a shell string.
@@ -740,174 +670,62 @@ Notes worth having in advance:
 - Used as a library rather than as a command, register straight into
   `AdapterRegistry`.
 
-## Git behaviour
+## Your checkout
 
-**Your checkout is inspected first, and never touched.** A working tree holding
-unrelated uncommitted changes stops the run with exit 78. Nothing is stashed,
-discarded or committed on your behalf. The only write to a file you own is the
-checkbox of a task that passed.
+**The work happens where you are.** The agent is started in your project
+directory, on whatever branch you have checked out, and your `checks` are run in
+the same place. There is no worktree, no branch, no commit and no push: Ralph
+PHP does not run `git` at all.
 
-**Each task gets its own linked worktree** under
-`.ralph/runtime/worktrees/TASK-ID/`, created from the commit `git.base`
-resolved to at run start — recorded as a SHA, so every task in a run starts from
-the same place. A fresh worktree has your tracked files and nothing else, which
-is why `workspace.prepare` exists — list `composer install` there if your checks
-need `vendor/` — and why `workspace.copy` can bring in local files no commit
-carries, such as an `.env`. Both are empty by default: a project that works from
-its tracked files alone needs neither, and nothing is run that you did not ask
-for.
-A copied file is never staged, so a credential listed there reaches the agent
-without reaching the branch.
+What a finished run leaves behind is therefore ordinary:
 
-**`git.strategy` decides which branch a task's commit lands on**, and there are
-two answers.
-
-`shared`, the default, commits every task of a run to one branch —
-`git.shared_branch`, or `<prefix>shared` when you name none, so `ralph/shared`.
-The branch is established once per run, before the first task: created if it is
-missing, validated if it is there, and recorded against the run so a resume
-continues on it. Each task is then given a workspace made from the branch tip as
-it stood when the task was taken on, so a later task sees what the earlier ones
-committed, and each task keeps a commit of its own. One branch and one history
-to review, and `git log --format='%s%n%b' HEAD..ralph/shared` says which commit
-belongs to which task.
-
-`per-task` gives every task a branch of its own,
-`<prefix><TASK-ID>-<description-slug>` — for example
-`ralph/TASK-19E0214A-add-a-dry-run-option`. A task reopened after being
-completed takes a `-g2` suffix on the identifier —
-`ralph/TASK-19E0214A-g2-add-a-dry-run-option` — so two passes at one task can
-never name the same branch. Every task starts from the base commit, so none can
-see another's work and each is reviewable, revertable and mergeable alone.
-
-Either way **ownership is recorded, and nothing is reset or overwritten.** A
-resume knows the branch is its own; a branch holding work this project did not
-put there is refused instead. In shared mode that refusal arrives once per run,
-before an agent is started, and a task whose workspace is no longer at the tip —
-a newer run committed to the branch, or an interrupted pass is being resumed
-after one did — is refused too, because committing there would put the commits
-in between out of reach. Review `git log`, then start a new run. A resume reads
-the shared branch's whole history rather than only its tip: a commit nobody
-recorded anywhere between the run's base and the tip stops the run, because it
-would otherwise be carried into every later task's workspace and published as
-the run's own work.
-
-**Only verified task-workspace changes are staged**, and never runtime data,
-Ralph PHP's own files, or anything your ignore rules cover. A build directory
-that is *not* ignored will be committed — the staged file list printed before
-each commit is where to notice that. The commit's subject is the task as the
-checklist states it, not what the agent said it did, followed by trailers:
-
-```
-Add a --dry-run option to the import command
-
-Ralph-Task: TASK-19E0214A
-Ralph-Generation: 1
-Ralph-Run: 7
-Ralph-Attempt: 2
-Ralph-Base: 4f2a1c9…
-Ralph-Agent: codex
+```console
+$ git status --short
+ M .ralph/tasks.md
+ M src/Import.php
+?? tests/Import/DryRunTest.php
 ```
 
-Those are queryable with the tools you already have — `git log
---grep='Ralph-Task: TASK-19E0214A'` finds every pass at one task — and they
-travel with the commit into every clone, which the state database does not. Only
-the agent's *name* is written, never its settings.
+The ticked boxes are Ralph PHP's; everything else is the agent's. Reviewing a
+run is `git diff`, and committing it — in one commit, in several, or not at all
+— is yours.
 
-**Pushing is opt-in.** With `git.push.enabled` true, the branch a task committed
-to is pushed to `git.push.remote` after its commit — the run's shared branch
-once per task under the default, each task's own branch under `per-task`. A rejected push keeps the local commit
-and records the publication as outstanding; `ralph resume` retries the push
-alone, without re-running the agent or making a second commit.
+**What this buys.** Each task sees what the ones before it did, because they all
+worked in the same files. Your editor, your IDE, your running test watcher and
+your `vendor/` are the ones the agent is using, so nothing has to be installed
+or copied for a task to be able to build the project. And a run that goes wrong
+leaves the damage in front of you rather than in a directory you have to go
+looking for.
 
-**Unexpected Git activity is reconciled, not accepted.** A worker that created
-its own commits or moved a branch stops the pass with its work preserved.
+**What it costs, and how to keep the cost down.**
 
-**Cleanup is the last step of a completed task.** A task's worktree and its
-`git worktree` registration are removed after — never before — its commit, any
-required push, its row in the state store and the tick in your checklist are
-all durable. So a removal that fails costs nothing: the work is on the branch,
-and the directory is no longer the only copy of anything. The outcome is
-recorded with the rest of the completion evidence, which is where you read
-where a workspace went.
+- **The changes are mixed together.** Three tasks in one run are one diff. Run
+  fewer tasks at a time, or commit between runs, if you want them separable.
+- **A task can inherit an earlier task's mistake.** Nothing isolates them. The
+  checks are what stand between a bad change and a ticked box, so configure
+  `checks` and keep them meaningful.
+- **Your own uncommitted work is in the same diff.** Nothing of yours is
+  stashed, reset or committed — but nothing separates it from the agent's
+  either. Start a run from a clean working tree when you can.
+- **There is no undo.** `git checkout -- .` and `git clean -fd` are the undo,
+  and they take the run's work with them. That is the trade for the simplicity;
+  commit anything you would hate to lose before you start.
 
-**Cleanup is biased towards leaving things alone.** A failed or interrupted
-pass's worktree is kept, because it is the evidence. A worktree is removed only
-when every one of these holds:
+**What is still protected.**
 
-- this pass created it;
-- the pass is closed;
-- Git has it registered and unlocked;
-- nothing in it is uncommitted;
-- its HEAD is the commit the record names;
-- the pass's branch holds that commit, so the commit stays reachable once the
-  worktree is gone.
+- **The only file Ralph PHP writes itself is the checkbox** of a task that
+  passed, and it writes one marker on one line: the write is made against a hash
+  of the file as it was read, so a save of yours that lands in the middle of a
+  run is kept and the write is refused rather than applied over it
+  ([Recovery](#recovery)).
+- **A reworded or deleted task stops the pass** instead of ticking whatever is
+  on that line now.
+- **Nothing the agent reports is taken as done.** The checks decide, and they
+  are run by Ralph PHP in the project, never by the agent.
 
-Anything else is kept, with the reason stated. Cleanup never withdraws work that
-has already been earned.
-
-**A kept worktree lets go of the shared branch.** In shared-branch mode the
-branch belongs to the run, and Git lets one branch be checked out in one
-worktree at a time — so a worktree kept after its commit would be holding the
-branch the *next* task has to commit to, and that task would stop before it
-started. Cleanup therefore detaches a kept worktree from the shared branch:
-`git switch --detach` onto the commit it is already sitting on, which writes no
-file, drops nothing you have staged, and leaves the branch and every commit on
-it exactly where they are. What it gives up is only Git's record that this
-worktree is the one using the name. Only the configured shared branch is
-detached and only when the worktree is actually on it, and the branch's tip is
-read before and after so that "the commits survived" is checked rather than
-assumed. Under `per-task` nothing is detached — the branch is that pass's own,
-and a retry continuing in the kept directory is better off finding it attached.
-A removed worktree needs none of this: taking the worktree away takes the record
-of which worktree is using the name with it. A detach Git refuses is reported
-against the kept workspace and does not fail the task; the next run stops on the
-branch and tells you where it is held.
-
-**Clearing up a kept worktree is yours to ask for.** `ralph clean` lists what is
-being held and why, and `ralph clean TASK-ID` or `ralph clean --all` removes the
-worktrees of passes that failed, were blocked or were interrupted — the one
-reason a run's own cleanup will not override. It overrides nothing else: a
-worktree holding uncommitted changes, a commit nothing recorded, or a commit its
-branch does not hold is still kept, by both forms, with no flag that says
-otherwise. See [`ralph clean`](#ralph-clean-task-id---all).
-
-**A removal is not recorded until Git confirms it, and an interrupted one is
-finished later.** `git worktree remove` exiting zero is not taken as proof:
-`git worktree list` must no longer mention the path and the directory must no
-longer be there before anything is written down. Until then the record goes on
-naming the workspace, and the next `ralph run` or `ralph resume` picks the
-cleanup up where it stopped. Three interruptions are recoverable rather than
-permanent:
-
-- **before the command** — the workspace is still whole, and is removed as
-  usual;
-- **during it** — Git deletes the worktree directory before its own record of
-  it, so what is left is a part-deleted directory. Ralph PHP marks the record
-  *before* it issues a removal, and that mark is how the remains are recognised
-  as its own and finished off, with `--force` where Git now refuses them and
-  with `git worktree repair` first where the interruption took the workspace's
-  link to the repository. A directory with no such mark is never forced: Git's
-  refusal is a second opinion worth keeping. Nor is one holding anything the
-  removal could not have produced — a modified or an untracked file is work,
-  and keeps the directory exactly as it would have on the first attempt, so
-  what you write while looking at a workspace a run told you about is safe.
-- **after it** — the directory and the registration have gone and only the
-  record still names them, so clearing the record is all that is left to do.
-
-Running cleanup again is always safe. The decision is taken afresh from the
-record and the repository every time, so a workspace that has gone is reported
-as gone, and one that is being kept is re-examined — a pass whose first attempt
-failed keeps its workspace on purpose, and the attempt that then passes removes
-the same directory the earlier one was told to leave alone.
-
-Two limits are worth stating. `git worktree repair` arrived in Git 2.30, above
-this package's floor of 2.24; on an older Git, an interruption that took the
-workspace's `.git` file leaves a directory for you to remove with `git worktree
-remove --force`. And if a part-deleted directory loses its `git worktree`
-registration — which takes a removal that reported a failure rather than an
-interruption — Ralph PHP has nothing left to act on and keeps the path for you
-to look at, because it never deletes a directory itself.
+**No remote is ever contacted.** Publication was an earlier release's feature and
+is gone with the rest of the Git work. Pushing what a run produced is a `git
+push` you make after reading it.
 
 ## Context and memory
 
@@ -935,12 +753,11 @@ checkbox an agent ticks is not a completed task.
 
 ## Verification
 
-`checks` are run by Ralph PHP, in the task's worktree, independently of the
+`checks` are run by Ralph PHP, in your project directory, independently of the
 agent. Each command's output, exit code and duration are captured and recorded.
 
-A zero exit from the agent is not enough to complete a task. The checks must
-pass, a commit must be recorded or a no-change result justified with evidence,
-and any required push must succeed. Only then is the box ticked.
+A zero exit from the agent is not enough to complete a task: the checks have to
+pass over what it changed. Only then is the box ticked.
 
 **`checks` is empty by default, and an empty `checks` is allowed.** Only your
 project knows how it is verified — `composer test`, `vendor/bin/phpunit`, `make
@@ -949,9 +766,8 @@ you do not have to invent a command to get your first run started. What you give
 up is stated rather than hidden, in three places you will actually see it:
 `ralph preflight` warns, `ralph run` says so before the first task, and each
 completed task's record names it. A run with no checks decides a task on the
-agent's reported result and the commit it produced, so **review those commits
-before merging them**. Adding one command under `checks` is what turns the tick
-back into evidence:
+agent's own reported result, so **read the diff before you commit it**. Adding
+one command under `checks` is what turns the tick back into evidence:
 
 ```json
 {"checks": [{"name": "tests", "command": ["composer", "test"]}]}
@@ -962,13 +778,13 @@ back into evidence:
   judged by.
 - **Failures feed forward.** Bounded failure evidence goes into the next
   attempt, and the task stays unchecked while verification fails.
-- **Weakened verification blocks.** A change that appears to weaken existing
-  checks stops the pass with the diff preserved for review. This detection is
-  best-effort and is not guaranteed to be comprehensive.
-- **An already-satisfied task** is a verified no-change outcome with supporting
-  evidence, rather than an empty commit.
-- **A checkbox write that fails** leaves the implementation and commit intact and
-  the task pending finalisation, so a resume retries only the checklist update.
+- **A checkbox write that fails** leaves the work and the passing checks as they
+  are and the task pending finalisation, so the next run writes only the
+  checklist update.
+- **A task that needed no change** completes if the checks pass: with nothing
+  committed by the package there is no empty commit to avoid, and an agent that
+  reports a candidate implementation over an unchanged project is taken at the
+  checks' word rather than at its own.
 
 ## Limits
 
@@ -980,7 +796,6 @@ back into evidence:
 | `limits.run_timeout` | 7200s | seconds of active run time before stopping at a task boundary |
 | `limits.bail_on_failure` | `false` | whether the first task the loop gives up on ends the run |
 | `checks[].timeout` | 600s | seconds one verification command may run |
-| `workspace.prepare[].timeout` | 900s | seconds one preparation command may run |
 
 A run that reaches the iteration limit or the run-time budget exits 124 with
 accurate persisted status, and running `ralph run` again carries on from where it
@@ -1023,55 +838,46 @@ runs, and a resume confirms the old worker has actually stopped before taking
 over.
 
 **Ctrl+C** stops the managed agent and its process tree where the platform
-supports it, records the interruption, preserves the workspace, and releases
-ownership only once termination is confirmed. The run exits 130.
+supports it, records the interruption, leaves whatever the agent had written
+exactly where it is, and releases ownership only once termination is confirmed.
+The run exits 130.
 
-**`ralph resume`** reconciles worktree, branch and recorded commit state and
-continues from the phase the pass stopped in. Nothing earlier is repeated:
+**`ralph resume`** continues from the phase the pass stopped in, and nothing
+earlier is repeated:
 
-- a pass whose commit was made but whose push was rejected retries the push
-  alone;
-- a pass whose checkbox could not be written writes only the checkbox;
-- a crash between the commit and the database update is recognised from the
-  repository itself, so the commit is adopted rather than made twice.
+- a pass stopped while the agent was working is attempted again — a
+  half-finished invocation is not a result;
+- a pass stopped during its checks runs the checks again over the changes that
+  are still there;
+- a pass whose checkbox could not be written writes only the checkbox, without
+  invoking the agent and without spending an attempt.
 
-Neither case invokes the agent again or creates a second commit.
-
-**A shared branch is reconciled as a history, not as a single reference.** Under
-the default strategy a pass's commit stops being the branch tip as soon as the
-next task commits, so a resume reads the branch *past* each pass's own commit and
-asks the state database whose every commit in between is. An advance made of
-commits this project recorded is the ordinary case and is continued; one commit
-nobody recorded, anywhere along that history, stops the resume with that commit
-named and quoted — every way of carrying on from it either loses somebody's work
-or publishes it as the run's. A crash between a commit and the database update is
-recognised the same way it is on a per-task branch, by what the commit says about
-itself in its own trailers, except that the commit is looked for where a pass
-would have put it rather than at the tip. And if the branch itself has been
-deleted, it is re-created at the furthest commit the run recorded on it, so every
-task's commit comes back within reach rather than only the one being reconciled.
+The last of those is the one case where work is already earned and unrecorded in
+your checklist, and it is why the write is planned in the state store before the
+file is touched: a `pending` plan is how the next run recognises a pass that owes
+one line rather than a pass that failed.
 
 **Checkbox writes are protected** by source-content checks and atomic
 replacement. A concurrent edit to the task file is preserved and the conflicting
-write is blocked rather than forced.
+write is blocked rather than forced. A task whose wording changed between the
+work and the write is not ticked at all — somebody has to decide whether the
+work still answers it.
 
-**A run stops on an unresolved decision, exhausted attempts or ambiguous
-ownership**, with a readable reason and the next action — on the last line of
-output, and on the run's record for `ralph status`.
+**A run stops on an unresolved decision or exhausted attempts**, with a readable
+reason and the next action — on the last line of output, and on the run's record
+for `ralph status`.
 
 ## Logs and diagnostics
 
 Worker output is streamed to your terminal and written to
 `.ralph/runtime/logs/TASK-ID/`, one file per attempt, readable only by you (a
 reopened task's pass logs into `TASK-ID-g2/`, beside the first pass's).
-`ralph init` ignores the runtime directory, so nothing here is committed or
-pushed. Nothing trims or rotates them, and clearing a task's workspace does not
-touch them: a log outlives the worktree it describes, so a cleaned-up task still
-has the account of what its agent did. Files stay until you delete them, or
+`ralph init` ignores the runtime directory, so nothing here is committed by
+accident. Nothing trims or rotates them. Files stay until you delete them, or
 until `logs.wipe_on_success` does.
 
 **Log retention is off by default**, because a log is the only account of what
-an agent did that outlives the agent, and a commit that passed the checks and
+an agent did that outlives the agent, and a change that passed the checks and
 still did the wrong thing is read backwards from the ticked box to the output
 behind it. The cost of keeping everything is disk: a long checklist on a project
 with a loud test suite leaves a runtime directory measured in hundreds of
@@ -1089,21 +895,19 @@ package wrote: `attempt-NN-kind.log` inside that pass's log directory, which is
 the agent's output and the output of each check that ran against it. A file with
 a name Ralph PHP did not compose is left alone whatever it is, because a
 directory it writes into is still somewhere a person may have put something.
-Nothing a completion rests on is eligible: the commit, the state row, the check
-results, the preserved staged diff (`attempt-NN-staged.diff`), the completion
-record (`attempt-NN-completed.md`) and the evidence behind a no-change
-completion (`attempt-NN-satisfied.md`) sit in the same directory untouched. The
-setting trades output for disk, not the record of what a task did.
+Nothing a completion rests on is eligible: the state row, the check results and
+the completion record (`attempt-NN-completed.md`) sit in the same directory
+untouched. The setting trades output for disk, not the record of what a task
+did.
 
 **When it runs, and what is never wiped.** A pass is eligible only once it is
-completed and its publication has settled — its commit, any required push, its
-row in the state store and the tick in your checklist all durable. A failed,
-blocked or interrupted pass keeps everything it wrote whatever the setting says;
-so does one still running, which owns an open handle on the log that would
-explain whatever happens next; and so does a completion whose push has not
-settled, because a resume still has work to do on it. A pass whose logs are
-kept prints nothing about it: a run only says what it deleted, or what it could
-not.
+completed and owes no checklist write — its checks, its row in the state store
+and the tick in your checklist all durable. A failed, blocked or interrupted
+pass keeps everything it wrote whatever the setting says; so does one still
+running, which owns an open handle on the log that would explain whatever
+happens next; and so does a completion whose box is still owed, because the next
+run still has work to do on it. A pass whose logs are kept prints nothing about
+it: a run only says what it deleted, or what it could not.
 
 **A stopped wipe is a retry, not a loss.** Deleting a log is idempotent and a
 half-wiped directory is unambiguous, so the deletion is recorded only once
@@ -1130,9 +934,8 @@ replaced with the variable's name in everything Ralph PHP composes: terminal
 output, its notes in the logs, the event stream, the state store and the
 excerpts `ralph logs` prints. They are **not** removed from the raw worker
 output in the log files, which is a verbatim copy of another process's bytes. A
-secret Ralph PHP was never told about cannot be redacted at all — a token inside
-a Git remote URL, a credential an agent read from a file, a key printed by your
-own test suite. Treat these logs as you would the agent's terminal, and read one
+secret Ralph PHP was never told about cannot be redacted at all — a credential
+an agent read from a file, a key printed by your own test suite. Treat these logs as you would the agent's terminal, and read one
 before pasting it into an issue.
 
 Lines beginning `--- ` in a log are Ralph PHP's own notes about the invocation;
@@ -1251,47 +1054,35 @@ safe to run.
 
 | What you see | What it means | What to do |
 | --- | --- | --- |
-| `ralph run` refuses to start, exit 78, naming uncommitted changes | Your checkout holds changes the run did not write, and a task's worktree would not contain them. | Commit or stash them yourself. Ralph PHP will not do it for you. Right after `ralph init`, the change is the ignore rules it appended. |
-| Exit 78 from `ralph preflight` | Something about the machine or project is missing: a PHP extension, Git, the agent's executable, its credentials, a check command that cannot be resolved. | The report names each failing check and what it expected. Fix those and run `preflight` again — it writes nothing and starts no agent. |
+| Exit 78 from `ralph preflight` | Something about the machine or project is missing: a PHP extension, the agent's executable, its credentials, a check command that cannot be resolved. | The report names each failing check and what it expected. Fix those and run `preflight` again — it writes nothing and starts no agent. |
+| A configuration file is refused for an unknown setting `git` or `workspace` | Those sections were removed with the package's Git work. | Delete them. Branches, commits, pushes and worktree preparation are gone; see [Your checkout](#your-checkout). |
 | A run says another runner holds the repository | A `ralph run` is in progress elsewhere, or one died without releasing the lock. | Look for the other process. Once it is gone, `ralph resume` confirms it has stopped and takes over. |
 | A task is left unchecked and the run carried on | Its checks kept failing, or its attempt allowance ran out. | `ralph logs TASK-ID` shows each attempt and each check. Fix the task's wording or your check, then `ralph retry TASK-ID`. |
-| Exit 75, "waiting for a person" | The agent asked a question, or ownership of a branch or change was ambiguous. | Read the last line of output and `ralph logs TASK-ID`. Resolve the question — usually by rewriting the task to answer it — then `ralph retry TASK-ID`. |
+| Exit 75, "waiting for a person" | The agent asked a question, or the task changed under the pass that was working on it. | Read the last line of output and `ralph logs TASK-ID`. Resolve the question — usually by rewriting the task to answer it — then `ralph retry TASK-ID`. |
 | Exit 130 | The run was interrupted. The work is preserved. | `ralph resume`. It continues from the phase the task stopped in and never repeats earlier phases. |
 | Exit 124 | A configured limit stopped the run while tasks remained. | Nothing is wrong. Run `ralph run` again, or raise `limits.iterations` / `limits.run_timeout`. |
-| A branch was refused as unrelated work | A branch the run would commit to already exists and holds a commit this project did not record. | Rename or delete that branch, or name another with `git.shared_branch` (or change `git.branch_prefix` under `per-task`). Ralph PHP will not reset a branch it does not own. |
-| A push was rejected, but the commit is there | Publication is recorded as outstanding and the local commit is kept. | Fix the remote side — usually a pull or a force-push decision of your own — then `ralph resume`, which retries only the push. |
-| Checks pass in your checkout but fail in the worktree | A fresh worktree has your tracked files and nothing else: no `vendor/`, no `.env`, no build output. | Put the commands that make a worktree usable in `workspace.prepare` (`composer install`), and files no commit carries in `workspace.copy`. |
+| A task is done but nothing is committed | Nothing ever is: the package leaves its work in the working tree. | `git diff` to read it, then commit it yourself. |
+| A run's changes are mixed with your own | Everything happens in one checkout, so one diff holds both. | Start runs from a clean working tree, and commit between runs. |
 | The run pauses saying a task changed | The task file was edited while the run was working on it. | Leave `.ralph/tasks.md` alone during a run. Reconcile the edit, then run again. |
-| A box is ticked but `ralph status` calls it yours, not the runner's | The box was ticked by hand or by an agent, with no verified commit behind it. | Nothing to fix, but nothing is vouched for either. Untick it to have the loop do the work and earn the tick. |
+| A box is ticked but `ralph status` calls it yours, not the runner's | The box was ticked by hand or by an agent, with no passing checks behind it. | Nothing to fix, but nothing is vouched for either. Untick it to have the loop do the work and earn the tick. |
 
 ## Limitations
 
 Worth knowing before you rely on it.
 
-- **Review every commit.** Checks and commits are evidence for review, not proof
-  that a natural-language requirement was satisfied. Nothing here merges
-  anything.
-- **One task at a time.** No parallel execution. Under the default
-  `git.strategy: "shared"` the tasks of one run are carried out in order on one
-  branch, so a later task can build on what the earlier ones committed — and
-  inherits their mistakes just as readily. Under `per-task` tasks are assumed
-  independent: each starts from the base commit, and no task is built on top of
-  another task's unmerged branch.
-- **The shared branch is refused rather than moved.** A branch holding a commit
-  no pass of the project recorded, or one checked out in a worktree the run does
-  not own, stops the run before an agent is started. So does a pass whose
-  workspace is no longer at the tip — a newer run committed to the branch, or an
-  interrupted pass is being resumed after one did — because committing there
-  would leave the commits in between unreachable. Nothing is reset or
-  overwritten in either case; review `git log`, then start a new run so the
-  task's workspace is made from the branch tip. A run that takes on no task
-  leaves the branch exactly where it found it. On resume the check extends to
-  the branch's whole history back to the run's base, and that reading is
-  bounded: a shared branch holding more than 500 commits past the base — one
-  somebody merged a long line of development into, say — is refused as
-  unvouchable rather than vouched for from the part of it that was read.
-- **No merges, deployments or pull requests**, and no generating a task list from
-  a product idea.
+- **Read every change.** Passing checks are evidence for review, not proof that
+  a natural-language requirement was satisfied. Nothing here commits, merges or
+  publishes anything.
+- **Nothing is isolated.** One task at a time, all of them in your checkout: a
+  later task sees what the earlier ones did and inherits their mistakes just as
+  readily, and a run's changes arrive as one diff mixed with whatever was
+  already uncommitted. There is no parallel execution and no per-task
+  separation to fall back on.
+- **There is no undo.** The package writes no commit, so there is no commit to
+  revert: `git checkout -- .` is the only way back and it takes the run's work
+  with it. Commit anything you would hate to lose before a run.
+- **No commits, branches, pushes, merges, deployments or pull requests**, and no
+  generating a task list from a product idea.
 - **Agent CLIs move.** The invocations were exercised against Codex 0.4x and
   Claude Code 2.1.226. A newer CLI that renames a flag is a problem preflight
   will catch at the version floor, not one it can adapt to.
@@ -1300,11 +1091,9 @@ Worth knowing before you rely on it.
 - **Raw worker logs are not fully redactable**, as described above.
 - **Wiped logs do not come back.** With `logs.wipe_on_success` enabled, a
   successful task's agent and check output is deleted once its completion is
-  durable. The commit, the check results, the preserved diff and the completion
-  evidence stay, but the output behind them is gone and no later run can
-  reproduce it. Logs of stopped passes are never wiped.
-- **Weakened-verification detection is best-effort** and makes no completeness
-  claim.
+  durable. The check results and the completion evidence stay, but the output
+  behind them is gone and no later run can reproduce it. Logs of stopped passes
+  are never wiped.
 - **Linux and WSL are the tested platforms.** macOS is likely to work and is not
   verified; Windows outside WSL is not supported.
 - **Without `pcntl`/`posix`, Ctrl+C handling is degraded.**
@@ -1320,23 +1109,21 @@ The one package:
 
 | Package | What it does here |
 | --- | --- |
-| [symfony/process](https://github.com/symfony/process) | Starts and supervises every command the loop runs — `git`, the coding agent, each verification command. The argument-array launch with no shell, both output pipes drained while a briefing is written to standard input, and the exit status read back. |
+| [symfony/process](https://github.com/symfony/process) | Starts and supervises every command the loop runs — the coding agent and each verification command. The argument-array launch with no shell, both output pipes drained while a briefing is written to standard input, and the exit status read back. |
 
 The rest the package does itself, and each of those is a decision rather than
 something nobody got round to:
 
-- **Git** is the `git` binary, run through the component above. The wrappers
-  available for PHP (`czproject/git-php`, `gitonomy/gitlib`) model commits,
-  branches and logs; what this loop needs is linked worktrees, `status
-  --porcelain=v2`, a push whose rejection has to be told apart from a network
-  failure, and branch ownership — none of which they expose, so using one would
-  mean dropping to its escape hatch for most calls.
+- **Git** is not a dependency at all any more. Earlier releases ran the `git`
+  binary through the component above for worktrees, branches, commits and
+  pushes; the package now works in your checkout and leaves Git to you, so
+  neither a library nor the binary is needed.
 - **Stopping a worker** is this package's own (see [Recovery](#recovery)). A
-  process library stops the process it started;
-  an agent's test runner and language server are its children, and leaving
-  those running in a task worktree is the failure the repository lock exists to
-  make impossible. So the process tree is read from `/proc` and signalled
-  deepest first here.
+  process library stops the process it started; an agent's test runner and
+  language server are its children, and leaving those running in the project a
+  run has just given up on is the failure the repository lock exists to make
+  impossible. So the process tree is read from `/proc` and signalled deepest
+  first here.
 - **The task checklist** is parsed and edited by the package. A Markdown
   library (`league/commonmark`) would read it, but what is written back is one
   checkbox character in a file the user also edits by hand: every other byte,
@@ -1374,16 +1161,16 @@ test suite and `composer validate` rather than static analysis.
 
 The suite needs no model credentials and no paid external service: agents are
 replaced by a deterministic fixture worker with modes for success, failure,
-blocking, slow execution and interruption, and Git behaviour is tested against
-temporary repositories and a local bare remote. CI runs it on every supported
+blocking, slow execution and interruption, and what a run leaves in a checkout
+is asserted against temporary Git repositories. CI runs it on every supported
 PHP version.
 
 It does use Composer and a network in two places, both of which skip themselves
 when Composer is absent: the installation group, which resolves the package's
 runtime dependency the way a real `composer require` does, and the
 example-project test that runs a task through the loop in a copy of
-`examples/text-tools/` — that run installs PHPUnit into the task's worktree,
-exactly as a reader's run would.
+`examples/text-tools/` — that copy is installed with `composer install` first,
+exactly as a reader's would be.
 
 ## License
 

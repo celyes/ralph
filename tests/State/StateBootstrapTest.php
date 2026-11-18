@@ -548,8 +548,8 @@ final class StateBootstrapTest extends TestCase
         $database->execute(
             'INSERT INTO runs
                 (run_id, state, agent, adapter, agent_source, agent_settings, configuration, checks,
-                 tasks_path, base_reference, started_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 tasks_path, started_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 $runId,
                 'running',
@@ -560,7 +560,6 @@ final class StateBootstrapTest extends TestCase
                 '{}',
                 '[]',
                 Defaults::TASKS_FILE,
-                'HEAD',
                 '2026-11-01T00:00:00+00:00',
                 '2026-11-01T00:00:00+00:00',
             ],

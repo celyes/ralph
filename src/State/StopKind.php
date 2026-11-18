@@ -15,14 +15,14 @@ namespace Celyes\RalphPhp\State;
  * all six leave a user with the same question, and the kind is what separates
  * "there is nothing left to do" from "something is waiting for you".
  *
- * **Ambiguous ownership has no case of its own, deliberately.** A branch the
- * runner will not touch, a commit no pass recorded, a worktree registered
- * somewhere the configuration does not place it: each of those reaches the loop
+ * **A refusal the runner makes has no case of its own, deliberately.** A task
+ * reworded while it was being worked on, a checkbox write somebody's edit
+ * overtook, a checklist that could not be read: each of those reaches the loop
  * as a pass that moved to `blocked` with the runner named as the reporter, or
  * as a setup failure that never got as far as a task. The first is
  * {@see self::Decision} and the second is {@see self::Failed}, and in both the
- * blocker says which kind of ambiguity it was — inventing a seventh case here
- * would mean the loop classifying a refusal it did not make.
+ * blocker says what it was — inventing a seventh case here would mean the loop
+ * classifying a refusal it did not make.
  *
  * This is the vocabulary the exit codes of section I, item 5 are defined over,
  * and {@see \Celyes\RalphPhp\Console\ExitCode::forStop()} is the whole of the

@@ -11,6 +11,16 @@ PROJECT.md section J, item 11 asks for the agent CLI versions, the resulting
 commits, the verification output, the interventions, the elapsed time and the
 known limitations. Each run below records all six.
 
+> **These runs predate PROJECT.md section K, item 1.** Both were made by a
+> release that gave each task its own linked worktree and committed what passed;
+> that work has since been removed, and a run now edits the project in place and
+> commits nothing ([the README's "Your checkout"](../README.md#your-checkout)).
+> The record is kept as it was observed rather than rewritten: the branches,
+> worktrees and commit SHAs below are that release's. What is unchanged either
+> side of the removal is everything these passes were actually evidence about —
+> the briefings, the agents' behaviour, the verification output, the attempt
+> counts, the interventions and the elapsed time.
+
 ## Status at a glance
 
 | Pass | Agent | CLI version | Tasks | Commits | Interventions |

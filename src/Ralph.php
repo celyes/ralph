@@ -80,19 +80,6 @@ final class Ralph
     ];
 
     /**
-     * Oldest Git version the package supports.
-     *
-     * Chosen from the Git features the design commits to, newest first:
-     * `--end-of-options` (2.24), which is how a configured reference is passed
-     * to `git rev-parse` so that it can never be read as an option; `git
-     * worktree remove` (2.17), the cleanup path for task workspaces; `git
-     * worktree list --porcelain` (2.7); and `git worktree add` (2.5). 2.24 was
-     * released in November 2019 and is older than the Git in every currently
-     * supported Debian and Ubuntu release.
-     */
-    public const string MINIMUM_GIT_VERSION = '2.24.0';
-
-    /**
      * Directory, relative to the user's repository root, holding all project
      * configuration and runtime data.
      */

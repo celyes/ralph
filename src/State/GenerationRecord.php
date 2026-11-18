@@ -15,9 +15,8 @@ use InvalidArgumentException;
  *
  * Everything PROJECT.md section D, item 4 persists about a pass at a task: what
  * the task said when it started, how many attempts it has had, when it started
- * and was last touched, which agent and non-secret settings it is using, which
- * workspace it has and whether it owns it, the base commit it branched from,
- * its branch, its commit, how publication went, and why it stopped if it did.
+ * and was last touched, which agent and non-secret settings it is using,
+ * whether its logs have been wiped, and why it stopped if it did.
  *
  * Read-only. The store is the only thing that writes, and every write returns a
  * fresh record read back out of the database rather than a modified copy of the
@@ -25,9 +24,9 @@ use InvalidArgumentException;
  * actually says, never what a caller hoped it would say.
  *
  * {@see self::rowId()} is the integer primary key, and it is exposed for one
- * reason: the stores of attempts, verification results and Git references point
- * at a generation with a foreign key, and the row has to be nameable for them
- * to do that. Nothing user-facing uses it — {@see self::slug()} is the name a
+ * reason: the stores of attempts, verification results and checklist updates
+ * point at a generation with a foreign key, and the row has to be nameable for
+ * them to do that. Nothing user-facing uses it — {@see self::slug()} is the name a
  * person sees.
  */
 final class GenerationRecord
@@ -45,15 +44,6 @@ final class GenerationRecord
         private readonly int $attempts,
         private readonly string $contentHash,
         private readonly AgentRecord $agent,
-        private readonly string $baseReference,
-        private readonly string $baseSha,
-        private readonly ?string $branch,
-        private readonly bool $branchIsShared,
-        private readonly ?string $commitSha,
-        private readonly bool $noChange,
-        private readonly PushResult $push,
-        private readonly WorktreeOwnership $worktree,
-        private readonly ?CleanupState $cleanup,
         private readonly ?Timestamp $logsWipedAt,
         private readonly ?Blocker $blocker,
         private readonly Timestamp $startedAt,
@@ -67,9 +57,10 @@ final class GenerationRecord
      *
      * The generation is rebuilt from `slug` rather than from the task's row
      * and the generation number separately, because the slug is the one value
-     * that is also written into a branch name and a log path: reading it back
-     * through {@see TaskGeneration::fromSlug()} means a row whose slug disagrees
-     * with what the runner would produce is caught here instead of in Git.
+     * that is also written into a log path: reading it back through
+     * {@see TaskGeneration::fromSlug()} means a row whose slug disagrees with
+     * what the runner would produce is caught here rather than in the
+     * filesystem.
      *
      * @param array<string, mixed> $row
      *
@@ -93,22 +84,6 @@ final class GenerationRecord
                 self::string($row, 'adapter'),
                 self::string($row, 'agent_settings'),
             ),
-            self::string($row, 'base_reference'),
-            self::string($row, 'base_sha'),
-            self::nullableString($row, 'branch'),
-            self::flag($row, 'branch_shared'),
-            self::nullableString($row, 'commit_sha'),
-            self::boolean($row, 'no_change'),
-            PushResult::fromStorage(
-                self::string($row, 'push_state'),
-                self::nullableString($row, 'push_remote'),
-                self::nullableString($row, 'push_error'),
-            ),
-            WorktreeOwnership::fromStorage(
-                self::nullableString($row, 'worktree_path'),
-                self::boolean($row, 'owns_worktree'),
-            ),
-            CleanupState::recorded(self::nullableString($row, 'cleanup_state')),
             Timestamp::recorded(self::nullableString($row, 'logs_wiped_at')),
             Blocker::recorded(self::nullableString($row, 'blocker')),
             Timestamp::fromStorage(self::string($row, 'started_at')),
@@ -147,7 +122,8 @@ final class GenerationRecord
     }
 
     /**
-     * The name the pass is written down under: its branch and its log path.
+     * The name the pass is written down under, and what its log path is named
+     * after.
      */
     public function slug(): string
     {
@@ -210,141 +186,6 @@ final class GenerationRecord
     public function agent(): AgentRecord
     {
         return $this->agent;
-    }
-
-    /**
-     * The configured reference the branch was created from, as written.
-     */
-    public function baseReference(): string
-    {
-        return $this->baseReference;
-    }
-
-    /**
-     * The commit that reference resolved to when the pass started.
-     *
-     * Recorded rather than re-resolved, which is the whole point: the base
-     * moving on under a running task must not change what the task was built.
-     */
-    public function baseSha(): string
-    {
-        return $this->baseSha;
-    }
-
-    /**
-     * The branch this pass owns, once one has been assigned.
-     */
-    public function branch(): ?string
-    {
-        return $this->branch;
-    }
-
-    /**
-     * Whether a branch has been assigned to this pass.
-     */
-    public function hasBranch(): bool
-    {
-        return $this->branch !== null;
-    }
-
-    /**
-     * Whether this pass owns the named branch.
-     *
-     * Compared exactly: Git refs are case-sensitive, and a near-match is
-     * someone else's branch.
-     */
-    public function ownsBranch(string $branch): bool
-    {
-        return $this->branch !== null && $this->branch === $branch;
-    }
-
-    /**
-     * Whether the recorded branch is the run's rather than this pass's alone.
-     *
-     * The distinction the `generations_branch` index is partial on
-     * ({@see Migrations}): a per-task branch belongs to one pass and a second
-     * pass asking for it is refused, while the branch a shared-branch run
-     * established is recorded by every task of the run that commits to it
-     * (PROJECT.md section K, item 4). False for a pass with no branch at all,
-     * and for every row written before the column existed, which is the honest
-     * reading of both.
-     */
-    public function branchIsShared(): bool
-    {
-        return $this->branch !== null && $this->branchIsShared;
-    }
-
-    /**
-     * The commit this pass produced, when it produced one.
-     *
-     * Null covers two different things, and {@see self::isNoChange()} is what
-     * tells them apart: a pass that never got as far as committing, and a pass
-     * whose task was already satisfied.
-     */
-    public function commitSha(): ?string
-    {
-        return $this->commitSha;
-    }
-
-    public function hasCommit(): bool
-    {
-        return $this->commitSha !== null;
-    }
-
-    /**
-     * Whether the task was already satisfied, so there was nothing to commit.
-     *
-     * A complete outcome, not a failure: PROJECT.md section G, item 6 accepts a
-     * verified no-change result rather than an empty commit.
-     */
-    public function isNoChange(): bool
-    {
-        return $this->noChange;
-    }
-
-    /**
-     * Where publication stands.
-     */
-    public function push(): PushResult
-    {
-        return $this->push;
-    }
-
-    /**
-     * The workspace and whether this pass may remove it.
-     */
-    public function worktree(): WorktreeOwnership
-    {
-        return $this->worktree;
-    }
-
-    /**
-     * How far cleanup of the workspace got, or null when none was started.
-     */
-    public function cleanup(): ?CleanupState
-    {
-        return $this->cleanup;
-    }
-
-    /**
-     * Whether a removal of the workspace was issued and never confirmed.
-     *
-     * The question a resumed cleanup asks before it reads the directory: what
-     * is left at the recorded path is then the remains of a deletion this
-     * package asked for, not work to protect
-     * ({@see \Celyes\RalphPhp\Git\WorktreeCleaner::assess()}).
-     */
-    public function cleanupIsUnfinished(): bool
-    {
-        return $this->cleanup?->isInProgress() ?? false;
-    }
-
-    /**
-     * Whether the workspace was removed and the removal confirmed.
-     */
-    public function cleanupIsFinished(): bool
-    {
-        return $this->cleanup?->isFinished() ?? false;
     }
 
     /**
@@ -422,38 +263,6 @@ final class GenerationRecord
     }
 
     /**
-     * Whether a commit or a justified no-change result has been recorded.
-     *
-     * The Git half of the conditions PROJECT.md puts on ticking a box.
-     */
-    public function hasImplementation(): bool
-    {
-        return $this->commitSha !== null || $this->noChange;
-    }
-
-    /**
-     * Whether everything a tick depends on has happened: an implementation
-     * recorded and publication settled.
-     *
-     * Verification is deliberately not part of this. It is evidence the
-     * verification-results rows carry, and asking a single row to summarise it
-     * would mean two places deciding what passing means.
-     */
-    public function isFinalizable(): bool
-    {
-        return $this->hasImplementation() && $this->push->isSatisfied();
-    }
-
-    /**
-     * Whether only the push is outstanding, so resume retries publication and
-     * nothing before it.
-     */
-    public function awaitsPublication(): bool
-    {
-        return $this->hasImplementation() && $this->push->isOutstanding();
-    }
-
-    /**
      * How many attempts are left under a limit.
      */
     public function attemptsRemaining(int $limit): int
@@ -481,15 +290,10 @@ final class GenerationRecord
     public function toRecordedGeneration(): RecordedGeneration
     {
         if ($this->state->isCompleted()) {
-            return RecordedGeneration::completed(
-                $this->generation,
-                $this->branch,
-                $this->commitSha,
-                $this->contentHash,
-            );
+            return RecordedGeneration::completed($this->generation, $this->contentHash);
         }
 
-        return RecordedGeneration::open($this->generation, $this->branch, $this->contentHash);
+        return RecordedGeneration::open($this->generation, $this->contentHash);
     }
 
     /**
@@ -498,12 +302,11 @@ final class GenerationRecord
     public function describe(): string
     {
         return sprintf(
-            '%s: %s%s, attempt %d, %s',
+            '%s: %s%s, attempt %d',
             $this->generation->label(),
             $this->state->value,
             $this->phase === null ? '' : ' (' . $this->phase->value . ')',
             $this->attempts,
-            $this->branch ?? 'no branch yet',
         );
     }
 
@@ -583,27 +386,5 @@ final class GenerationRecord
         }
 
         return (int) $value;
-    }
-
-    /**
-     * A boolean column that a row predating it simply does not have.
-     *
-     * Only for columns added by a later migration whose default is false, where
-     * absent and 0 mean the same thing. Everything else goes through
-     * {@see self::boolean()}, which refuses a row with the column missing.
-     *
-     * @param array<string, mixed> $row
-     */
-    private static function flag(array $row, string $column): bool
-    {
-        return array_key_exists($column, $row) && self::boolean($row, $column);
-    }
-
-    /**
-     * @param array<string, mixed> $row
-     */
-    private static function boolean(array $row, string $column): bool
-    {
-        return self::integer($row, $column) === 1;
     }
 }

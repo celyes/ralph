@@ -82,7 +82,6 @@ final class DurableOutcome
             'confirmed' => true,
             'state' => $record->state()->value,
             'phase' => $record->phase()?->value,
-            'commit' => $record->commitSha(),
             'checklist_write_owed' => $journal->checklists()->outstandingFor($record) !== null,
             'finished_at' => $record->finishedAt()?->value(),
         ];

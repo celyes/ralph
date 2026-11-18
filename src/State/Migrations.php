@@ -39,20 +39,13 @@ namespace Celyes\RalphPhp\State;
  *   but when a user clears one out by hand the evidence must not be left
  *   pointing at nothing.
  *
- * Two invariants are enforced by partial unique indexes rather than by
- * application code, because they are the ones whose violation destroys work:
+ * One invariant is enforced by a partial unique index rather than by
+ * application code, because it is the one whose violation destroys work:
  *
- * - **One branch, one generation — unless the branch is the run's.** A branch
- *   a pass owns alone appears on at most one generation, which is the storage
- *   half of the promise that reopening a finished task gets a separately owned
- *   branch and can never reset the branch the earlier pass left behind. A
- *   shared branch is marked as such on the row and excluded from the index,
- *   because every task of a shared-branch run commits to it
- *   ({@see self::sharedBranchPasses()}).
  * - **One open pass per task.** A task has at most one generation in a state it
  *   can be continued from. This is the invariant `GenerationHistory` refuses to
  *   guess at; if two rows could claim to be the current pass, a run would have
- *   to choose which branch to write to.
+ *   to choose which of them a result belongs to.
  *
  * Tables are not declared `STRICT`. That keyword needs SQLite 3.37, and the
  * package supports whatever libsqlite the user's PHP was built against;
@@ -75,6 +68,7 @@ final class Migrations
             self::sharedBranchPasses(),
             self::workspaceCleanup(),
             self::wipedLogs(),
+            self::withoutGit(),
         ];
     }
 
@@ -94,6 +88,11 @@ final class Migrations
     /**
      * Version 1: runs, tasks, execution generations, attempts, verification
      * results, Git references and checklist synchronisation.
+     *
+     * The Git columns and the `git_references` table it creates are dropped
+     * again by version 7, and are kept here because a migration list is
+     * history: a project upgrading from an earlier build has them, and the
+     * step that removes them has to find them where they were made.
      */
     private static function initial(): Migration
     {
@@ -222,7 +221,7 @@ final class Migrations
      *
      * So the column is written **before** the Git command and completed only
      * after Git and the filesystem agree
-     * ({@see \Celyes\RalphPhp\Git\WorktreeCleaner}), which makes the two
+     * (the workspace cleanup of the time), which makes the two
      * halves of the invariant hold together: `removing` means a command was
      * issued and never confirmed, and `removed` is written by the same
      * statement that clears `worktree_path`, so a row can never both name a
@@ -233,7 +232,7 @@ final class Migrations
      * that: cleanup has not been started. A pass whose workspace an earlier
      * build removed is left saying nothing about it rather than being credited
      * with a confirmation nobody made; the row's empty `worktree_path` is still
-     * the fact that matters, and {@see \Celyes\RalphPhp\Git\WorktreeCleaner}
+     * the fact that matters, and the workspace cleanup of the time
      * reads it the same way it always did.
      */
     private static function workspaceCleanup(): Migration
@@ -242,7 +241,7 @@ final class Migrations
             sprintf(
                 'ALTER TABLE generations ADD COLUMN cleanup_state TEXT '
                     . 'CHECK (cleanup_state IS NULL OR cleanup_state IN (%s))',
-                Schema::literals(Schema::cleanupStates()),
+                Schema::literals(['removing', 'removed']),
             ),
         ]);
     }
@@ -278,6 +277,72 @@ final class Migrations
     {
         return new Migration(6, 'when a successful pass had its logs wiped', [
             'ALTER TABLE generations ADD COLUMN logs_wiped_at TEXT',
+        ]);
+    }
+
+    /**
+     * Version 7: the Git columns are gone.
+     *
+     * PROJECT.md section K, item 1 removed the package's Git work altogether:
+     * a task is implemented in the user's own checkout, on whatever branch
+     * they have checked out, and nothing is branched, staged, committed or
+     * pushed. Twelve columns and one table recorded work that no longer
+     * happens, and they are dropped rather than left behind, because a schema
+     * is also documentation — a reader finding `commit_sha` on a row would
+     * reasonably conclude the package still makes commits, and `ralph status`
+     * reporting a column nothing writes is worse than not reporting it.
+     *
+     * What goes, and what it used to be for:
+     *
+     *  - `runs.base_reference`, `runs.base_sha`, `runs.shared_branch` — the
+     *    commit a run's branches started from and the branch its tasks shared.
+     *  - `generations.base_reference`, `base_sha`, `branch`, `branch_shared`,
+     *    `commit_sha`, `no_change`, `push_state`, `push_remote`, `push_error`,
+     *    `worktree_path`, `owns_worktree`, `cleanup_state` — one pass's branch
+     *    ownership, its commit, its publication and its worktree.
+     *  - the `generations_branch` unique index, which enforced "one branch, one
+     *    generation" and has nothing left to be unique about.
+     *  - the `git_references` table and its index, the append-only log of what
+     *    the runner did to the repository.
+     *
+     * **Nothing a task's history needs is lost.** The rows stay, with their
+     * states, phases, attempt counters, blockers, timestamps, verification
+     * results and checklist updates: what a completed task's record now rests
+     * on is its checks and its ticked box, which is what the package now does.
+     * The commit SHAs of work an earlier build committed are the one thing
+     * that does not survive, and they are recoverable from the repository
+     * itself — `git log --grep` on the task identifier the commit message
+     * carried.
+     *
+     * **`ALTER TABLE … DROP COLUMN` needs SQLite 3.35 (March 2021).** Older
+     * libsqlite builds refuse it, and this migration then fails with the
+     * version left where it was, as every failed migration does. That is the
+     * same floor the rest of the schema has lived near — `STRICT` was ruled
+     * out for needing 3.37 — and a project on an older build deletes
+     * `.ralph/runtime/state.sqlite` to get a database this build can create
+     * from scratch instead.
+     */
+    private static function withoutGit(): Migration
+    {
+        return new Migration(7, 'the Git columns are gone', [
+            'DROP INDEX IF EXISTS generations_branch',
+            'DROP INDEX IF EXISTS git_references_generation',
+            'DROP TABLE IF EXISTS git_references',
+            'ALTER TABLE runs DROP COLUMN base_reference',
+            'ALTER TABLE runs DROP COLUMN base_sha',
+            'ALTER TABLE runs DROP COLUMN shared_branch',
+            'ALTER TABLE generations DROP COLUMN base_reference',
+            'ALTER TABLE generations DROP COLUMN base_sha',
+            'ALTER TABLE generations DROP COLUMN branch',
+            'ALTER TABLE generations DROP COLUMN branch_shared',
+            'ALTER TABLE generations DROP COLUMN commit_sha',
+            'ALTER TABLE generations DROP COLUMN no_change',
+            'ALTER TABLE generations DROP COLUMN push_state',
+            'ALTER TABLE generations DROP COLUMN push_remote',
+            'ALTER TABLE generations DROP COLUMN push_error',
+            'ALTER TABLE generations DROP COLUMN worktree_path',
+            'ALTER TABLE generations DROP COLUMN owns_worktree',
+            'ALTER TABLE generations DROP COLUMN cleanup_state',
         ]);
     }
 
@@ -416,7 +481,10 @@ final class Migrations
             SQL,
             Schema::literals(Schema::states()),
             Schema::literals(Schema::phases()),
-            Schema::literals(Schema::pushStates()),
+            // Frozen spelling rather than a vocabulary this build still has:
+            // the column was dropped by version 7, and a historical statement
+            // must keep creating what it always created.
+            Schema::literals(['not_required', 'pending', 'published', 'failed']),
         );
     }
 
@@ -537,8 +605,18 @@ final class Migrations
                 recorded_at TEXT NOT NULL
             )
             SQL,
-            Schema::literals(Schema::GIT_REFERENCE_KINDS),
-            Schema::literals(Schema::GIT_REFERENCE_OUTCOMES),
+            // Frozen, like the push states above: version 7 drops this table,
+            // and the step that creates it still has to create it whole.
+            Schema::literals(['base', 'branch', 'commit', 'worktree', 'push']),
+            Schema::literals([
+                'recorded',
+                'created',
+                'reused',
+                'published',
+                'rejected',
+                'failed',
+                'removed',
+            ]),
         );
     }
 

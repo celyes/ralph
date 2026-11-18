@@ -37,7 +37,7 @@ use Celyes\RalphPhp\Support\Secrets;
  * context away from the argument list.
  *
  * **An explicit working directory.** The process is started in
- * {@see ExecutionRequest::directory()} — the isolated worktree the runner
+ * {@see ExecutionRequest::directory()} — the project directory the runner
  * prepared — and never in the PHP process's own directory, which is the
  * controlling checkout the package has promised not to touch (section F, item
  * 1). The subclass is not asked for it and cannot change it.
@@ -606,7 +606,7 @@ abstract class ProcessAdapter implements ExecutionAdapter
                 sprintf('The executable "%s" configured for the agent "%s" is a relative path.', $configured, $agent),
                 [
                     sprintf(
-                        'Each task runs in its own worktree, so a relative path would name a different program '
+                        'A task runs in the project directory, so a relative path would name a different program '
                             . 'per task; %s would be looked for inside %s.',
                         $configured,
                         $request->directory(),

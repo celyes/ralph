@@ -96,7 +96,7 @@ final class HelpCommand implements CommandInterface
         $lines = [
             $style->heading(sprintf('%s %s', Ralph::NAME, Ralph::VERSION)),
             'A Ralph-style development loop: reads tasks from a Markdown checklist,',
-            'delegates them to a coding agent, verifies the result, and commits the work.',
+            'delegates them to a coding agent, verifies the result, and checks it off.',
             '',
             'Usage:',
             '  ralph <command> [options]',

@@ -12,40 +12,34 @@ use Celyes\RalphPhp\Exception\ConfigurationException;
 use Celyes\RalphPhp\Exception\UsageException;
 use Celyes\RalphPhp\Preflight\Check\AgentCheck;
 use Celyes\RalphPhp\Preflight\Check\AgentVersionCheck;
-use Celyes\RalphPhp\Preflight\Check\BaseReferenceCheck;
 use Celyes\RalphPhp\Preflight\Check\ExtensionsCheck;
-use Celyes\RalphPhp\Preflight\Check\GitCheck;
-use Celyes\RalphPhp\Preflight\Check\IdentityCheck;
 use Celyes\RalphPhp\Preflight\Check\PhpCheck;
-use Celyes\RalphPhp\Preflight\Check\RepositoryCheck;
 use Celyes\RalphPhp\Preflight\Check\VerificationCheck;
-use Celyes\RalphPhp\Preflight\Check\WorkspaceCheck;
 use Celyes\RalphPhp\Process\ExecutableFinder;
-use Celyes\RalphPhp\Process\ProcessRunner;
 
 /**
  * Establishes that the environment can do the work before any of it starts.
  *
  * Configuration validation asks whether the *settings* make sense; preflight
  * asks whether the machine can satisfy them. The two are separate because
- * their answers change independently: a configuration that was valid yesterday
- * runs into an uninstalled agent, a repository with no commits, or a Git with
- * no author identity today, and none of that is something the user can fix by
- * editing a file.
+ * their answers change independently: a configuration that was valid
+ * yesterday runs into an uninstalled agent, a missing PHP extension or a check
+ * command that is no longer installed today, and none of that is something the
+ * user can fix by editing a file.
  *
  * Every check runs, even after one fails, so that an unprepared environment
  * produces one list of things to fix rather than a sequence of runs that each
  * reveal the next problem. The exception is a check whose answer depends on a
- * failed one: asking Git for a commit in a directory that is not a repository
- * produces a message about the wrong thing, so those are reported as skipped.
+ * failed one: asking an agent's CLI for its version when the executable was not
+ * found produces a message about the wrong thing, so those are reported as
+ * skipped.
  *
  * Nothing here writes, and no verification command and no agent *session* is
  * started: the checks resolve and interrogate, which is why preflight is safe
  * to run at any time, including on a project with an interrupted run in it.
- * Two things are executed, both of them queries that change nothing — `git`,
- * to ask about the repository, and the selected agent's version argument
- * ({@see AgentVersionCheck}), which starts no session, reads no task and costs
- * nothing.
+ * One thing is executed, and it is a query that changes nothing — the selected
+ * agent's version argument ({@see AgentVersionCheck}), which starts no session,
+ * reads no task and costs nothing.
  *
  * A project's own adapters are loaded before the agent is selected, so an
  * agent pointed at an adapter from `.ralph/adapters.php` is checked rather
@@ -145,25 +139,19 @@ final class Preflight
     }
 
     /**
-     * The full set of checks, sharing one Git probe and one executable finder.
+     * The full set of checks, sharing one executable finder.
      *
      * @return list<PreflightCheck>
      */
     private static function defaultChecks(): array
     {
-        $git = new GitProbe(new ProcessRunner());
         $executables = new ExecutableFinder();
 
         return [
             new PhpCheck(),
             new ExtensionsCheck(),
-            new GitCheck($git, $executables),
-            new RepositoryCheck($git),
-            new BaseReferenceCheck($git),
-            new IdentityCheck($git),
             new AgentCheck($executables),
             new AgentVersionCheck(),
-            new WorkspaceCheck($executables),
             new VerificationCheck($executables),
         ];
     }

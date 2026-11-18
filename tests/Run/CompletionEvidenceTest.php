@@ -5,28 +5,16 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Run;
 
 use Celyes\RalphPhp\Config\VerificationCommand;
-use Celyes\RalphPhp\Git\BaseCommit;
-use Celyes\RalphPhp\Git\ExcludedChange;
-use Celyes\RalphPhp\Git\ExclusionReason;
-use Celyes\RalphPhp\Git\RetentionReason;
-use Celyes\RalphPhp\Git\StagedChanges;
-use Celyes\RalphPhp\Git\WorkingTreeChange;
-use Celyes\RalphPhp\Git\WorkspaceRetention;
-use Celyes\RalphPhp\Git\WorkspaceState;
-use Celyes\RalphPhp\Git\WorktreeCleanup;
 use Celyes\RalphPhp\Run\CompletionEvidence;
 use Celyes\RalphPhp\Run\CompletionRecorder;
 use Celyes\RalphPhp\State\GenerationRecord;
-use Celyes\RalphPhp\State\PushState;
 use Celyes\RalphPhp\Support\UnverifiedText;
 use Celyes\RalphPhp\Tasks\CheckboxEdit;
-use Celyes\RalphPhp\Tasks\TaskGeneration;
 use Celyes\RalphPhp\Tasks\TaskId;
 use Celyes\RalphPhp\Tests\Log\RecordingSink;
 use Celyes\RalphPhp\Tests\Support\TemporaryDirectory;
 use Celyes\RalphPhp\Verification\CheckOutcome;
 use Celyes\RalphPhp\Verification\CheckRun;
-use Celyes\RalphPhp\Verification\Satisfaction;
 use Celyes\RalphPhp\Verification\VerificationReport;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -37,23 +25,18 @@ use PHPUnit\Framework\TestCase;
  * What a ticked box rests on (PROJECT.md section G, item 7).
  *
  * The item is a condition and a record, and these cases take them in that
- * order. The condition is tested the way the no-change case is: the complete
- * set of facts that earns a tick, and then each one replaced by the thing that
- * withdraws it — checks that failed, no implementation recorded, a no-change
- * result nobody collected evidence for, a push still owed. The record is tested
- * for holding all five layers at once, because "together" is the whole point of
- * it: a reviewer with a ticked checklist in front of them should get the checks,
- * the commit, the publication, the checklist line and the agent's claim out of
- * one file.
+ * order. The condition is the configured checks and, since section K, item 1
+ * removed the package's Git work, only the configured checks: it is tested with
+ * the facts that earn a tick and then with the one thing that withdraws it. The
+ * record is tested for holding every layer at once, because "together" is the
+ * whole point of it — a reviewer with a ticked checklist in front of them
+ * should get the checks, where the changes are, the checklist line and the
+ * agent's claim out of one file.
  */
 #[CoversClass(CompletionEvidence::class)]
 #[CoversClass(CompletionRecorder::class)]
 final class CompletionEvidenceTest extends TestCase
 {
-    private const string BASE = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
-
-    private const string COMMIT = '9f8e7d6c5b4a39281706f5e4d3c2b1a098765432';
-
     private string $directory;
 
     protected function setUp(): void
@@ -67,11 +50,11 @@ final class CompletionEvidenceTest extends TestCase
     }
 
     /**
-     * The whole positive case: passing checks, a commit, and nothing owed to a
-     * remote.
+     * The whole positive case: the configured checks passed against the work in
+     * the user's own checkout.
      */
     #[Test]
-    public function passing_checks_a_commit_and_settled_publication_earn_the_tick(): void
+    public function passing_checks_earn_the_tick(): void
     {
         $evidence = $this->evidence();
 
@@ -80,8 +63,8 @@ final class CompletionEvidenceTest extends TestCase
         self::assertSame([], $evidence->unmet());
         self::assertSame([], $evidence->hints());
         self::assertStringContainsString('2 of 2 checks passed', $evidence->summary());
-        self::assertStringContainsString('committed as 9f8e7d6c5b4a', $evidence->summary());
-        self::assertStringContainsString('completed: verified and committed', $evidence->describe());
+        self::assertStringContainsString('in the working tree for review', $evidence->summary());
+        self::assertStringContainsString('completed: verified in the working tree', $evidence->describe());
     }
 
     /**
@@ -95,8 +78,8 @@ final class CompletionEvidenceTest extends TestCase
     }
 
     /**
-     * The first condition. A commit the remote took and a green-looking row
-     * still does not tick a box if the checks said no.
+     * The condition, withdrawn. A worker that reported a candidate
+     * implementation still does not tick a box if the checks said no.
      */
     #[Test]
     public function checks_that_did_not_pass_withdraw_the_tick(): void
@@ -114,7 +97,7 @@ final class CompletionEvidenceTest extends TestCase
 
     /**
      * An empty *sequence* of checks is a defect — `passed()` would be vacuously
-     * true for it — so it cannot be built at all, and the conditions never have
+     * true for it — so it cannot be built at all, and the condition never has
      * to test for one. The deliberate "this project configured none" report is
      * a different constructor and is the case below.
      */
@@ -141,9 +124,7 @@ final class CompletionEvidenceTest extends TestCase
         self::assertTrue($evidence->isEarned());
         self::assertSame([], $evidence->unmet());
 
-        $markdown = $evidence
-            ->ticked(CheckboxEdit::applied('- [x] do it', TaskId::fromString('TASK-1A2B3C4D'), 12, true))
-            ->toMarkdown();
+        $markdown = $evidence->ticked($this->edit())->toMarkdown();
 
         // The condition is not worded as a pass, because nothing passed.
         self::assertStringContainsString('- [x] **No configured check decided against the work', $markdown);
@@ -151,160 +132,13 @@ final class CompletionEvidenceTest extends TestCase
 
         // And the checks section says what the tick actually rests on.
         self::assertStringContainsString('None. This run froze an empty `checks` set', $markdown);
-        self::assertStringContainsString('the agent\'s own result and the recorded commit', $markdown);
-        self::assertStringContainsString('review the diff before merging it', $markdown);
-
-        // The commit is still named: it is half of what the tick rests on.
-        self::assertStringContainsString(self::COMMIT, $markdown);
+        self::assertStringContainsString('the agent\'s own result', $markdown);
+        self::assertStringContainsString('read the diff before you commit it', $markdown);
     }
 
     /**
-     * The second condition: the Git half. Green checks over a workspace with
-     * neither a commit nor a recorded no-change result tick nothing.
-     */
-    #[Test]
-    public function a_pass_with_no_implementation_recorded_withdraws_the_tick(): void
-    {
-        $evidence = $this->evidence(commit: null);
-
-        self::assertTrue($evidence->isRefused());
-        self::assertStringContainsString('neither a commit nor a verified no-change result', $evidence->unmet()[0]);
-    }
-
-    /**
-     * The third: a no-change outcome is the one completion with no commit to
-     * read, so its evidence is part of what the tick rests on rather than a
-     * note beside it.
-     */
-    #[Test]
-    public function a_no_change_result_with_no_evidence_collected_withdraws_the_tick(): void
-    {
-        $evidence = $this->evidence(
-            commit: null,
-            noChange: true,
-            staged: StagedChanges::nothingStaged($this->directory),
-            satisfaction: null,
-        );
-
-        self::assertTrue($evidence->isRefused());
-        self::assertStringContainsString('no evidence collected for it', $evidence->unmet()[0]);
-    }
-
-    /**
-     * And a no-change case the facts contradict is refused here too, with the
-     * contradiction quoted rather than restated.
-     */
-    #[Test]
-    public function a_contradicted_no_change_result_withdraws_the_tick(): void
-    {
-        $evidence = $this->evidence(
-            commit: null,
-            noChange: true,
-            staged: StagedChanges::nothingStaged($this->directory),
-            satisfaction: $this->satisfaction(StagedChanges::nothingStaged($this->directory, [
-                ExcludedChange::of(WorkingTreeChange::of(' ', 'M', '.ralph/tasks.md'), ExclusionReason::Runtime),
-            ])),
-        );
-
-        self::assertTrue($evidence->isRefused());
-        self::assertStringContainsString('contradicted', $evidence->unmet()[0]);
-        self::assertStringContainsString('.ralph/tasks.md', $evidence->unmet()[0]);
-    }
-
-    /**
-     * A justified no-change case earns the tick, and says so without claiming
-     * a commit.
-     */
-    #[Test]
-    public function a_justified_no_change_result_earns_the_tick(): void
-    {
-        $evidence = $this->evidence(
-            commit: null,
-            noChange: true,
-            staged: StagedChanges::nothingStaged($this->directory),
-            satisfaction: $this->satisfaction(),
-        );
-
-        self::assertTrue($evidence->isEarned());
-        self::assertStringContainsString('nothing to commit', $evidence->summary());
-        self::assertStringContainsString('nothing to commit, and the checks agree', $evidence->describe());
-    }
-
-    /**
-     * The fourth condition. A push the configuration requires and the remote
-     * has not taken leaves the task unchecked, however good the checks were.
-     */
-    #[Test]
-    public function a_push_still_owed_withdraws_the_tick(): void
-    {
-        foreach ([PushState::Pending, PushState::Failed] as $state) {
-            $evidence = $this->evidence(push: $state);
-
-            self::assertTrue($evidence->isRefused(), $state->value);
-            self::assertStringContainsString('publication is required', $evidence->unmet()[0]);
-        }
-    }
-
-    /**
-     * A push that succeeded settles the condition, as does a project that never
-     * asked for one.
-     */
-    #[Test]
-    public function a_published_or_unrequired_push_settles_the_condition(): void
-    {
-        foreach ([PushState::Published, PushState::NotRequired] as $state) {
-            self::assertTrue($this->evidence(push: $state)->isEarned(), $state->value);
-        }
-    }
-
-    /**
-     * Every condition failing at once is reported in the order a reader needs
-     * them: unverified work makes the rest moot, and an unrecorded
-     * implementation makes the push irrelevant.
-     */
-    #[Test]
-    public function the_unmet_conditions_are_ordered_worst_first(): void
-    {
-        $evidence = $this->evidence(
-            verification: VerificationReport::of($this->check('tests', CheckOutcome::Failed, 1)),
-            commit: null,
-            noChange: true,
-            staged: StagedChanges::nothingStaged($this->directory),
-            satisfaction: null,
-            push: PushState::Failed,
-        );
-
-        $unmet = $evidence->unmet();
-
-        self::assertCount(3, $unmet);
-        self::assertStringContainsString('checks did not pass', $unmet[0]);
-        self::assertStringContainsString('no evidence collected', $unmet[1]);
-        self::assertStringContainsString('publication is required', $unmet[2]);
-
-        // And each is stored as its own finding, not as a count of findings.
-        $stored = $evidence->evidence();
-        self::assertFalse($stored->isEmpty());
-        self::assertStringContainsString('checks did not pass', $stored->toMarkdown());
-        self::assertStringContainsString('publication is required', $stored->toMarkdown());
-    }
-
-    /**
-     * An implementation recorded as both a commit and a no-change result is
-     * incoherent, and the no-change half is what decides: without a collected
-     * case there is nothing saying the task was already done.
-     */
-    #[Test]
-    public function a_commit_recorded_alongside_a_no_change_result_is_refused(): void
-    {
-        $evidence = $this->evidence(noChange: true, satisfaction: null);
-
-        self::assertTrue($evidence->isRefused());
-        self::assertStringContainsString('no evidence collected for it', $evidence->unmet()[0]);
-    }
-
-    /**
-     * The tick is not assumed from the conditions holding: it is a separate
-     * write, and the evidence says so only once it has landed.
+     * The write is a separate step from the condition, and the record says
+     * which of the two it is describing.
      */
     #[Test]
     public function the_evidence_reports_the_checklist_write_only_once_it_has_landed(): void
@@ -316,147 +150,99 @@ final class CompletionEvidenceTest extends TestCase
         self::assertStringContainsString('not written yet', implode("\n", $evidence->details()));
         self::assertStringContainsString('was not written', $evidence->toMarkdown());
 
-        $ticked = $evidence->ticked(
-            CheckboxEdit::applied('- [x] do the thing', TaskId::fromString('TASK-1A2B3C4D'), 7, true),
-        );
+        $ticked = $evidence->ticked($this->edit());
 
         self::assertTrue($ticked->wasChecked());
-        self::assertSame(7, $ticked->edit()?->line());
-        self::assertStringContainsString('line 7, now checked', implode("\n", $ticked->details()));
-
-        // And the original is untouched: this is a value, not a mutable row.
-        self::assertFalse($evidence->wasChecked());
+        self::assertSame(12, $ticked->edit()?->line());
+        self::assertStringContainsString('line 12, now checked', implode("\n", $ticked->details()));
+        self::assertStringContainsString('line 12 now reads `- [x]`', $ticked->toMarkdown());
     }
 
     /**
-     * The record holds all five layers at once, which is what "record
-     * completion evidence together" asks for.
+     * "Record completion evidence together": one document with the checks, the
+     * state of the working tree, the checklist line and the agent's claim in
+     * it.
      */
     #[Test]
-    public function the_record_holds_the_checks_the_commit_the_push_the_checklist_and_the_claim(): void
+    public function the_record_holds_the_checks_the_changes_the_checklist_and_the_claim(): void
     {
-        $markdown = $this->evidence()
-            ->ticked(CheckboxEdit::applied('- [x] do it', TaskId::fromString('TASK-1A2B3C4D'), 12, true))
-            ->toMarkdown();
+        $markdown = $this->evidence()->ticked($this->edit())->toMarkdown();
 
-        // The conditions, each with its answer.
+        self::assertStringContainsString('# TASK-1A2B3C4D, attempt 2: checked off', $markdown);
+        self::assertStringContainsString('> Add a --dry-run option', $markdown);
+        self::assertStringContainsString('Carried out by codex', $markdown);
+
         self::assertStringContainsString('## The conditions', $markdown);
         self::assertStringContainsString('- [x] **Verification passed', $markdown);
-        self::assertStringContainsString('- [x] **An implementation is recorded', $markdown);
-        self::assertStringContainsString('- [x] **Publication is settled', $markdown);
 
-        // The checks, named and with their commands.
         self::assertStringContainsString('## The checks', $markdown);
-        self::assertStringContainsString('`composer test`', $markdown);
-        self::assertStringContainsString('`composer analyse`', $markdown);
+        self::assertStringContainsString('**tests** — `composer test`', $markdown);
+        self::assertStringContainsString('**analyse** — `composer analyse`', $markdown);
 
-        // Git: the base, the branch, the commit and what is in it.
-        self::assertStringContainsString('## Git', $markdown);
-        self::assertStringContainsString('main (' . substr(self::BASE, 0, 12) . ')', $markdown);
-        self::assertStringContainsString('ralph/task-1a2b3c4d', $markdown);
-        self::assertStringContainsString(self::COMMIT, $markdown);
-        self::assertStringContainsString('`src/Thing.php`', $markdown);
-        self::assertStringContainsString('git show 9f8e7d6c5b4a', $markdown);
+        self::assertStringContainsString('## The changes', $markdown);
+        self::assertStringContainsString('Nothing was branched, committed or pushed.', $markdown);
+        self::assertStringContainsString('`git diff`', $markdown);
 
-        // The checklist line.
         self::assertStringContainsString('## The checklist', $markdown);
-        self::assertStringContainsString('line 12 now reads `- [x]`', $markdown);
+        self::assertStringContainsString('.ralph/tasks.md', $markdown);
 
-        // The agent, by name, without a credential anywhere near it.
-        self::assertStringContainsString('codex', $markdown);
-
-        // The claim, marked as one.
         self::assertStringContainsString('## What the agent reported', $markdown);
-        self::assertStringContainsString('Nothing in them has been checked', $markdown);
-        self::assertStringContainsString('added the option', $markdown);
+        self::assertStringContainsString('added the option and a test for it', $markdown);
 
-        // And the limit, where a reader meets it.
+        // And the limit a clean record still has.
         self::assertStringContainsString('## What this is not', $markdown);
-        self::assertStringContainsString('tests what this task asked for', $markdown);
+        self::assertStringContainsString('does not say', $markdown);
     }
 
     /**
-     * A refusal's record reads as the same document with different answers in
-     * it, and names what to do next.
+     * A completion that was refused is the record most worth reading, so it is
+     * the same document with the conditions answered differently and the next
+     * action in it.
      */
     #[Test]
     public function a_refused_completion_records_the_conditions_it_failed(): void
     {
-        $markdown = $this->evidence(push: PushState::Failed)->toMarkdown();
+        $evidence = $this->evidence(verification: VerificationReport::of(
+            $this->check('tests', CheckOutcome::Failed, 1),
+        ));
 
-        self::assertStringContainsString('not checked off', $markdown);
-        self::assertStringContainsString('- [x] **Verification passed', $markdown);
-        self::assertStringContainsString('- [ ] **Publication is settled', $markdown);
-        self::assertStringContainsString('left as you wrote it', $markdown);
+        $markdown = $evidence->toMarkdown();
+
+        self::assertStringContainsString('attempt 2: not checked off', $markdown);
+        self::assertStringContainsString('- [ ] **Verification passed', $markdown);
+        self::assertStringContainsString('The box in .ralph/tasks.md is left as you wrote it.', $markdown);
+        self::assertStringContainsString('left in the working tree', $markdown);
         self::assertStringContainsString('ralph retry TASK-1A2B3C4D', $markdown);
+
+        // And the attempt's row carries the reason as evidence.
+        self::assertStringContainsString(
+            'the configured checks did not pass',
+            $evidence->evidence()->toMarkdown(),
+        );
     }
 
     /**
-     * A refusal's hints keep the commit visible: the implementation is durable
-     * and must not be repeated.
-     */
-    #[Test]
-    public function a_refused_completion_names_the_commit_it_keeps(): void
-    {
-        $hints = $this->evidence(push: PushState::Failed)->hints();
-
-        self::assertStringContainsString('left as you wrote it', $hints[0]);
-        self::assertStringContainsString('9f8e7d6c5b4a', $hints[1]);
-        self::assertStringContainsString('not repeated', $hints[1]);
-    }
-
-    /**
-     * A diff longer than the record names is counted rather than listed: the
-     * commit is the authority for the whole of it.
-     */
-    #[Test]
-    public function a_long_diff_is_counted_rather_than_listed_in_full(): void
-    {
-        $paths = [];
-
-        for ($index = 1; $index <= CompletionEvidence::PATHS_IN_RECORD + 3; $index++) {
-            $paths[] = sprintf('src/File%02d.php', $index);
-        }
-
-        $markdown = $this->evidence(staged: $this->staged($paths))->toMarkdown();
-
-        self::assertStringContainsString('`src/File01.php`', $markdown);
-        self::assertStringContainsString('`src/File20.php`', $markdown);
-        self::assertStringNotContainsString('`src/File21.php`', $markdown);
-        self::assertStringContainsString('and 3 more', $markdown);
-    }
-
-    /**
-     * The structured form carries every layer too, for `status --json` and the
-     * events of section I.
+     * The structured form, for `ralph logs --json` and whatever else reads the
+     * result rather than the file.
      */
     #[Test]
     public function the_structured_form_carries_each_layer(): void
     {
-        $array = $this->evidence()
-            ->ticked(CheckboxEdit::applied('- [x] do it', TaskId::fromString('TASK-1A2B3C4D'), 4, true))
-            ->toArray();
+        $data = $this->evidence()->ticked($this->edit())->toArray();
 
-        self::assertTrue($array['earned']);
-        self::assertSame([], $array['unmet']);
-        self::assertTrue($array['checked']);
-        self::assertSame('TASK-1A2B3C4D', $array['task']);
-        self::assertSame('TASK-1A2B3C4D', $array['generation']);
-        self::assertSame('codex', $array['agent']);
-        self::assertSame(self::COMMIT, $array['commit']);
-        self::assertSame('ralph/task-1a2b3c4d', $array['branch']);
-        self::assertFalse($array['no_change']);
-        self::assertSame(4, $array['checklist']['line']);
-        self::assertSame('.ralph/tasks.md', $array['checklist']['path']);
-        self::assertIsArray($array['verification']);
-        self::assertIsArray($array['staged']);
-        self::assertNull($array['record']);
+        self::assertSame('TASK-1A2B3C4D', $data['generation']);
+        self::assertSame('TASK-1A2B3C4D', $data['task']);
+        self::assertSame('Add a --dry-run option', $data['description']);
+        self::assertSame(2, $data['attempt']);
+        self::assertSame('codex', $data['agent']);
+        self::assertTrue($data['earned']);
+        self::assertSame([], $data['unmet']);
+        self::assertTrue($data['checked']);
+        self::assertSame(['path' => '.ralph/tasks.md', 'line' => 12], $data['checklist']);
+        self::assertTrue($data['verification']['passed']);
+        self::assertStringContainsString('added the option', (string) $data['claim']);
     }
 
-    /**
-     * The recorder writes the record beside the attempt's logs, notes where it
-     * went, and hands back evidence that knows its own path.
-     */
     #[Test]
     public function the_recorder_keeps_the_record_and_notes_where_it_went(): void
     {
@@ -471,9 +257,8 @@ final class CompletionEvidenceTest extends TestCase
         self::assertStringContainsString('completion evidence kept at ' . $path, implode("\n", $sink->notes));
 
         // The verdict and the facts reach the log as well as the file.
-        self::assertStringContainsString('completed: verified and committed', implode("\n", $sink->notes));
-        self::assertStringContainsString('commit: 9f8e7d6c5b4a', implode("\n", $sink->notes));
-        self::assertStringContainsString('publication: ', implode("\n", $sink->notes));
+        self::assertStringContainsString('completed: verified in the working tree', implode("\n", $sink->notes));
+        self::assertStringContainsString('check: tests', implode("\n", $sink->notes));
     }
 
     /**
@@ -504,151 +289,22 @@ final class CompletionEvidenceTest extends TestCase
         $kept = (new CompletionRecorder())->record($this->evidence(), null, $sink);
 
         self::assertNull($kept->recordPath());
-        self::assertStringContainsString('completed: verified and committed', implode("\n", $sink->notes));
+        self::assertStringContainsString('completed: verified in the working tree', implode("\n", $sink->notes));
         self::assertStringNotContainsString('kept at', implode("\n", $sink->notes));
     }
 
     /**
-     * Cleanup is the last of the ordered steps, and what it did becomes part
-     * of what the tick rests on (PROJECT.md section K, item 6).
-     *
-     * A record that says a box was ticked should also say whether the checkout
-     * the work was written in is still on disk, because the two questions are
-     * asked together: a reviewer who cannot find the workspace needs to be told
-     * it was removed on purpose, and told where the work went instead.
-     */
-    #[Test]
-    public function a_completion_carries_what_became_of_the_workspace(): void
-    {
-        $evidence = $this->evidence()->cleanedUp($this->removal());
-
-        self::assertTrue($evidence->workspaceWasRemoved());
-        self::assertNotNull($evidence->cleanup());
-        self::assertSame($this->directory, $evidence->cleanup()?->path());
-
-        // Beside the commit and the publication, and last, because it happened
-        // last: everything above it was durable before the directory went.
-        $details = $evidence->details();
-        self::assertStringContainsString('workspace: removed ' . $this->directory, end($details));
-    }
-
-    /**
-     * Until cleanup has run there is nothing to say about the workspace, and
-     * the record says nothing rather than guessing.
-     */
-    #[Test]
-    public function a_completion_that_has_not_reached_cleanup_says_nothing_about_the_workspace(): void
-    {
-        $evidence = $this->evidence();
-
-        self::assertNull($evidence->cleanup());
-        self::assertFalse($evidence->workspaceWasRemoved());
-        self::assertStringNotContainsString('workspace:', implode("\n", $evidence->details()));
-        self::assertStringNotContainsString('## The workspace', $evidence->toMarkdown());
-        self::assertNull($evidence->toArray()['workspace']);
-    }
-
-    /**
-     * A workspace that was kept is not a workspace that was removed, and the
-     * record is the place a person is told where to find it.
-     */
-    #[Test]
-    public function a_kept_workspace_is_reported_as_kept_with_the_reason(): void
-    {
-        $evidence = $this->evidence()->cleanedUp(WorktreeCleanup::kept(WorkspaceRetention::preserved(
-            'TASK-1A2B3C4D/1',
-            $this->directory,
-            [RetentionReason::UncommittedWork->value => 'src/Thing.php was modified'],
-        )));
-
-        self::assertFalse($evidence->workspaceWasRemoved());
-
-        $markdown = $evidence->toMarkdown();
-        self::assertStringContainsString('## The workspace', $markdown);
-        self::assertStringContainsString('is still on disk', $markdown);
-        self::assertStringContainsString('src/Thing.php was modified', $markdown);
-    }
-
-    /**
-     * The section a reviewer reads: the directory is gone on purpose, and the
-     * commit is where the work is now.
-     */
-    #[Test]
-    public function the_record_says_the_workspace_went_and_where_the_work_is(): void
-    {
-        $markdown = $this->evidence()->cleanedUp($this->removal())->toMarkdown();
-
-        self::assertStringContainsString('## The workspace', $markdown);
-        self::assertStringContainsString($this->directory . '` was removed', $markdown);
-        self::assertStringContainsString('git worktree` registration', $markdown);
-        self::assertStringContainsString('were durable', $markdown);
-        self::assertStringContainsString('ralph/task-1a2b3c4d', $markdown);
-        self::assertStringContainsString('9f8e7d6c5b4a', $markdown);
-    }
-
-    /**
-     * A directory somebody else had already deleted is not something this run
-     * deleted, and the record does not claim it was.
-     */
-    #[Test]
-    public function a_cleared_registration_is_not_reported_as_deleted_files(): void
-    {
-        $markdown = $this->evidence()
-            ->cleanedUp(WorktreeCleanup::cleared(
-                WorkspaceRetention::removable('TASK-1A2B3C4D/1', $this->directory),
-            ))
-            ->toMarkdown();
-
-        self::assertStringContainsString('had already gone', $markdown);
-        self::assertStringContainsString('Nothing was deleted by this run', $markdown);
-    }
-
-    /**
-     * The structured form carries it too, so `status --json` and the events can
-     * answer the same question as the Markdown.
-     */
-    #[Test]
-    public function the_structured_form_carries_the_workspace_outcome(): void
-    {
-        $workspace = $this->evidence()->cleanedUp($this->removal())->toArray()['workspace'];
-
-        self::assertIsArray($workspace);
-        self::assertTrue($workspace['removed']);
-        self::assertFalse($workspace['registration_only']);
-        self::assertSame($this->directory, $workspace['retention']['path']);
-        self::assertSame('removable', $workspace['retention']['verdict']);
-    }
-
-    /**
-     * What a successful removal looks like when the cleaner reports one.
-     */
-    private function removal(): WorktreeCleanup
-    {
-        return WorktreeCleanup::removed(
-            WorkspaceRetention::removable('TASK-1A2B3C4D/1', $this->directory),
-        );
-    }
-
-    /**
-     * One completion's facts, with any of them replaceable.
+     * The evidence as the pass collects it, with one fact replaceable per case.
      */
     private function evidence(
         ?VerificationReport $verification = null,
-        ?string $commit = self::COMMIT,
-        bool $noChange = false,
-        ?StagedChanges $staged = null,
-        ?Satisfaction $satisfaction = null,
-        PushState $push = PushState::Published,
         ?UnverifiedText $claim = null,
     ): CompletionEvidence {
         return CompletionEvidence::of(
-            $this->record($commit, $noChange, $push),
-            'add a --force option to the init command',
+            $this->record(),
+            'Add a --dry-run option',
             2,
-            BaseCommit::of('main', self::BASE),
             $verification ?? $this->passingChecks(),
-            $staged ?? $this->staged(['src/Thing.php']),
-            $satisfaction,
             $claim ?? UnverifiedText::of('added the option and a test for it'),
             '.ralph/tasks.md',
         );
@@ -658,7 +314,7 @@ final class CompletionEvidenceTest extends TestCase
      * A generation row as the store would have read it back at the moment the
      * box is about to be ticked.
      */
-    private function record(?string $commit, bool $noChange, PushState $push): GenerationRecord
+    private function record(): GenerationRecord
     {
         return GenerationRecord::fromRow([
             'id' => 4,
@@ -671,16 +327,6 @@ final class CompletionEvidenceTest extends TestCase
             'agent' => 'codex',
             'adapter' => 'codex',
             'agent_settings' => '{"executable":"codex"}',
-            'base_reference' => 'main',
-            'base_sha' => self::BASE,
-            'branch' => 'ralph/task-1a2b3c4d',
-            'commit_sha' => $commit,
-            'no_change' => $noChange ? 1 : 0,
-            'push_state' => $push->value,
-            'push_remote' => $push === PushState::NotRequired ? null : 'origin',
-            'push_error' => $push === PushState::Failed ? 'non-fast-forward' : null,
-            'worktree_path' => $this->directory,
-            'owns_worktree' => 1,
             'blocker' => null,
             'started_at' => '2026-11-07T09:00:00+00:00',
             'updated_at' => '2026-11-07T09:04:00+00:00',
@@ -688,54 +334,9 @@ final class CompletionEvidenceTest extends TestCase
         ]);
     }
 
-    /**
-     * An index with one modified file per path, built from the two outputs Git
-     * is actually asked for, so the fixture cannot describe a diff that
-     * {@see StagedChanges::parse()} would reject.
-     *
-     * @param list<string> $paths
-     */
-    private function staged(array $paths): StagedChanges
+    private function edit(): CheckboxEdit
     {
-        $statuses = [];
-        $counts = [];
-
-        foreach ($paths as $path) {
-            $statuses[] = 'M';
-            $statuses[] = $path;
-            $counts[] = "3\t1\t" . $path;
-        }
-
-        return StagedChanges::parse(
-            $this->directory,
-            self::records(...$statuses),
-            self::records(...$counts),
-        );
-    }
-
-    /**
-     * Git's `-z` output: every record followed by a NUL.
-     */
-    private static function records(string ...$records): string
-    {
-        return implode('', array_map(static fn (string $record): string => $record . "\0", $records));
-    }
-
-    /**
-     * A no-change case, justified unless something excluded is handed in.
-     */
-    private function satisfaction(?StagedChanges $staged = null): Satisfaction
-    {
-        return Satisfaction::of(
-            TaskGeneration::first(TaskId::fromString('TASK-1A2B3C4D')),
-            2,
-            $this->directory,
-            BaseCommit::of('main', self::BASE),
-            WorkspaceState::of(self::BASE),
-            $staged ?? StagedChanges::nothingStaged($this->directory),
-            $this->passingChecks(),
-            UnverifiedText::of('it was already there'),
-        );
+        return CheckboxEdit::applied('- [x] do it', TaskId::fromString('TASK-1A2B3C4D'), 12, true);
     }
 
     private function passingChecks(): VerificationReport

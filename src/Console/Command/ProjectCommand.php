@@ -140,9 +140,8 @@ abstract class ProjectCommand implements CommandInterface
      * The project's configuration, which it must have.
      *
      * For the commands that do work: a project with no `.ralph/config.json` has
-     * not been initialised, and starting a run on the defaults would write a
-     * state database, a branch and a worktree into a directory whose owner
-     * never asked for any of it.
+     * not been initialised, and starting a run on the defaults would hand a
+     * directory whose owner never asked for any of it to a coding agent.
      *
      * @throws FilesystemException    when the current directory cannot be
      *                                determined

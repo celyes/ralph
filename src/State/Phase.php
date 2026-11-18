@@ -10,57 +10,52 @@ use Celyes\RalphPhp\Ralph;
 /**
  * What a pass is in the middle of.
  *
- * The six phases of PROJECT.md section D, item 3, recorded next to
+ * The phases of PROJECT.md section D, item 3, recorded next to
  * {@see LifecycleState} on a generation and on each attempt. The state says
  * whether a pass is still being worked on; the phase says which part of the
  * work it is in, and the whole reason it is written down is resume. An
- * interruption during `executing` and one during `publishing` are the same
+ * interruption during `executing` and one during `finalizing` are the same
  * state and two completely different jobs: the first means invoking the agent
- * again, the second means retrying a push against a commit that already exists.
- * Without the phase the only safe move after an interruption would be to start
- * the pass over, which is the duplicated implementation and the duplicated
- * commit that section H and release criterion 6 exist to rule out.
+ * again, the second means writing one line in a Markdown file for work the
+ * checks have already passed. Without the phase the only safe move after an
+ * interruption would be to start the pass over, which is the duplicated
+ * implementation section H and release criterion 6 exist to rule out.
  *
  * Three things are encoded here beyond the list of words.
  *
  * The **order** is the sequence of PROJECT.md section G, item 1, and a pass
- * only ever moves forward through it. It may skip: `publishing` is absent when
- * pushing is off, and `committing` is absent for a task that was already
- * satisfied, since a verified no-change outcome completes without an empty
- * commit (section G, item 6). What it may not do is go backwards.
+ * only ever moves forward through it. What it may not do is go backwards.
  * Re-preparing after a failed check is not a phase transition, it is the next
  * attempt — a new row in `attempts` that starts again at
  * {@see self::Preparing}, because context and bounded memory are loaded per
  * attempt (section D, item 5). Allowing a backward move would let a recorded
- * phase say `executing` about a pass whose commit already exists, and resume
- * would then redo it.
+ * phase say `executing` about a pass whose checks have already passed, and
+ * resume would then invoke the agent over work that is already done.
  *
  * The **resume partition** is {@see self::resumesInPlace()}. A pass that
  * stopped before the agent came back has no candidate implementation to keep,
  * so it is picked up as a fresh attempt; one that stopped after has work worth
  * preserving, and resume continues that same attempt from the phase it
- * records. This is what makes "resume failed publication without repeating
- * implementation or creating a duplicate commit" expressible at all.
+ * records. This is what makes "resume a failed checklist write without
+ * repeating the implementation" expressible at all.
  *
- * The **already-true questions** — {@see self::hasCandidate()},
- * {@see self::verificationPassed()}, {@see self::commitRecorded()} — are what a
- * reconciling resume asks before it does anything. They are deliberately
- * conservative about the phase a pass stopped *in*: a pass interrupted during
- * `committing` is not reported as having a commit, because that is precisely the
- * case where Git and the database can disagree (section H, item 5), and the
- * answer has to come from looking at the repository rather than from this.
+ * The **already-true questions** — {@see self::hasCandidate()} and
+ * {@see self::verificationPassed()} — are what a resume asks before it does
+ * anything. They are deliberately conservative about the phase a pass stopped
+ * *in*: a pass interrupted during `verifying` is not reported as having passed
+ * its checks, because some of them may have run and that is not the same as the
+ * set of them having passed.
  *
  * Which states carry a phase at all is {@see LifecycleState::recordsPhase()}.
  */
 enum Phase: string
 {
     /**
-     * Getting the workspace and the prompt ready.
+     * Getting the prompt ready.
      *
-     * Resolving the base commit, creating the task's worktree and branch, and
-     * loading project context and bounded relevant memory. Nothing of the
-     * user's work has been touched yet and the agent has not been started, so a
-     * pass that stops here is begun again from the top.
+     * Opening the attempt's log and loading project context and bounded
+     * relevant memory. Nothing has been changed and the agent has not been
+     * started, so a pass that stops here is begun again from the top.
      */
     case Preparing = 'preparing';
 
@@ -70,8 +65,8 @@ enum Phase: string
      * The one phase whose work is done by something other than the runner, and
      * the one that costs money and time. A pass that stops here is started
      * again as a new attempt: a half-finished agent invocation is not a
-     * candidate implementation, and treating whatever it left in the worktree
-     * as one would put unverified changes on the way to a commit.
+     * candidate implementation, and treating whatever it left in the working
+     * tree as one would tick a box over changes nothing checked.
      */
     case Executing = 'executing';
 
@@ -86,31 +81,12 @@ enum Phase: string
     case Verifying = 'verifying';
 
     /**
-     * Verification passed and the result is being recorded in Git.
-     *
-     * Staging the task workspace's changes, writing the commit, and persisting
-     * its SHA. Skipped by a task that was already satisfied, which is recorded
-     * as a verified no-change outcome instead. The phase a crash is most
-     * awkward in: the commit can exist with the database not yet knowing, so
-     * resume reconciles here rather than committing again.
-     */
-    case Committing = 'committing';
-
-    /**
-     * The commit is being pushed to the configured remote.
-     *
-     * Only reached when pushing is enabled; absent otherwise. Kept as its own
-     * phase so that a failed push is retried on its own, with the
-     * implementation and the commit already safe.
-     */
-    case Publishing = 'publishing';
-
-    /**
      * Everything succeeded and the checklist box is being ticked.
      *
-     * The last thing a pass does, and deliberately after the commit: a
-     * checkbox write that fails leaves the pass awaiting finalization with its
-     * commit intact, so resume has only the file to write (section G, item 8).
+     * The last thing a pass does, and deliberately after the checks: a
+     * checkbox write that fails leaves the pass awaiting finalization with the
+     * agent's work and the passing checks already recorded, so resume has only
+     * the file to write (section G, item 8).
      */
     case Finalizing = 'finalizing';
 
@@ -160,6 +136,22 @@ enum Phase: string
             return $phase;
         }
 
+        // The two phases an earlier build recorded and this one does not have:
+        // a pass stopped while committing or pushing had done its work and
+        // passed its checks, which is what `finalizing` now means. Read that
+        // way rather than refused, so a project whose database carries a
+        // half-finished run from the Git era can still be resumed — the only
+        // thing left to do for such a pass is the checkbox, and the commit it
+        // made stays in the repository for its owner to keep or discard.
+        $retired = match ($value) {
+            'committing', 'publishing' => self::Finalizing,
+            default => null,
+        };
+
+        if ($retired instanceof self) {
+            return $retired;
+        }
+
         throw new StateException(
             sprintf('The state store holds the phase "%s", which this version does not know.', $value),
             [
@@ -194,7 +186,7 @@ enum Phase: string
     /**
      * Where this phase comes in the sequence, counting from one.
      *
-     * For comparing phases and for reading in a status line ("3 of 6"); the
+     * For comparing phases and for reading in a status line ("3 of 4"); the
      * number itself is never stored, since renumbering on a later release would
      * make stored rows mean something else.
      */
@@ -204,9 +196,7 @@ enum Phase: string
             self::Preparing => 1,
             self::Executing => 2,
             self::Verifying => 3,
-            self::Committing => 4,
-            self::Publishing => 5,
-            self::Finalizing => 6,
+            self::Finalizing => 4,
         };
     }
 
@@ -229,18 +219,15 @@ enum Phase: string
     /**
      * The phase that follows this one, or null at the end of the sequence.
      *
-     * The next phase in order, not necessarily the next one a given pass
-     * records: a run with pushing off goes from `committing` straight to
-     * `finalizing`.
+     * Every pass that gets as far as a phase records the next one, so this is
+     * also the sequence a pass actually moves through.
      */
     public function next(): ?self
     {
         return match ($this) {
             self::Preparing => self::Executing,
             self::Executing => self::Verifying,
-            self::Verifying => self::Committing,
-            self::Committing => self::Publishing,
-            self::Publishing => self::Finalizing,
+            self::Verifying => self::Finalizing,
             self::Finalizing => null,
         };
     }
@@ -269,26 +256,22 @@ enum Phase: string
     /**
      * Whether a pass can finish without ever recording this phase.
      *
-     * Two phases are conditional. `publishing` happens only when pushing is
-     * enabled, and `committing` only when there is something to commit — a task
-     * found to be already satisfied is completed as a verified no-change
-     * outcome instead. The other four are not optional in any configuration:
-     * every pass prepares a workspace, invokes the agent, has its result
-     * verified, and is finalized before its box is ticked.
+     * None of them, since the Git phases went: every pass prepares its
+     * context, invokes the agent, has the result verified, and is finalized
+     * before its box is ticked. Kept because the question is a reader's as
+     * much as a caller's — a phase list with nothing conditional in it is
+     * worth being able to ask about rather than infer.
      */
     public function isOptional(): bool
     {
-        return match ($this) {
-            self::Committing, self::Publishing => true,
-            self::Preparing, self::Executing, self::Verifying, self::Finalizing => false,
-        };
+        return false;
     }
 
     /**
      * Whether the agent is what is running in this phase.
      *
      * The phase boundary that matters for cancellation: Ctrl+C during
-     * `executing` has a worker process tree to stop before ownership can be
+     * `executing` has a worker process tree to stop before the lock can be
      * released, and in every other phase it does not.
      */
     public function invokesAgent(): bool
@@ -375,7 +358,7 @@ enum Phase: string
     public function hasCandidate(): bool
     {
         return match ($this) {
-            self::Verifying, self::Committing, self::Publishing, self::Finalizing => true,
+            self::Verifying, self::Finalizing => true,
             self::Preparing, self::Executing => false,
         };
     }
@@ -384,50 +367,28 @@ enum Phase: string
      * Whether the configured checks had already passed when a pass reached this
      * phase.
      *
-     * Reaching `committing` is what passing them means, and `finalizing` is
-     * reached either through `committing` or directly from a verified no-change
-     * outcome, so both are covered. A pass stopped *during* `verifying` has no
-     * verdict: some checks may have run, which is not the same as the run
-     * having passed.
+     * Reaching `finalizing` is what passing them means. A pass stopped
+     * *during* `verifying` has no verdict: some checks may have run, which is
+     * not the same as the set of them having passed.
      */
     public function verificationPassed(): bool
     {
-        return match ($this) {
-            self::Committing, self::Publishing, self::Finalizing => true,
-            self::Preparing, self::Executing, self::Verifying => false,
-        };
-    }
-
-    /**
-     * Whether the pass's Git result was already recorded when it reached this
-     * phase.
-     *
-     * A commit, or the justified no-change result that stands in for one.
-     * `committing` is not included on purpose: that is the phase in which the
-     * two can disagree, and resume answers the question by looking at the
-     * repository. Where this is true, resume must not create a second commit.
-     */
-    public function commitRecorded(): bool
-    {
-        return match ($this) {
-            self::Publishing, self::Finalizing => true,
-            self::Preparing, self::Executing, self::Verifying, self::Committing => false,
-        };
+        return $this === self::Finalizing;
     }
 
     /**
      * Whether resume continues this same attempt from here.
      *
      * The partition the recorded phase exists for. A pass interrupted from
-     * `verifying` onwards has an implementation, and possibly a commit, that it
-     * would be wrong to produce twice, so resume picks the attempt up where it
+     * `verifying` onwards has an implementation in the user's checkout that it
+     * would be wrong to ask for twice, so resume picks the attempt up where it
      * stopped. Before that there is nothing to preserve, and starting a new
      * attempt is both safe and cheaper to reason about.
      */
     public function resumesInPlace(): bool
     {
         return match ($this) {
-            self::Verifying, self::Committing, self::Publishing, self::Finalizing => true,
+            self::Verifying, self::Finalizing => true,
             self::Preparing, self::Executing => false,
         };
     }
@@ -451,11 +412,9 @@ enum Phase: string
     public function describe(): string
     {
         return match ($this) {
-            self::Preparing => 'preparing the workspace and context',
+            self::Preparing => 'preparing the context',
             self::Executing => 'waiting for the agent',
             self::Verifying => 'running the configured checks',
-            self::Committing => 'committing the verified changes',
-            self::Publishing => 'pushing the commit to the remote',
             self::Finalizing => 'checking the task off',
         };
     }
@@ -472,9 +431,7 @@ enum Phase: string
             self::Preparing => 'start the task again: nothing had been produced yet',
             self::Executing => 'invoke the agent again: an unfinished run is not a result',
             self::Verifying => 'run the checks again against the changes the agent already made',
-            self::Committing => 'check whether the commit was written, then record or create it',
-            self::Publishing => 'retry only the push: the implementation and the commit are kept',
-            self::Finalizing => 'write the checklist box only: the commit is already recorded',
+            self::Finalizing => 'write the checklist box only: the work is done and verified',
         };
     }
 

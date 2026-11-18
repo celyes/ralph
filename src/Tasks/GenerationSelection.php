@@ -13,13 +13,11 @@ use InvalidArgumentException;
  * The answer {@see GenerationSelector} returns, with the evidence behind it: the
  * generation to work in, why it is that one, and the earlier passes that stay
  * exactly as they are. Reopening a finished task is the case the class is
- * shaped around — the old generation keeps its attempts, its verification
- * output, its branch and its commit, and the new one gets the next number and a
- * branch of its own (PROJECT.md section C, item 8).
+ * shaped around — the old generation keeps its attempts and its verification
+ * output, and the new one gets the next number (PROJECT.md section C, item 8).
  *
- * Nothing here changes anything, and nothing here touches Git. It says what the
- * new pass owns and which branches are already taken; creating the branch and
- * refusing one owned by unrelated work is section F.
+ * Nothing here changes anything. It says which pass the run is about to make
+ * and which earlier ones it must leave alone.
  */
 final class GenerationSelection
 {
@@ -51,8 +49,7 @@ final class GenerationSelection
      *
      * @throws InvalidArgumentException when the pass being continued is
      *                                 complete, which would have the runner
-     *                                 write to a branch whose work is already
-     *                                 verified
+     *                                 attempt work that is already verified
      */
     public static function continuing(RecordedGeneration $open, array $preserved = []): self
     {
@@ -140,14 +137,6 @@ final class GenerationSelection
     }
 
     /**
-     * Whether this pass needs a branch created for it.
-     */
-    public function startsNewBranch(): bool
-    {
-        return $this->start->startsNewBranch();
-    }
-
-    /**
      * The unfinished pass this continues, or null when it starts a new one.
      *
      * Where resume reads the branch it already owns and the attempts already
@@ -187,52 +176,6 @@ final class GenerationSelection
     }
 
     /**
-     * The branches earlier passes own, oldest first.
-     *
-     * The new pass's branch must not be any of these, and a branch that is one
-     * of them is not available to be reset or reused — it is where verified
-     * work lives. Checked by whoever names the branch, which is section F.
-     *
-     * @return list<string>
-     */
-    public function reservedBranches(): array
-    {
-        return array_values(array_filter(array_map(
-            static fn (RecordedGeneration $pass): ?string => $pass->branch(),
-            $this->preserved,
-        )));
-    }
-
-    /**
-     * Whether a branch belongs to one of the preserved passes.
-     */
-    public function isReserved(string $branch): bool
-    {
-        return in_array($branch, $this->reservedBranches(), true);
-    }
-
-    /**
-     * The commit the most recent completed pass produced, when there is one.
-     *
-     * What a reopened task's new pass is measured against by the person
-     * reviewing it: the change that was accepted last time.
-     */
-    public function previousCommit(): ?string
-    {
-        $completed = $this->completed();
-
-        for ($index = count($completed) - 1; $index >= 0; $index--) {
-            $commit = $completed[$index]->commit();
-
-            if ($commit !== null) {
-                return $commit;
-            }
-        }
-
-        return null;
-    }
-
-    /**
      * One sentence saying which pass this is and why.
      */
     public function reason(): string
@@ -266,21 +209,12 @@ final class GenerationSelection
         }
 
         $notes = [sprintf(
-            'The %d earlier generation(s) keep their attempts, logs, branches and commits; nothing is reused or reset.',
+            'The %d earlier generation(s) keep their attempts and logs; nothing is reused or reset.',
             count($this->preserved),
         )];
 
-        $branches = $this->reservedBranches();
-
-        if ($branches !== []) {
-            $notes[] = sprintf(
-                'Previous work stays on %s; this generation gets a branch of its own.',
-                implode(', ', $branches),
-            );
-        }
-
         $notes[] = sprintf(
-            'This generation is written down as "%s", which is what its branch and logs are named after.',
+            'This generation is written down as "%s", which is what its logs are named after.',
             $this->generation->slug(),
         );
 

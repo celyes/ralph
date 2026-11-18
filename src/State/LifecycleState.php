@@ -61,7 +61,7 @@ enum LifecycleState: string
      * Being worked on now, by this runner.
      *
      * {@see Phase} says what part of it. Only a pass in this state holds a
-     * worktree the runner considers its own.
+     * project the runner considers itself to be working in.
      */
     case Running = 'running';
 

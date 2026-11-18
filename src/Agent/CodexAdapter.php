@@ -40,11 +40,11 @@ use Celyes\RalphPhp\Process\ProcessResult;
  * Codex decides what it may write from its own notion of a working root, and
  * `--cd` is how that root is stated rather than inferred. The two agree — the
  * process is started in {@see ExecutionRequest::directory()} either way — and
- * stating it is what makes the sandbox below mean the task's worktree and not
+ * stating it is what makes the sandbox below mean the project and not
  * whatever directory a future change leaves the process in.
  *
  * **Why `--sandbox workspace-write`.** The task's changes have to land in the
- * workspace, and only there: the runner stages that worktree's diff after
+ * workspace, and only there: the runner verifies that directory after
  * verification (section F, item 6), so an edit made anywhere else is work that
  * is never committed and never reviewed, in a checkout the package has promised
  * not to touch. Under this mode Codex may read the machine, write inside its

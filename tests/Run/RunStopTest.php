@@ -8,11 +8,11 @@ use Celyes\RalphPhp\Config\Limits;
 use Celyes\RalphPhp\Exception\BranchException;
 use Celyes\RalphPhp\Process\Interruption;
 use Celyes\RalphPhp\Run\RunBudget;
+use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Run\RunStop;
 use Celyes\RalphPhp\Run\TaskResult;
 use Celyes\RalphPhp\State\Blocker;
 use Celyes\RalphPhp\State\GenerationRecord;
-use Celyes\RalphPhp\State\PushState;
 use Celyes\RalphPhp\State\StopKind;
 use Celyes\RalphPhp\Tasks\ChecklistItem;
 use Celyes\RalphPhp\Tasks\Task;
@@ -324,24 +324,24 @@ final class RunStopTest extends TestCase
     }
 
     /**
-     * Ambiguous ownership found before a task was taken on arrives as a
-     * failure, and the failure's own hints are the documented next action.
+     * A refusal raised before a task was taken on arrives as a failure, and the
+     * failure's own hints are the documented next action.
      */
     #[Test]
     public function a_failed_run_carries_the_failures_own_hints_as_its_action(): void
     {
-        $refused = new BranchException('ralph/task-1a2b3c4d holds a commit no pass recorded', [
-            'Rename the branch, or delete it if the work on it is not wanted.',
-            'Nothing was reset.',
+        $refused = new ChecklistException('.ralph/tasks.md could not be read', [
+            'Check the file\'s permissions.',
+            'Nothing was changed.',
         ]);
 
-        $stop = RunStop::failure('BranchException: ' . $refused->getMessage(), $refused->hints());
+        $stop = RunStop::failure('ChecklistException: ' . $refused->getMessage(), $refused->hints());
 
         self::assertSame(StopKind::Failed, $stop->kind());
         self::assertTrue($stop->needsAttention());
-        self::assertStringContainsString('holds a commit no pass recorded', $stop->reason());
+        self::assertStringContainsString('could not be read', $stop->reason());
         self::assertSame(
-            'Rename the branch, or delete it if the work on it is not wanted. Nothing was reset.',
+            'Check the file\'s permissions. Nothing was changed.',
             $stop->nextAction(),
         );
     }
@@ -368,12 +368,7 @@ final class RunStopTest extends TestCase
         $done = RunStop::everythingCompleted(3, '.ralph/tasks.md');
         self::assertSame(StopKind::Finished, $done->kind());
         self::assertStringContainsString('every pending task was completed (3 tasks)', $done->reason());
-        self::assertStringContainsString('Review the task branches', $done->nextAction());
-
-        // A shared-branch run leaves one branch to review, so it is named
-        // rather than described in the plural.
-        $shared = RunStop::everythingCompleted(3, '.ralph/tasks.md', 'ralph/shared');
-        self::assertStringContainsString('Review ralph/shared, then add the next work', $shared->nextAction());
+        self::assertStringContainsString('Review the changes with `git diff`', $done->nextAction());
 
         self::assertFalse($empty->needsAttention());
         self::assertFalse($checked->needsAttention());
@@ -421,16 +416,6 @@ final class RunStopTest extends TestCase
             'agent' => 'codex',
             'adapter' => 'codex',
             'agent_settings' => '{"executable":"codex"}',
-            'base_reference' => 'main',
-            'base_sha' => str_repeat('a', 40),
-            'branch' => 'ralph/' . strtolower($task->id()->value()),
-            'commit_sha' => null,
-            'no_change' => 0,
-            'push_state' => PushState::NotRequired->value,
-            'push_remote' => null,
-            'push_error' => null,
-            'worktree_path' => '/tmp/ralph-worktree',
-            'owns_worktree' => 1,
             'blocker' => $blocker?->toStorage(),
             'started_at' => '2026-11-08T09:00:00+00:00',
             'updated_at' => '2026-11-08T09:04:00+00:00',

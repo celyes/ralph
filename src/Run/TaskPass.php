@@ -9,6 +9,7 @@ use Celyes\RalphPhp\Agent\ExecutionAdapter;
 use Celyes\RalphPhp\Agent\ExecutionBudget;
 use Celyes\RalphPhp\Agent\ExecutionRequest;
 use Celyes\RalphPhp\Agent\ExecutionResult;
+use Celyes\RalphPhp\Agent\Workspace;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
 use Celyes\RalphPhp\Console\Output;
@@ -17,17 +18,7 @@ use Celyes\RalphPhp\Exception\ChecklistConflictException;
 use Celyes\RalphPhp\Exception\ChecklistException;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Exception\InterruptionException;
-use Celyes\RalphPhp\Exception\PublicationException;
 use Celyes\RalphPhp\Exception\RalphException;
-use Celyes\RalphPhp\Git\BaseCommit;
-use Celyes\RalphPhp\Git\CommitMessage;
-use Celyes\RalphPhp\Git\BranchOwnership;
-use Celyes\RalphPhp\Git\SharedBranch;
-use Celyes\RalphPhp\Git\StagedChanges;
-use Celyes\RalphPhp\Git\TaskBranch;
-use Celyes\RalphPhp\Git\TaskPublisher;
-use Celyes\RalphPhp\Git\TaskWorktree;
-use Celyes\RalphPhp\Git\WorktreeCleanup;
 use Celyes\RalphPhp\Log\AttemptLog;
 use Celyes\RalphPhp\Log\LogWipe;
 use Celyes\RalphPhp\Memory\AttemptContext;
@@ -44,7 +35,6 @@ use Celyes\RalphPhp\State\GenerationRecord;
 use Celyes\RalphPhp\State\LifecycleState;
 use Celyes\RalphPhp\State\Phase;
 use Celyes\RalphPhp\State\RunRecord;
-use Celyes\RalphPhp\State\WorktreeOwnership;
 use Celyes\RalphPhp\Support\Clock;
 use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Support\SystemClock;
@@ -53,48 +43,37 @@ use Celyes\RalphPhp\Tasks\ChecklistFile;
 use Celyes\RalphPhp\Tasks\ChecklistSnapshot;
 use Celyes\RalphPhp\Tasks\Task;
 use Celyes\RalphPhp\Tasks\TaskSnapshot;
-use Celyes\RalphPhp\Verification\ChecksAudit;
-use Celyes\RalphPhp\Verification\Satisfaction;
 use Celyes\RalphPhp\Verification\VerificationReport;
 use Celyes\RalphPhp\Verification\Verifier;
 use InvalidArgumentException;
 
 /**
- * One task, from an empty workspace to a ticked box.
+ * One task, from a briefing to a ticked box.
  *
- * The six phases of PROJECT.md section D, item 3 carried out in order —
- * preparing, executing, verifying, committing, publishing, finalizing — each
- * one a step that already exists and was built and tested on its own in
- * sections C to F. What this class owns is the order, the state written between
- * the steps, and the decisions. Nothing here implements Git, runs a check, or
- * talks to an agent.
+ * The four phases of PROJECT.md section D, item 3 carried out in order —
+ * preparing, executing, verifying, finalizing — each one a step that already
+ * exists and was built and tested on its own in sections C to G. What this
+ * class owns is the order, the state written between the steps, and the
+ * decisions. Nothing here runs a check or talks to an agent.
+ *
+ * **The work happens in the user's own checkout** (section K, item 1). The
+ * workspace a pass hands the agent is the project root, on whatever branch the
+ * user has checked out, and the checks are run in the same place. So there is
+ * no workspace to prepare and none to clean up, nothing is staged, committed or
+ * pushed, and what a finished task leaves behind is changes in the working tree
+ * for its owner to read and commit.
  *
  * **The agent does not decide anything.** A zero exit code gets the work
  * verified, and that is all it buys. The task's box is ticked only once the
- * configured checks have passed, a commit or a justified no-change result has
- * been recorded, and any required push has succeeded — PROJECT.md section 4
- * read as a sequence, and section G, item 7 read as a condition.
- *
- * **Nor do the checks, entirely.** They pass against the suite the diff leaves
- * behind, so between staging and the commit the diff itself is read for changes
- * that weaken that suite, and a pass whose work would delete a test, empty one
- * or exclude a path from a tool stops with the patch kept for review rather
- * than committing on the strength of a green run (section G, item 5).
- *
- * **An empty diff decides nothing either.** A task can be asked for and
- * already be done, and that is a verified outcome rather than an empty commit
- * (section G, item 6) — but only once the facts are collected and read: an
- * empty index with green checks is equally what an agent that ticked the
- * checklist in its own workspace leaves behind. So the case is made, written
- * down beside the attempt's logs, and refused where something contradicts it.
+ * configured checks have passed — PROJECT.md section 4 read as a sequence, and
+ * section G, item 7 read as a condition.
  *
  * **Every exit records what it found.** A pass that throws its way out of a
  * phase still ends with a row saying which phase that was, a blocker naming the
- * next action, the workspace kept for inspection, and the agent's claim stored
- * as a claim. What it must never do is leave a pass recorded as `running` by a
- * process that has stopped, which is why the body sits inside a `try` whose
- * `catch` records the refusal and whose `finally` writes the attempt up and
- * sweeps the workspace.
+ * next action, and the agent's claim stored as a claim. What it must never do
+ * is leave a pass recorded as `running` by a process that has stopped, which is
+ * why the body sits inside a `try` whose `catch` records the refusal and whose
+ * `finally` writes the attempt up.
  *
  * **A failing check is tried again; nothing else is.** While the configured
  * checks decide against the work and the task's budget still has room, the pass
@@ -103,46 +82,27 @@ use InvalidArgumentException;
  * other way a pass can go wrong is left alone — see
  * {@see TaskResult::invitesAnotherAttempt()} for which, and why.
  *
- * **A stop is taken between phases, and never after a commit.** Nothing in the
- * middle of a phase is abandoned, and nothing a cancelled command said is held
- * against the work: a step that refused while the run was stopping is recorded
- * as the interruption it was, with its own complaint kept as the detail. A run the user
- * interrupted puts the task down at the next phase boundary and records
- * `interrupted` rather than `failed` — resumable, workspace kept, attempt
- * counted (PROJECT.md section H, item 4). The boundaries stop at the commit:
- * once there is a commit, the few milliseconds left in the pass are spent
- * finishing it, because a pass abandoned between a commit and the row that
- * records it is the one state resume has to guess about, and a pass abandoned
- * between the commit and the checkbox is work a user cannot see they have.
+ * **A stop is taken between phases.** Nothing in the middle of a phase is
+ * abandoned, and nothing a cancelled command said is held against the work: a
+ * step that refused while the run was stopping is recorded as the interruption
+ * it was, with its own complaint kept as the detail. A run the user interrupted
+ * puts the task down at the next phase boundary and records `interrupted`
+ * rather than `failed` — resumable, the agent's changes left where they are,
+ * attempt counted (PROJECT.md section H, item 4). The last boundary is before
+ * the checkbox: once the checks have passed, the few milliseconds left in the
+ * pass are spent writing the box, because a pass abandoned between a green
+ * suite and the tick is work a user cannot see they have.
  *
  * **A pass that owes only the checklist write is not attempted again at all.**
  * The write to the user's file is the last thing a pass does and the only one
- * that can fail with everything else already durable, so it is recorded as a
- * plan before it is made ({@see \Celyes\RalphPhp\State\ChecklistStore}). A pass
+ * that can fail with everything else already done, so it is recorded as a plan
+ * before it is made ({@see \Celyes\RalphPhp\State\ChecklistStore}). A pass
  * found with that plan still outstanding goes straight to
- * {@see self::finishTheChecklist()}: no workspace, no agent, no checks, no
- * second commit, and no attempt spent — section G, item 8.
+ * {@see self::finishTheChecklist()}: no agent, no checks, and no attempt spent
+ * — section G, item 8.
  */
 final class TaskPass
 {
-    /**
-     * The generation whose workspace is already gone.
-     *
-     * The only mutable state on a pass, and it exists because cleanup is
-     * reached from two directions: {@see self::finalize()} runs it as the last
-     * ordered step of a completion, and the `finally` blocks run it for every
-     * outcome that never gets there. Both must be present — a pass that
-     * completed must not leave a checkout behind, and a pass that failed,
-     * blocked or was interrupted must still have its workspace *assessed* so
-     * the reason it is being kept reaches the log — and without this they would
-     * both run for the same successful pass and report it twice.
-     *
-     * Set only when there is nothing left at the path, never when a workspace
-     * was kept: a pass whose first attempt failed keeps its checkout on
-     * purpose, and the attempt that then passes removes that same directory.
-     */
-    private ?string $cleaned = null;
-
     /**
      * @param VerificationSnapshot $checks the run's frozen checks, read off the
      *        run's row rather than out of the configuration, so that a worker's
@@ -162,12 +122,6 @@ final class TaskPass
      *        task whose attempts ran out — would be no retry at all. Fixed when
      *        the pass is built, so a retry grants one allowance rather than an
      *        endless one.
-     * @param SharedBranch|null $shared the branch the run established for every
-     *        task to commit to, in shared-branch mode; null in per-task mode,
-     *        where a branch belongs to a pass and is named after it. Fixed when
-     *        the pass is built because it is the run's and not the task's: it
-     *        was created or validated once, before the first task
-     *        ({@see \Celyes\RalphPhp\Git\SharedBranches}, section K, item 3).
      */
     public function __construct(
         private readonly Configuration $configuration,
@@ -177,24 +131,22 @@ final class TaskPass
         private readonly AgentSelection $agent,
         private readonly ExecutionAdapter $adapter,
         private readonly Verifier $verifier,
-        private readonly BaseCommit $base,
         private readonly VerificationSnapshot $checks,
         private readonly Secrets $secrets,
         private readonly ?Output $terminal = null,
         private readonly Clock $clock = new SystemClock(),
         private readonly Interruptions $interruptions = new Interruptions(),
         private readonly int $forgivenAttempts = 0,
-        private readonly ?SharedBranch $shared = null,
     ) {
     }
 
     /**
      * Carry out one task.
      *
-     * Returns rather than throws for everything a pass can record: a refused
-     * branch, drift the auditor will not put back, a failing check, a rejected
-     * push, and an agent that asked a question are all outcomes, and what to do
-     * about them is the loop's decision. What does come out as an exception is a
+     * Returns rather than throws for everything a pass can record: a failing
+     * check, a checklist that could not be written and an agent that asked a
+     * question are all outcomes, and what to do about them is the loop's
+     * decision. What does come out as an exception is a
      * failure to *record* — a state database that cannot be written — because a
      * pass whose outcome was not stored is one nothing can reason about later.
      *
@@ -221,25 +173,15 @@ final class TaskPass
 
         $record = $this->open($task, $recorded);
 
-        // Before a budget is measured or a workspace is made: a pass whose work
-        // is recorded and whose checklist write is still outstanding owes one
-        // line in a Markdown file. Attempting the task again would re-invoke
-        // the agent against work that is already committed (section G, item 8).
+        // Before a budget is measured or an agent is invoked: a pass whose
+        // checks have passed and whose checklist write is still outstanding
+        // owes one line in a Markdown file. Attempting the task again would
+        // re-invoke the agent over work that is already done and verified
+        // (section G, item 8).
         $owed = $this->owedChecklistWrite($record);
 
         if ($owed !== null) {
             return $this->finishTheChecklist($task, $snapshot, $record, $owed);
-        }
-
-        // And before that, the other thing a pass can owe on its own: a push
-        // that the remote refused, or one a stop arrived in the middle of
-        // (section H, item 7). The commit is made and the checks have passed,
-        // so an attempt would invoke the agent over work that is already in the
-        // repository and commit it a second time — which is the duplicate
-        // acceptance criterion 6 rules out, arriving by a different route than
-        // the crash of item 5.
-        if ($record->awaitsPublication()) {
-            return $this->finishThePublication($task, $snapshot, $record);
         }
 
         $unverified = null;
@@ -268,7 +210,7 @@ final class TaskPass
             $began = $this->clock->now()->getTimestamp();
 
             try {
-                $result = $this->carryOut($task, $recorded, $snapshot, $record, $budget, $log);
+                $result = $this->carryOut($task, $snapshot, $record, $budget, $log);
             } finally {
                 // Closed before the wipe, and the wipe after the close: the
                 // file a successful task's logs are deleted from is the one
@@ -374,120 +316,17 @@ final class TaskPass
     }
 
     /**
-     * The commit a pass's workspace starts from, as its own row records it.
+     * One attempt: brief the agent, invoke it, verify what it did, and finish.
      *
-     * Not the run's base, which is only the starting point of the *first* thing
-     * a run builds: in shared-branch mode each task is checked out at the tip
-     * the branch had when the task was taken on, so that it can build on what
-     * the tasks before it committed (PROJECT.md section K, item 4). The row is
-     * the authority either way — it is what a resumed pass is reconciled
-     * against ({@see PassRecovery}) and what the commit message records — so
-     * reading it back is also what keeps those three in step.
-     */
-    private function baseOf(GenerationRecord $record): BaseCommit
-    {
-        return BaseCommit::of($record->baseReference(), $record->baseSha());
-    }
-
-    /**
-     * The commit a pass that is starting now will be built on.
+     * The phases of section D, item 3 in order, with the stop boundaries of
+     * section H, item 4 between them. Everything it does happens in the user's
+     * own checkout: there is no workspace to make, so preparing is loading the
+     * context, and there is nothing to stage, so finishing is the checklist.
      *
-     * The run's base in per-task mode, where every task starts from the one
-     * commit the run resolved and no task can see another's work.
-     *
-     * In shared-branch mode, the tip of the run's branch
-     * ({@see \Celyes\RalphPhp\Git\SharedBranches::continuationOf()}): the
-     * first task of a run finds the branch missing or still at the base and so
-     * gets the base, and every task after a commit gets that commit. Asked per
-     * task rather than once per run because the answer moves as the run
-     * commits, and it is asked *before* the generation's row is written, since
-     * the row is where the answer is kept.
-     *
-     * @throws RalphException when the branch cannot be read or may not be used
-     */
-    private function baseForNewPass(): BaseCommit
-    {
-        if ($this->shared === null) {
-            return $this->base;
-        }
-
-        return $this->workbench->shared()->continuationOf($this->run, $this->base);
-    }
-
-    /**
-     * The branch this pass commits to.
-     *
-     * In per-task mode, the one the pass records or the one its task and the
-     * configured prefix name ({@see \Celyes\RalphPhp\Git\BranchNamer}).
-     *
-     * In shared-branch mode, the branch the *run* established, read off the
-     * run's own record rather than derived again — which is the half of section
-     * K, item 3 that matters after an interruption: `git.shared_branch` and
-     * `git.branch_prefix` are both settings a user may edit between an
-     * interrupted run and the resume that finishes it, and a pass that derived
-     * the name again would commit to a second branch while the first still held
-     * the run's work.
-     *
-     * A pass that already records a branch keeps it either way. A pass started
-     * under one strategy and finished under the other therefore ends up on the
-     * branch holding its commit, not on the branch the new strategy would name.
-     *
-     * @throws RalphException when no usable name can be produced
-     */
-    private function branchOf(GenerationRecord $record, string $description): TaskBranch
-    {
-        $shared = $this->shared;
-        $recorded = $record->branch();
-
-        if ($shared !== null && ($recorded === null || trim($recorded) === '')) {
-            return TaskBranch::shared($record->generation(), $shared->name());
-        }
-
-        return $this->workbench->namer()->forRecord($record, $description);
-    }
-
-    /**
-     * Whether the pass may use the branch it is named after.
-     *
-     * Two strategies, one question, and the difference is whose branch it is.
-     * In per-task mode {@see \Celyes\RalphPhp\Git\TaskBranches} decides from
-     * the pass's own row and from every other pass's: a name another generation
-     * records is taken. In shared-branch mode that rule is the wrong one by
-     * construction — every task of the run commits to the branch the *run*
-     * established — so {@see \Celyes\RalphPhp\Git\SharedBranches} answers
-     * instead, from the run's branch and the commit the pass's workspace starts
-     * at (section K, item 3).
-     *
-     * A pass whose row already records a branch other than the run's shared one
-     * keeps the per-task reading. That is a pass started under the other
-     * strategy and interrupted, and the branch holding its commit is its own; a
-     * run that moved it onto the shared branch would be renaming its way out of
-     * a record this package wrote, which is the one thing a resumed pass must
-     * never do ({@see \Celyes\RalphPhp\Git\BranchNamer}).
-     *
-     * @throws RalphException when the branch is not this pass's to use
-     */
-    private function branchFor(TaskBranch $branch, GenerationRecord $record): BranchOwnership
-    {
-        $shared = $this->shared;
-
-        if ($shared !== null && $branch->value() === $shared->value()) {
-            return $this->workbench->shared()->requireForPass($shared, $branch, $record);
-        }
-
-        return $this->workbench->branches()->require(
-            $branch,
-            $record,
-            $this->journal->generations()->history(),
-        );
-    }
-
-    /**
-     * The pass itself, with the attempt's log open around it.
+     * @throws RalphException when the attempt's own state could not be recorded
      */
     private function carryOut(
         Task $task,
-        TaskSnapshot $recorded,
         ChecklistSnapshot $snapshot,
         GenerationRecord $record,
         ExecutionBudget $budget,
@@ -495,42 +334,26 @@ final class TaskPass
     ): TaskResult {
         $attempt = null;
         $verification = null;
-        $satisfaction = null;
 
         try {
-            // Preparing. The branch is read before the workspace is created: a
-            // name unrelated work holds is a refusal, and finding that out
-            // costs nothing before a checkout and a dependency install.
-            $branch = $this->branchOf($record, $task->description());
-            $ownership = $this->branchFor($branch, $record);
-
-            $worktree = $this->workbench->worktrees()->prepare(
-                $record->generation(),
-                $this->baseOf($record),
-            );
-            $record = $this->journal->generations()->recordWorktree(
-                $record,
-                $this->ownershipOf($record, $worktree),
-            );
-            $log->note('workspace ' . $worktree->describe());
-
-            $preparation = $this->workbench->preparer()->prepare($worktree, $log);
-
-            if (!$preparation->isEmpty()) {
-                $log->note('prepared: ' . $preparation->describe());
-            }
+            // Preparing. The workspace is the project itself (section K, item
+            // 1), so what there is to prepare is the briefing: the project's
+            // own context file and whatever bounded memory the earlier attempts
+            // left (section D, item 5).
+            $workspace = Workspace::at($this->configuration->projectRoot());
+            $log->note('workspace ' . $workspace->path());
 
             $context = $this->workbench->context()->load($this->configuration, $task);
 
-            // Before the attempt is spent: a run stopped while a worktree was
-            // being checked out has not tried the task, and counting an attempt
+            // Before the attempt is spent: a run stopped while the briefing was
+            // being read has not tried the task, and counting an attempt
             // against it would shorten its life for something that was not its
             // doing.
             $this->stopIfInterrupted('the agent was invoked');
 
             // The attempt is spent here and not before. Everything above can
             // fail with the agent never having been invoked, and an attempt
-            // counted against a task whose workspace could not be made would
+            // counted against a task whose context could not be read would
             // shorten that task's life for a reason that was not its own.
             $record = $this->journal->generations()->beginAttempt($record);
             $attempt = $this->journal->attempts()->begin($record, $this->run->rowId(), $log->path());
@@ -539,38 +362,27 @@ final class TaskPass
             $record = $this->journal->generations()->enterPhase($record, Phase::Executing);
             $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Executing);
 
-            $before = $this->workbench->auditor()->observe($worktree);
-            $result = $this->invoke($task, $record, $attempt, $worktree, $context, $budget, $log);
+            $result = $this->invoke($task, $record, $attempt, $workspace, $context, $budget, $log);
             $attempt = $this->journal->attempts()->recordClaim($attempt, $result->claim());
-
-            // Before the workspace is read back. A stopped worker's result is
-            // already cancelled, and the audit below asks Git several questions
-            // the stop would cut short too — so an interruption reported as a
-            // workspace Git could not read would bury what actually happened.
-            $this->stopIfInterrupted('the workspace was read back');
-
-            // What the worker did to the repository, put back or refused,
-            // before anything is verified against it.
-            $this->workbench->auditor()->require($record, $worktree, $branch, $before, $log);
-            $record = $this->journal->generations()->get($record->generation());
 
             if (!$result->hasCandidate()) {
                 return $this->settled($task, $record, $attempt, $result, $log);
             }
 
-            // And again after it: the checks would otherwise be run against a
-            // workspace nobody is going to commit, and a stop arriving during
-            // them would report the project's own test suite as failing.
+            // Asked before the checks rather than after the agent: a stopped
+            // worker's result is already cancelled, and running the project's
+            // suite against a workspace nobody is going to look at would report
+            // the suite as failing for a reason that is the stop's.
             $this->stopIfInterrupted('the checks were run');
 
-            // Verifying: the configured checks, run against the workspace by
+            // Verifying: the configured checks, run against the project by
             // something that is not the worker.
             $record = $this->journal->generations()->enterPhase($record, Phase::Verifying);
             $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Verifying);
 
             $checked = $this->verifier->verify(
                 $this->checks->commands(),
-                $worktree->path(),
+                $workspace->path(),
                 $log,
                 // The run's known secrets, so the excerpt a failing check is
                 // recorded with does not carry one into the state store, the
@@ -597,109 +409,20 @@ final class TaskPass
             }
 
             // The last boundary a stop is taken at. Past this point the pass
-            // may hold a commit, and finishing it costs milliseconds while
-            // abandoning it would leave work recorded nowhere a user can see.
-            $this->stopIfInterrupted('the work was staged for a commit');
+            // has earned its box and writing it costs milliseconds, while
+            // abandoning it would leave verified work with nothing in the
+            // checklist to say so.
+            $this->stopIfInterrupted('the task was checked off');
 
-            // Committing. Staging is a reading and happens either way; the
-            // phase is only entered when there is something to commit, because
-            // a task found already satisfied is a verified no-change result
-            // rather than an empty commit.
-            $staged = $this->workbench->stager()->stage($worktree, $log);
-
-            if ($staged->isEmpty()) {
-                // An empty index is not evidence of anything on its own, so the
-                // case for completing the task without a commit is collected,
-                // written down beside the attempt's logs, and read for what
-                // contradicts it (section G, item 6).
-                $satisfaction = $this->workbench->satisfaction()->audit(
-                    $worktree,
-                    $attempt->number(),
-                    $this->baseOf($record),
-                    $this->workbench->auditor()->observe($worktree),
-                    $staged,
-                    $verification,
-                    $result->claim(),
-                    $this->workbench->logs()->satisfactionRecord($record->generation(), $attempt->number()),
-                    $log,
-                );
-
-                if ($satisfaction->isBlocking()) {
-                    return $this->unsatisfied($task, $record, $attempt, $result, $verification, $satisfaction, $log);
-                }
-
-                $record = $this->journal->generations()->recordNoChange($record);
-            } else {
-                // What the checks passed against is the suite this diff leaves
-                // behind, so the diff is read before it becomes a commit: a
-                // change that weakens the project's own verification stops the
-                // pass with the patch kept for review (section G, item 5).
-                $audit = $this->workbench->checks()->audit(
-                    $this->checks,
-                    $worktree,
-                    $staged,
-                    $this->workbench->logs()->stagedDiff($record->generation(), $attempt->number()),
-                    $log,
-                );
-
-                if ($audit->isBlocking()) {
-                    return $this->weakened($task, $record, $attempt, $result, $verification, $audit, $log);
-                }
-
-                $record = $this->journal->generations()->enterPhase($record, Phase::Committing);
-                $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Committing);
-
-                $record = $this->workbench->committer()->commit(
-                    $record,
-                    $worktree,
-                    $ownership,
-                    $staged,
-                    CommitMessage::forGeneration($record, $recorded),
-                    $log,
-                )->recorded();
-            }
-
-            // Publishing, when the configuration asks for it.
-            if ($record->push()->isOutstanding()) {
-                $record = $this->journal->generations()->enterPhase($record, Phase::Publishing);
-                $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Publishing);
-
-                $publication = $this->workbench->publisher()->publish($record, $log);
-                $record = $publication->recorded();
-
-                if ($publication->hasFailed()) {
-                    return $this->unpublished(
-                        $task,
-                        $record,
-                        $attempt,
-                        $result,
-                        $verification,
-                        $publication->error(),
-                        $log,
-                    );
-                }
-            }
-
-            return $this->finalize(
-                $task,
-                $snapshot,
-                $record,
-                $attempt,
-                $result,
-                $verification,
-                $staged,
-                $log,
-                $satisfaction,
-            );
+            return $this->finalize($task, $snapshot, $record, $attempt, $result, $verification, $log);
         } catch (InterruptionException $stopped) {
             return $this->interrupted($task, $record, $attempt, $verification, $stopped, $log);
         } catch (RalphException $refusal) {
             // A step that refused while the run was stopping refused *because*
             // the run was stopping: a stop cancels every command the package
-            // starts, so Git is the thing most likely to complain and "the
-            // commit could not be created" would send a reader to look at
-            // their repository. The step's own words are kept as the detail;
-            // what the pass is recorded as is interrupted.
+            // starts, so "the checks could not be run" would send a reader to
+            // look at their project. The step's own words are kept as the
+            // detail; what the pass is recorded as is interrupted.
             $interruption = $this->interruptions->requested();
 
             if ($interruption !== null) {
@@ -716,49 +439,16 @@ final class TaskPass
             return $this->refused($task, $record, $attempt, $verification, $refusal, $log);
         } finally {
             $this->remember($record, $attempt);
-            $this->cleanUp($record, $log);
         }
-    }
-
-    /**
-     * What the row should say about the workspace this attempt is using.
-     *
-     * Ordinarily whatever the preparation reported. The exception is a pass
-     * attempting a task again: the directory its last attempt created is still
-     * there — kept on purpose, as the evidence a failing check leaves behind —
-     * so preparation can only report having adopted it, and recording that
-     * would hand the pass's own workspace to nobody. Cleanup removes only what
-     * a pass created ({@see \Celyes\RalphPhp\Git\WorktreeCleaner}), so a task
-     * that passed on its second attempt would leave a checkout behind where one
-     * that passed on its first did not.
-     *
-     * The row's own answer is kept when it already names this path as created,
-     * which is not a guess about the directory: it is what this pass wrote when
-     * it made it.
-     */
-    private function ownershipOf(GenerationRecord $record, TaskWorktree $worktree): WorktreeOwnership
-    {
-        $recorded = $record->worktree();
-
-        return $recorded->isOwned() && $recorded->isAt($worktree->path())
-            ? $recorded
-            : $worktree->ownership();
     }
 
     /**
      * Open the pass: record the task as read, choose its generation, and get
      * the row it will be worked on through.
      *
-     * A pass being continued keeps its history, its branch, its attempt count
-     * and its base commit; a reopened task gets a new generation with its own
-     * branch, which is what keeps the completed one intact (PROJECT.md
-     * section C, item 8).
-     *
-     * The base is written once, here, and only for a pass that is starting.
-     * Everything afterwards reads it back off the row ({@see self::baseOf()}),
-     * so a resumed pass is prepared, verified and committed against the commit
-     * it was originally built on rather than against whatever the branch holds
-     * by then.
+     * A pass being continued keeps its history and its attempt count; a
+     * reopened task gets a new generation, which is what keeps the completed
+     * one intact (PROJECT.md section C, item 8).
      *
      * @throws RalphException when the rows cannot be written
      */
@@ -772,15 +462,10 @@ final class TaskPass
         );
 
         if ($selection->continues() === null) {
-            $base = $this->baseForNewPass();
-
             return $this->journal->generations()->start(
                 $selection->generation(),
                 $recorded,
                 AgentRecord::of($this->agent),
-                $base->reference(),
-                $base->sha(),
-                TaskPublisher::expectationFor($this->configuration),
                 $this->run->rowId(),
             );
         }
@@ -813,7 +498,7 @@ final class TaskPass
         Task $task,
         GenerationRecord $record,
         AttemptRecord $attempt,
-        TaskWorktree $worktree,
+        Workspace $workspace,
         AttemptContext $context,
         ExecutionBudget $budget,
         AttemptLog $log,
@@ -825,7 +510,7 @@ final class TaskPass
             $record->generation(),
             $attempt->number(),
             $task,
-            $worktree->workspace(),
+            $workspace,
             $context,
             $budget,
             $evidence,
@@ -838,17 +523,16 @@ final class TaskPass
     }
 
     /**
-     * The end of a pass whose work was verified, committed and published.
+     * The end of a pass whose work the checks passed.
      *
-     * PROJECT.md section G, item 7 in both its halves. The condition first:
-     * the checks, the Git requirements and any required publication are read
-     * off the evidence as one reading ({@see CompletionEvidence::unmet()})
-     * before the checklist is touched, so what permits the tick is a question
-     * asked here rather than a property of how the pass happened to arrive. The
-     * sequence above already guarantees every one of them, which is exactly why
-     * the reading is cheap and worth having: the one write this package makes
-     * to a file the user owns should not depend on nobody ever reordering the
-     * code above it.
+     * PROJECT.md section G, item 7 in both its halves. The condition first: the
+     * checks are read off the evidence as one reading
+     * ({@see CompletionEvidence::unmet()}) before the checklist is touched, so
+     * what permits the tick is a question asked here rather than a property of
+     * how the pass happened to arrive. The sequence above already guarantees
+     * it, which is exactly why the reading is cheap and worth having: the one
+     * write this package makes to a file the user owns should not depend on
+     * nobody ever reordering the code above it.
      *
      * Then the record: every fact the tick rests on is kept together beside the
      * attempt's logs, because by the end of a pass they are spread across the
@@ -870,9 +554,7 @@ final class TaskPass
         AttemptRecord $attempt,
         ExecutionResult $result,
         VerificationReport $verification,
-        StagedChanges $staged,
         AttemptLog $log,
-        ?Satisfaction $satisfaction = null,
     ): TaskResult {
         $record = $this->journal->generations()->enterPhase($record, Phase::Finalizing);
         $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Finalizing);
@@ -881,10 +563,7 @@ final class TaskPass
             $record,
             $task->description(),
             $attempt->number(),
-            $this->baseOf($record),
             $verification,
-            $staged,
-            $satisfaction,
             $result->claim(),
             $this->configuration->tasksPath(),
         );
@@ -921,7 +600,6 @@ final class TaskPass
                 ),
                 $verification,
                 $blocker->reason(),
-                $satisfaction,
                 $this->keep($evidence, $record, $attempt, $log),
             );
         }
@@ -936,29 +614,13 @@ final class TaskPass
             $this->milliseconds($result),
         );
 
-        // The last ordered step of a completion, and it is here rather than in
-        // the `finally` for the reason section K, item 6 gives: the commit, any
-        // required push, this pass's row and the user's checklist are all
-        // durable above this line, so the checkout the work was done in is no
-        // longer the only copy of anything and removing it is the finish of the
-        // task rather than a risk to it. Its outcome goes into the evidence,
-        // which is what makes a record of a ticked box also a record of where
-        // the workspace went.
-        $cleanup = $this->cleanUp($record, $log);
-        $record = $this->journal->generations()->find($record->generation()) ?? $record;
-
-        if ($cleanup !== null) {
-            $evidence = $evidence->cleanedUp($cleanup);
-        }
-
         return TaskResult::of(
             $task,
-            $record,
+            $this->journal->generations()->find($record->generation()) ?? $record,
             $attempt,
             $verification,
             true,
-            $record->isNoChange() ? $this->describeNoChange($satisfaction) : 'verified and committed',
-            $satisfaction,
+            'verified in the working tree',
             $this->keep($evidence, $record, $attempt, $log),
         );
     }
@@ -966,10 +628,9 @@ final class TaskPass
     /**
      * Refuse a tick the pass has not earned, with what is missing.
      *
-     * Blocked rather than failed when it happens, like the other two readings
-     * that stop a green run ({@see self::weakened()}, {@see self::unsatisfied()})
-     * and for the same reason: nothing here is a failing check, so there is
-     * nothing a further attempt would be told that it does not already know.
+     * Blocked rather than failed when it happens: nothing here is a failing
+     * check, so there is nothing a further attempt would be told that it does
+     * not already know.
      */
     private function unearned(CompletionEvidence $evidence): ?Blocker
     {
@@ -1120,9 +781,8 @@ final class TaskPass
             return Blocker::raised(
                 'the task is done, but its box could not be ticked: ' . $changed->getMessage(),
                 sprintf(
-                    'The implementation is kept%s and is not repeated. Reconcile %s against the task '
-                        . 'this pass was given, then run `ralph retry %s`.',
-                    $this->keptCommit($record),
+                    'The agent\'s changes are left in the working tree and the work is not repeated. '
+                        . 'Reconcile %s against the task this pass was given, then run `ralph retry %s`.',
                     $this->configuration->tasksPath(),
                     $task->id()->value(),
                 ),
@@ -1145,9 +805,9 @@ final class TaskPass
         return Blocker::raised(
             'the task is done, but its box could not be ticked: ' . $failure->getMessage(),
             sprintf(
-                'The implementation is kept%s and is not repeated: the pass is pending finalization, '
-                    . 'and a resume writes only the box. Make %s writable, then run `ralph resume`.',
-                $this->keptCommit($record),
+                'The agent\'s changes are left in the working tree and the work is not repeated: the '
+                    . 'pass is pending finalization, and a resume writes only the box. Make %s '
+                    . 'writable, then run `ralph resume`.',
                 $this->configuration->tasksPath(),
             ),
         );
@@ -1168,55 +828,41 @@ final class TaskPass
         return Blocker::raised(
             'the task is done, but its box was not ticked: ' . $edited->getMessage(),
             sprintf(
-                'The edit to %s was kept and nothing was overwritten. The implementation is kept%s and '
-                    . 'is not repeated: the pass is pending finalization, and a resume writes only the '
-                    . 'box, against the checklist as it then reads.',
+                'The edit to %s was kept and nothing was overwritten. The agent\'s changes are left in '
+                    . 'the working tree and the work is not repeated: the pass is pending '
+                    . 'finalization, and a resume writes only the box, against the checklist as it '
+                    . 'then reads.',
                 $this->configuration->tasksPath(),
-                $this->keptCommit($record),
             ),
         );
     }
 
     /**
-     * The commit a refused tick leaves behind, phrased for a hint.
-     */
-    private function keptCommit(GenerationRecord $record): string
-    {
-        $sha = $record->commitSha();
-
-        return $sha === null ? '' : ' as commit ' . substr($sha, 0, BaseCommit::SHORT_LENGTH);
-    }
-
-    /**
      * The checklist write this pass still owes, or null when it owes none.
      *
-     * Both halves have to hold. The plan must still be outstanding — that is
-     * the write not having landed — and the pass must be finalizable, which is
-     * the implementation recorded and the publication settled
-     * ({@see GenerationRecord::isFinalizable()}). A pass interrupted before
-     * either of those has work to redo and is not this case; a pass that has
-     * both owes a line in a file.
+     * An outstanding plan is the whole of the answer, and it is why the plan is
+     * recorded before the file is touched ({@see self::plan()}): the row exists
+     * only for a pass whose checks had already passed, and it is still
+     * `pending` only if the write never landed. A pass interrupted before the
+     * checks has work to redo and no plan; a pass with a plan outstanding owes
+     * a line in a file.
      *
      * @throws RalphException when the rows cannot be read
      */
     private function owedChecklistWrite(GenerationRecord $record): ?ChecklistUpdate
     {
-        if (!$record->isFinalizable()) {
-            return null;
-        }
-
         return $this->journal->checklists()->outstandingFor($record);
     }
 
     /**
      * Finish a pass that owes nothing but the write to the user's checklist.
      *
-     * PROJECT.md section G, item 8's second half. Everything an attempt
-     * produces is already recorded, so nothing here prepares a workspace,
-     * invokes the agent, runs a check or commits, and no attempt is spent: a
-     * read-only file must not be able to exhaust the budget of work that has
-     * already passed. The agent's log is reopened rather than replaced, so the
-     * retry reads as the end of the attempt that earned it.
+     * PROJECT.md section G, item 8's second half. The work is done and the
+     * checks have passed, so nothing here invokes the agent or runs a check,
+     * and no attempt is spent: a read-only file must not be able to exhaust the
+     * budget of work that has already passed. The agent's log is reopened
+     * rather than replaced, so the retry reads as the end of the attempt that
+     * earned it.
      *
      * The task is still reconciled first. A pass can sit pending finalization
      * for as long as it takes someone to notice, and in that time the task may
@@ -1245,95 +891,10 @@ final class TaskPass
                 $attempt,
                 $attempt === null ? null : $this->journal->verifications()->reportFor($attempt),
                 $owed,
-                'the box was written; the commit and the checks are the ones this pass already recorded',
+                'the box was written; the checks are the ones this pass already recorded',
                 $log,
             );
         } finally {
-            $this->cleanUp($record, $log);
-            $log->close();
-            $this->wipeLogs($record);
-        }
-    }
-
-    /**
-     * Finish a pass that owes nothing but a push to its remote.
-     *
-     * PROJECT.md section H, item 7. The same shape as
-     * {@see self::finishTheChecklist()} and for the same reason: everything the
-     * task needed has been produced, so nothing here prepares a workspace,
-     * invokes the agent, runs a check or commits, and no attempt is spent. What
-     * {@see TaskPublisher} is handed is the row and only the row, which is what
-     * makes this possible at all — the worktree the commit was made in may well
-     * have been cleaned up, and pushing touches neither a working tree nor an
-     * index.
-     *
-     * A push that succeeds leaves the pass finalizable, and the box is still
-     * owed at that point: the first run stopped at `publishing`, before it ever
-     * planned a checklist write. So this carries straight on to the write
-     * rather than returning and leaving a second resume to notice.
-     *
-     * A push the remote refuses again is recorded again, with the reason it
-     * gave this time, and the task stays unchecked. Nothing is undone: a run
-     * that cannot reach its remote twice has still produced the work, and the
-     * next resume retries the same push.
-     *
-     * @throws RalphException when the outcome cannot be recorded
-     */
-    private function finishThePublication(
-        Task $task,
-        ChecklistSnapshot $snapshot,
-        GenerationRecord $record,
-    ): TaskResult {
-        $attempt = $this->journal->attempts()->latestFor($record);
-        $log = $this->reopen($record, $attempt);
-
-        try {
-            $log->note('resuming publication: ' . $record->push()->describe());
-            $this->announcePublication($task, $record);
-
-            $record = $this->journal->generations()->resumePublishing($record);
-            $verification = $attempt === null ? null : $this->journal->verifications()->reportFor($attempt);
-
-            try {
-                $publication = $this->workbench->publisher()->publish($record, $log);
-            } catch (PublicationException $refused) {
-                // The branch is not where the row says it is, which is section
-                // F, item 9's reconciliation rather than a push that can be
-                // retried. Blocked rather than failed, and the commit is left
-                // exactly where it is: what the publisher refused to do was put
-                // a commit nothing here has seen onto a remote other people
-                // fetch.
-                return $this->unpublishable($task, $record, $attempt, $verification, $refused, $log);
-            }
-
-            $record = $publication->recorded();
-            $log->note('publication: ' . $publication->describe());
-
-            if (!$publication->isSettled()) {
-                $blocker = $this->pushRefused($record, $publication->error());
-                $log->note('still not published: ' . $blocker->reason());
-
-                return $this->stopped(
-                    $task,
-                    $this->journal->generations()->fail($record, $blocker),
-                    $attempt,
-                    $verification,
-                    $blocker->reason(),
-                );
-            }
-
-            return $this->writeTheBox(
-                $task,
-                $snapshot,
-                $this->journal->generations()->resumeFinalizing($record),
-                $attempt,
-                $verification,
-                $this->journal->checklists()->outstandingFor($record),
-                'the push succeeded; the commit and the checks are the ones this pass already recorded',
-                $log,
-            );
-        } finally {
-            $this->cleanUp($record, $log);
             $log->close();
             $this->wipeLogs($record);
         }
@@ -1342,12 +903,13 @@ final class TaskPass
     /**
      * Tick the box and finish a pass that was resumed rather than attempted.
      *
-     * Shared by both resumptions so that the one write this package makes to a
-     * file the user owns happens in a single place, whichever thing the pass
-     * was owing. The task is reconciled first either way: a pass can sit owing
-     * a push or a write for as long as it takes someone to notice, and in that
-     * time the task may have been reworded or removed — in which case nothing
-     * is applied to whatever is on that line now.
+     * Kept apart from {@see self::finalize()} so that the one write this
+     * package makes to a file the user owns is made the same way whether the
+     * pass earned it a moment ago or a run ago. The task is reconciled first
+     * either way: a pass can sit owing its write for as long as it takes
+     * someone to notice, and in that time the task may have been reworded or
+     * removed — in which case nothing is applied to whatever is on that line
+     * now.
      *
      * Reconciled against the plan as well as against the snapshot, because on
      * a resume they answer different questions. The snapshot is this run's
@@ -1357,9 +919,7 @@ final class TaskPass
      * ({@see self::editedWhileOwed()}).
      *
      * @param ChecklistUpdate|null $owed the write already planned, when one
-     *        was; a pass that stopped at `publishing` never got as far as
-     *        planning one, and {@see self::plan()} records it when the time
-     *        comes
+     *        was; {@see self::plan()} records one when the time comes
      *
      * @throws RalphException when the outcome cannot be recorded
      */
@@ -1403,13 +963,6 @@ final class TaskPass
         $this->journal->tasks()->markVerified($task->id());
         $record = $this->journal->generations()->complete($record);
 
-        // The same last step, in the same place in the order, as a first-time
-        // finalization ({@see self::finalize()}): a pass finished on a resume
-        // owes its workspace no differently for having been finished a run
-        // later, and leaving it to the `finally` would make the one guarantee
-        // section K, item 6 asks for hold on one path and not the other.
-        $this->cleanUp($record, $log);
-
         return TaskResult::of(
             $task,
             $this->journal->generations()->find($record->generation()) ?? $record,
@@ -1433,9 +986,9 @@ final class TaskPass
      * find nothing wrong with it.
      *
      * Blocked rather than retried, like every other way the plan's subject can
-     * change: the implementation stays on its branch and is not repeated, and
-     * what has to happen is a person deciding whether the work still satisfies
-     * the task as it now reads.
+     * change: the agent's changes stay in the working tree and are not asked
+     * for again, and what has to happen is a person deciding whether the work
+     * still satisfies the task as it now reads.
      */
     private function editedWhileOwed(Task $task, GenerationRecord $record, ?ChecklistUpdate $owed): ?Blocker
     {
@@ -1450,10 +1003,9 @@ final class TaskPass
                 $this->configuration->tasksPath(),
             ),
             sprintf(
-                'The edit was kept and nothing was overwritten. The implementation is kept%s and is not '
-                    . 'repeated: decide whether it satisfies the task as it now reads, then run '
-                    . '`ralph retry %s`.',
-                $this->keptCommit($record),
+                'The edit was kept and nothing was overwritten. The agent\'s changes are left in the '
+                    . 'working tree and the work is not repeated: decide whether it satisfies the task '
+                    . 'as it now reads, then run `ralph retry %s`.',
                 $task->id()->value(),
             ),
         );
@@ -1463,8 +1015,8 @@ final class TaskPass
      * Reopen the log of the attempt that earned the work being resumed.
      *
      * Reopened rather than replaced, so the retry reads as the end of the
-     * attempt that produced the commit instead of as an attempt of its own. A
-     * pass with no attempt recorded has no log to append to and says what it is
+     * attempt that did the work instead of as an attempt of its own. A pass
+     * with no attempt recorded has no log to append to and says what it is
      * doing on the terminal alone.
      */
     private function reopen(GenerationRecord $record, ?AttemptRecord $attempt): AttemptLog
@@ -1478,68 +1030,6 @@ final class TaskPass
             $record->generation(),
             $attempt->number(),
             $this->terminal,
-        );
-    }
-
-    /**
-     * A pass whose commit the remote would not take, as a blocker.
-     *
-     * One wording for the first refusal and for every retry of it, because the
-     * situation is the same one and the next action does not change: the remote
-     * has to be put right, and what follows is a push and nothing else.
-     */
-    private function pushRefused(GenerationRecord $record, ?string $error): Blocker
-    {
-        return Blocker::raised(
-            sprintf(
-                'the push to %s was refused: %s',
-                (string) $record->push()->remote(),
-                $error ?? 'no reason given',
-            ),
-            sprintf(
-                'The commit is kept on %s and the implementation is not repeated. Resolve the '
-                . 'remote, then run `ralph resume` to retry the push alone.',
-                (string) $record->branch(),
-            ),
-        );
-    }
-
-    /**
-     * A pass whose publication cannot be attempted at all.
-     *
-     * {@see TaskPublisher} refuses to push when the branch is missing or has
-     * moved off the recorded commit, and that is a decision about the
-     * repository rather than a failed push: a retry would refuse identically
-     * for as long as the reference says what it says. Blocked, with the
-     * publisher's own words and hints kept, since they name the commit and the
-     * command that puts the reference back.
-     *
-     * @throws RalphException when the outcome cannot be recorded
-     */
-    private function unpublishable(
-        Task $task,
-        GenerationRecord $record,
-        ?AttemptRecord $attempt,
-        ?VerificationReport $verification,
-        PublicationException $refused,
-        AttemptLog $log,
-    ): TaskResult {
-        $blocker = Blocker::raised(
-            'the commit could not be published: ' . $refused->getMessage(),
-            implode(' ', [
-                ...$refused->hints(),
-                'Nothing was implemented or committed again.',
-            ]),
-        );
-
-        $log->note('not published: ' . $blocker->reason());
-
-        return $this->stopped(
-            $task,
-            $this->journal->generations()->block($record, $blocker),
-            $attempt,
-            $verification,
-            $blocker->reason(),
         );
     }
 
@@ -1558,32 +1048,8 @@ final class TaskPass
             '  %s: %s',
             $style->identifier($task->id()->value()),
             $style->muted(sprintf(
-                '%s; writing only the box%s',
+                '%s; writing only the box, the work is already done and verified',
                 $owed->state()->describe(),
-                $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
-            )),
-        ));
-    }
-
-    /**
-     * Say that the pass is being published rather than attempted.
-     *
-     * The same reason as {@see self::announceFinalization()}, and the same risk
-     * of being misread: a user who enabled pushing and resumed after fixing
-     * their remote is watching for whether the task is about to be implemented
-     * all over again, and this is the line that answers them.
-     */
-    private function announcePublication(Task $task, GenerationRecord $record): void
-    {
-        $style = $this->style();
-
-        $this->terminal?->line(sprintf(
-            '  %s: %s',
-            $style->identifier($task->id()->value()),
-            $style->muted(sprintf(
-                '%s; retrying only the push%s',
-                $record->push()->describe(),
-                $record->commitSha() === null ? '' : ', the implementation is kept' . $this->keptCommit($record),
             )),
         ));
     }
@@ -1666,8 +1132,8 @@ final class TaskPass
      * A candidate implementation the checks decided against.
      *
      * The task stays unchecked and the evidence is stored for the next attempt
-     * to read. The workspace is kept: whoever looks at why a check failed needs
-     * the files that failed it.
+     * to read. Nothing is undone: whoever looks at why a check failed needs the
+     * files that failed it, and they are where the agent left them.
      *
      * **The next action depends on whether this was the last attempt allowed.**
      * While the budget holds, another attempt follows inside this pass and a
@@ -1696,12 +1162,12 @@ final class TaskPass
             'verification failed: ' . $verification->describe(),
             !$budget->isLastAttempt()
                 ? sprintf(
-                    'The work is kept in %s for inspection. Fix it, or run `ralph retry %s` to let the '
-                    . 'agent try again with the failure as evidence.',
-                    (string) $record->worktree()->path(),
+                    'The agent\'s changes are left in the working tree for inspection — read them with '
+                    . '`git diff`. Fix them, or run `ralph retry %s` to let the agent try again with '
+                    . 'the failure as evidence.',
                     $task->id()->value(),
                 )
-                : $this->nothingLeftToTry($task, $record, $budget),
+                : $this->nothingLeftToTry($task, $budget),
         );
 
         $attempt = $this->journal->attempts()->finish(
@@ -1728,169 +1194,24 @@ final class TaskPass
     /**
      * What to do about a task whose attempts are spent.
      *
-     * Both halves of the honest answer. The implementation is still there — the
-     * worktree is kept for exactly this (section F, item 10) — and nothing was
-     * checked off. And another pass needs something to change first: a retry
-     * continues this generation and inherits its attempt count
+     * Both halves of the honest answer. Whatever the agent did is still in the
+     * working tree — nothing was undone and nothing was committed — and nothing
+     * was checked off. And another pass needs something to change first: a
+     * retry continues this generation and inherits its attempt count
      * ({@see \Celyes\RalphPhp\Tasks\GenerationStart::keepsAttemptCount()}),
      * so the two things that do work are a higher limit or a restated task,
      * which is new work with a generation of its own.
      */
-    private function nothingLeftToTry(Task $task, GenerationRecord $record, ExecutionBudget $budget): string
+    private function nothingLeftToTry(Task $task, ExecutionBudget $budget): string
     {
-        $kept = $record->worktree()->path();
-
         return sprintf(
-            '%s, and nothing was checked off. The attempt limit of %d per task is spent, and a retry '
-            . 'continues this pass rather than starting a new one: raise `limits.attempts_per_task`, '
-            . 'or restate the task in %s, then run `ralph run` again. `ralph logs %s` has what the '
-            . 'checks said.',
-            $kept === null ? 'No workspace was prepared for this pass' : 'The work is kept in ' . $kept,
+            'The agent\'s changes are left in the working tree, and nothing was checked off. The '
+            . 'attempt limit of %d per task is spent, and a retry continues this pass rather than '
+            . 'starting a new one: raise `limits.attempts_per_task`, or restate the task in %s, then '
+            . 'run `ralph run` again. `ralph logs %s` has what the checks said.',
             $budget->attempts(),
             $this->configuration->tasksPath(),
             $task->id()->value(),
-        );
-    }
-
-    /**
-     * A verified diff that leaves the project's verification weaker than it
-     * found it.
-     *
-     * Blocked rather than failed, which is the deliberate part. A failing check
-     * is evidence of something wrong with the work, and the next attempt is
-     * given it (section G, item 4); this is not — the checks passed. What is in
-     * question is whether a diff that deletes a test, empties one or excludes a
-     * path from a tool is the change the task asked for, and no number of
-     * further attempts answers that. So the pass stops, the run stops with it,
-     * and the patch is where {@see ChecksAudit::diffPath()} says.
-     *
-     * Nothing is committed and nothing is undone. The workspace is preserved
-     * with the diff still staged, so the same patch can be read from Git as
-     * well as from the file, and a user who decides the change is right can
-     * commit it themselves.
-     */
-    private function weakened(
-        Task $task,
-        GenerationRecord $record,
-        AttemptRecord $attempt,
-        ExecutionResult $result,
-        VerificationReport $verification,
-        ChecksAudit $audit,
-        AttemptLog $log,
-    ): TaskResult {
-        $blocker = Blocker::raised(
-            $audit->summary(),
-            implode(' ', $audit->hints()),
-        );
-
-        $attempt = $this->journal->attempts()->finish(
-            $attempt,
-            AttemptOutcome::Candidate,
-            LifecycleState::Blocked,
-            $result->exitCode(),
-            $this->milliseconds($result),
-            evidence: $audit->evidence(),
-            blocker: $blocker,
-        );
-
-        $log->note('not committed: ' . $audit->summary());
-
-        return $this->stopped(
-            $task,
-            $this->journal->generations()->block($record, $blocker),
-            $attempt,
-            $verification,
-            $audit->summary(),
-        );
-    }
-
-    /**
-     * An empty index whose no-change outcome the facts do not support.
-     *
-     * The counterpart of {@see self::weakened()} on the other side of staging,
-     * and blocked for the same reason: nothing here is a failing check, so
-     * there is nothing a further attempt would be told that it does not
-     * already know. An agent that staged nothing because it ticked the
-     * checklist inside its own workspace, or a workspace that is no longer at
-     * the commit it was handed, is a question for a person — and the one answer
-     * the package must not give is to complete the task because the checks were
-     * green and the diff was empty.
-     *
-     * The evidence is where {@see Satisfaction::recordPath()} says, and the
-     * workspace is kept, so what was collected can be read beside the files it
-     * was collected from.
-     */
-    private function unsatisfied(
-        Task $task,
-        GenerationRecord $record,
-        AttemptRecord $attempt,
-        ExecutionResult $result,
-        VerificationReport $verification,
-        Satisfaction $satisfaction,
-        AttemptLog $log,
-    ): TaskResult {
-        $blocker = Blocker::raised($satisfaction->summary(), implode(' ', $satisfaction->hints()));
-
-        $attempt = $this->journal->attempts()->finish(
-            $attempt,
-            AttemptOutcome::Candidate,
-            LifecycleState::Blocked,
-            $result->exitCode(),
-            $this->milliseconds($result),
-            evidence: $satisfaction->evidence(),
-            blocker: $blocker,
-        );
-
-        $log->note('not completed: ' . $satisfaction->summary());
-
-        return $this->stopped(
-            $task,
-            $this->journal->generations()->block($record, $blocker),
-            $attempt,
-            $verification,
-            $satisfaction->summary(),
-            $satisfaction,
-        );
-    }
-
-    /**
-     * Verified and committed work the remote would not take.
-     *
-     * The local commit is kept and the task is left unchecked, because a push
-     * the configuration requires is part of what completes a task. The phase on
-     * the row stays `publishing` and the commit is recorded, which is what
-     * {@see self::finishThePublication()} reads to retry the publication
-     * without the implementation being repeated (section H, item 7).
-     */
-    private function unpublished(
-        Task $task,
-        GenerationRecord $record,
-        AttemptRecord $attempt,
-        ExecutionResult $result,
-        VerificationReport $verification,
-        ?string $error,
-        AttemptLog $log,
-    ): TaskResult {
-        $blocker = $this->pushRefused($record, $error);
-
-        $attempt = $this->journal->attempts()->finish(
-            $attempt,
-            AttemptOutcome::Candidate,
-            LifecycleState::Failed,
-            $result->exitCode(),
-            $this->milliseconds($result),
-            evidence: FailureEvidence::of('push refused', $error ?? 'no reason given'),
-            blocker: $blocker,
-        );
-
-        $log->note('published: no — ' . $blocker->reason());
-
-        return $this->stopped(
-            $task,
-            $this->journal->generations()->fail($record, $blocker),
-            $attempt,
-            $verification,
-            $blocker->reason(),
         );
     }
 
@@ -1920,11 +1241,12 @@ final class TaskPass
      *
      * `interrupted` and not `failed`, which is the whole reason this is not
      * {@see self::refused()}: nothing was wrong with the work, the attempt is
-     * still retryable ({@see AttemptOutcome::Cancelled}), the workspace is kept
-     * as it stood, and `ralph resume` continues from the phase on the row.
+     * still retryable ({@see AttemptOutcome::Cancelled}), whatever the agent
+     * wrote is left where it is, and `ralph resume` continues from the phase on
+     * the row.
      *
-     * The attempt is closed if one had been begun — a stop between the
-     * workspace and the agent leaves none — and the evidence says what stopped
+     * The attempt is closed if one had been begun — a stop between the briefing
+     * and the agent leaves none — and the evidence says what stopped
      * it rather than what was wrong with it, because the next attempt reads
      * this trail and being told about a Ctrl+C would teach it nothing about the
      * task.
@@ -1992,12 +1314,11 @@ final class TaskPass
     /**
      * A step that refused.
      *
-     * Everything the Git steps and the stores raise comes here: a branch owned
-     * by unrelated work, drift the auditor will not put back, an index that
-     * cannot be staged, a commit Git rejected. The pass fails with the refusal
-     * as the blocker's reason and the phase it happened in left on the row,
-     * which together are what `ralph logs` prints and what tells a reviewer
-     * where to look.
+     * Everything the steps and the stores raise comes here: a context file
+     * that cannot be read, a check command that is not installed, a row that
+     * cannot be written. The pass fails with the refusal as the blocker's
+     * reason and the phase it happened in left on the row, which together are
+     * what `ralph logs` prints and what tells a reviewer where to look.
      *
      * @throws RalphException when the failure cannot itself be recorded, in
      *         which case there is nothing useful left to do with it
@@ -2059,7 +1380,7 @@ final class TaskPass
         $blocker = Blocker::raised(
             sprintf('%s is spent, and the task was passed over', $budget->exhausted() ?? 'the budget for this task'),
             $budget->attemptsRemaining() < 1
-                ? $this->nothingLeftToTry($task, $record, $budget)
+                ? $this->nothingLeftToTry($task, $budget)
                 : sprintf(
                     'The run\'s own time budget ran out rather than this task\'s attempts: run '
                     . '`ralph run` again to carry on with it, or read `ralph logs %s` first.',
@@ -2104,19 +1425,9 @@ final class TaskPass
         ?AttemptRecord $attempt,
         ?VerificationReport $verification,
         string $reason,
-        ?Satisfaction $satisfaction = null,
         ?CompletionEvidence $completion = null,
     ): TaskResult {
-        return TaskResult::of(
-            $task,
-            $record,
-            $attempt,
-            $verification,
-            false,
-            $reason,
-            $satisfaction,
-            $completion,
-        );
+        return TaskResult::of($task, $record, $attempt, $verification, false, $reason, $completion);
     }
 
     /**
@@ -2150,65 +1461,6 @@ final class TaskPass
     }
 
     /**
-     * Remove the workspace, or say why it is being kept.
-     *
-     * The cleaner decides, and it is handed the pass's row **as the store now
-     * holds it** rather than the copy the caller has: whether a workspace may
-     * be removed turns on the pass being closed, and the row is where that
-     * became true. A completed pass's workspace goes, together with its
-     * `git worktree` registration; a failed, blocked or interrupted one stays
-     * with its reason noted (PROJECT.md section F, item 10).
-     *
-     * **Ordering, which is the guarantee of section K, item 6.** Every caller
-     * reaches this after the pass's outcome is durable — {@see self::finalize()}
-     * after the commit, any required push, `complete()` and the write to the
-     * user's checklist, and the `finally` blocks after whatever outcome was
-     * recorded instead. So a removal that fails, or Git refusing one, can cost
-     * a task nothing: there is nothing left that the directory is the only copy
-     * of, which is also why it is safe for this to swallow its failures.
-     *
-     * Runs at most once per pass. Whichever caller gets here first does the
-     * work, and the other finds it done ({@see self::$cleaned}).
-     *
-     * @return WorktreeCleanup|null what was decided, or null when this pass's
-     *         workspace had already been dealt with or the decision could not
-     *         be reached at all
-     */
-    private function cleanUp(GenerationRecord $record, AttemptLog $log): ?WorktreeCleanup
-    {
-        $generation = $record->generation();
-
-        if ($this->cleaned === $generation->slug()) {
-            return null;
-        }
-
-        try {
-            $final = $this->journal->generations()->find($generation);
-
-            if ($final === null) {
-                return null;
-            }
-
-            $cleanup = $this->workbench->cleaner()->clean($final, $log);
-
-            if (!$cleanup->wasKept()) {
-                // Latched only once there is nothing left at the path. A
-                // workspace that was *kept* must stay askable: a pass whose
-                // first attempt failed keeps its checkout on purpose, and the
-                // attempt that then passes has to be able to remove the same
-                // directory the earlier one was told to leave alone.
-                $this->cleaned = $generation->slug();
-            }
-
-            return $cleanup;
-        } catch (RalphException $failure) {
-            $log->note('the workspace could not be cleaned up: ' . $failure->getMessage());
-
-            return null;
-        }
-    }
-
-    /**
      * Delete this pass's own logs, when the project has asked for that.
      *
      * PROJECT.md section K, item 11. The decision belongs to
@@ -2216,14 +1468,14 @@ final class TaskPass
      * files are, and when the deletion may be written down — and the only thing
      * decided here is *when it is asked*, which is the part the item makes a
      * precondition: after the attempt's log has been closed, and so after the
-     * commit, any required push, the pass's row and the write to the user's
-     * checklist are all durable. A pass that ended any other way is refused by
-     * the wiper, so this is safe to call from the ordinary end of an attempt as
-     * well as from the two resumptions.
+     * checks, the pass's row and the write to the user's checklist are all
+     * durable. A pass that ended any other way is refused by the wiper, so this
+     * is safe to call from the ordinary end of an attempt as well as from a
+     * resumed finalization.
      *
-     * The row is re-read rather than taken from the caller, for the same reason
-     * {@see self::cleanUp()} re-reads it: whether a pass's logs may go turns on
-     * the pass being completed, and the row is where that became true.
+     * The row is re-read rather than taken from the caller: whether a pass's
+     * logs may go turns on the pass being completed, and the row is where that
+     * became true.
      *
      * Nothing is noted on the attempt's log, which is closed by now and is
      * usually one of the files being deleted; the terminal is where a user sees
@@ -2249,20 +1501,6 @@ final class TaskPass
 
             return null;
         }
-    }
-
-    /**
-     * What the terminal says about a task that needed no change.
-     *
-     * The audit's own words where there is an audit, so the line a user reads
-     * names the base commit the checks passed against rather than only
-     * asserting that they agreed. A pass completed without one — which the
-     * loop has no path to today, and which a later caller could — says the
-     * plain thing instead of claiming evidence that was never collected.
-     */
-    private function describeNoChange(?Satisfaction $satisfaction): string
-    {
-        return $satisfaction?->summary() ?? 'already satisfied, and the checks agree';
     }
 
     /**

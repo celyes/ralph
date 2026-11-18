@@ -8,8 +8,8 @@ namespace Celyes\RalphPhp\Config;
  * A loaded project configuration.
  *
  * Immutable and free of I/O: reading the file is the loader's job, and
- * everything downstream — agent selection, the checklist reader, Git actions,
- * verification, the limits — takes its settings from here.
+ * everything downstream — agent selection, the checklist reader, verification,
+ * the limits — takes its settings from here.
  *
  * Paths are exposed both as written and resolved against the project root, so
  * messages can quote what the user configured while the runner uses an
@@ -31,8 +31,6 @@ final class Configuration
         private readonly string $defaultAgent,
         private readonly array $agents,
         private readonly array $checks,
-        private readonly WorkspaceSettings $workspace,
-        private readonly GitSettings $git,
         private readonly Limits $limits,
         private readonly LogSettings $logs,
     ) {
@@ -132,20 +130,6 @@ final class Configuration
         return $this->checks;
     }
 
-    /**
-     * What a newly created task worktree needs before the project can be
-     * built, tested or worked on in it.
-     */
-    public function workspace(): WorkspaceSettings
-    {
-        return $this->workspace;
-    }
-
-    public function git(): GitSettings
-    {
-        return $this->git;
-    }
-
     public function limits(): Limits
     {
         return $this->limits;
@@ -183,8 +167,6 @@ final class Configuration
                 static fn (VerificationCommand $check): array => $check->toArray(),
                 $this->checks,
             ),
-            'workspace' => $this->workspace->toArray(),
-            'git' => $this->git->toArray(),
             'limits' => $this->limits->toArray(),
             'logs' => $this->logs->toArray(),
         ];

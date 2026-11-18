@@ -69,7 +69,7 @@ final class InitCommand implements CommandInterface
             $this->helpRow(Defaults::CONFIG_FILE, 'every setting, at its default value'),
             $this->helpRow(Defaults::TASKS_FILE, 'the task checklist, with instructions and no tasks'),
             $this->helpRow(Defaults::CONTEXT_FILE, 'project instructions passed to the agent'),
-            $this->helpRow(Defaults::RUNTIME_DIRECTORY . '/', 'state, logs, memory and task worktrees'),
+            $this->helpRow(Defaults::RUNTIME_DIRECTORY . '/', 'state, logs and memory'),
             $this->helpRow(IgnoreFileWriter::FILE, 'rules for the two above, appended if missing'),
             '',
             'Files that already exist are kept as they are, and the configured task and',
@@ -240,16 +240,13 @@ final class InitCommand implements CommandInterface
      * that configures its checklist elsewhere must be told where its own
      * checklist is.
      *
-     * The commit step is here because leaving it out made the first `ralph run`
-     * of a new project stop: initialisation writes ignore rules into a file the
-     * user owns, a run refuses to start while the checkout holds uncommitted
-     * changes that are not Ralph PHP's own, and the rules it had just written
-     * were exactly such a change. The refusal is correct — a run must not
-     * commit or stash a user's file — so the remedy belongs where the file was
-     * written, before the reader meets a refusal caused by the command that
-     * printed these steps. It appears only when something was in fact written:
-     * the files under `.ralph/` are the package's own, and an untracked one is
-     * never what stops a run.
+     * Nothing here tells the reader to commit the ignore rules. An earlier
+     * release did, because a run refused to start while the checkout held
+     * changes it had not written and the rules it had just appended were
+     * exactly such a change; since section K, item 1 a run works in the
+     * checkout as it finds it and refuses nothing, so the rules are an
+     * ordinary uncommitted change and the reader needs no instruction about
+     * one.
      *
      * @return list<list<string>> steps, each one or more lines
      */
@@ -268,18 +265,11 @@ final class InitCommand implements CommandInterface
                 ),
                 // "checks" starts empty, so this is the one generated setting a
                 // new project really has to decide about: without it a task is
-                // completed on the agent's own result and the commit alone.
-                'and check its "git" and "agent" settings. With no checks, a task is',
-                'completed on the agent\'s reported result and its commit alone.',
+                // completed on the agent's own reported result.
+                'and check its "agent" setting. With no checks, a task is completed',
+                'on the agent\'s own reported result alone.',
             ],
         ];
-
-        if ($report->ignoreFile()->outcome()->wrote()) {
-            $steps[] = [
-                sprintf('Commit %s: a run will not start while the checkout', $report->ignoreFile()->relativePath()),
-                'holds uncommitted changes it did not write, and these rules are one.',
-            ];
-        }
 
         $steps[] = ['Run "ralph preflight" to check this machine can do the work.'];
         $steps[] = ['Run "ralph run".'];

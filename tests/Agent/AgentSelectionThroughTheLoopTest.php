@@ -60,9 +60,9 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
     /**
      * The two agents every case configures, and what each one writes.
      *
-     * Different files on purpose: the commit a run leaves says which of the
-     * two did the work, so the question "was the right agent run" has an
-     * answer in Git as well as in the workers' journals.
+     * Different files on purpose: the files a run leaves in the checkout say
+     * which of the two did the work, so the question "was the right agent run"
+     * has an answer on disk as well as in the workers' journals.
      */
     private const string PREFERRED = 'preferred';
 
@@ -83,7 +83,7 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and a run commits in real worktrees.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = LoopProject::create();
@@ -131,10 +131,9 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
             'The agent the project did not choose was started anyway.',
         );
 
-        // The work in the commit is the selected agent's, which is the same
+        // The work in the checkout is the selected agent's, which is the same
         // statement made where a reviewer would see it.
-        $branch = $this->project->taskBranches()[0] ?? '';
-        self::assertSame([self::PREFERRED_FILE], $this->filesIn($branch));
+        self::assertSame([self::PREFERRED_FILE], $this->filesTheAgentsWrote());
 
         // And the row says both the agent and that it was the project's own
         // default rather than a one-off, which is what a resume reads.
@@ -175,7 +174,7 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
 
         self::assertCount(1, $this->project->agent(self::ALTERNATE)->attempts());
         self::assertSame([], $this->project->agent(self::PREFERRED)->attempts());
-        self::assertSame([self::ALTERNATE_FILE], $this->filesCommittedFor(self::FIRST));
+        self::assertSame([self::ALTERNATE_FILE], $this->filesTheAgentsWrote());
 
         $overriding = $this->project->journal()->runs()->latest();
         self::assertNotNull($overriding);
@@ -197,7 +196,11 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
             'The run with no option did not go back to the configured default.',
         );
         self::assertCount(1, $this->project->agent(self::ALTERNATE)->attempts());
-        self::assertSame([self::PREFERRED_FILE], $this->filesCommittedFor(self::SECOND));
+        self::assertSame(
+            [self::ALTERNATE_FILE, self::PREFERRED_FILE],
+            $this->filesTheAgentsWrote(),
+            'The second run\'s own agent did not write the second task\'s file.',
+        );
 
         $second = $this->project->journal()->runs()->latest();
         self::assertNotNull($second);
@@ -251,14 +254,13 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
         // briefing: a registered adapter is given the same request the
         // built-in ones are.
         $attempt = $this->project->agent('mine')->attempt();
-        self::assertStringContainsString('.ralph/runtime/worktrees/', $attempt->directory());
+        self::assertSame($this->project->root(), $attempt->directory());
         self::assertStringContainsString(self::FIRST, $attempt->briefing());
 
-        // And the loop treated the outcome as it treats any other: verified,
-        // committed, ticked.
+        // And the loop treated the outcome as it treats any other: verified
+        // and ticked.
         $pass = $this->passFor(self::FIRST);
         self::assertSame(LifecycleState::Completed, $pass->state());
-        self::assertNotNull($pass->commitSha());
         self::assertStringContainsString('- [x] ' . self::FIRST, $this->project->checklist());
 
         $run = $this->project->journal()->runs()->latest();
@@ -391,16 +393,12 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
         // user asked for.
         $pass = $this->passFor(self::FIRST);
         self::assertSame(LifecycleState::Failed, $pass->state());
-        self::assertNull($pass->commitSha());
 
         // Nothing was done by anything: neither installed agent was started,
-        // no commit was made and the checklist is the user's file untouched.
+        // nothing was written and the checklist is the user's file untouched.
         self::assertSame([], $this->project->agent(self::PREFERRED)->attempts());
         self::assertSame([], $this->project->agent(self::ALTERNATE)->attempts());
-        self::assertSame([], array_filter(
-            $this->project->taskBranches(),
-            fn (string $branch): bool => $this->filesIn($branch) !== [],
-        ), 'Something committed work for a task no agent implemented.');
+        self::assertSame([], $this->filesTheAgentsWrote());
         self::assertSame($checklist, $this->project->checklist());
     }
 
@@ -475,9 +473,7 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
         self::assertCount(2, $this->project->agent(self::PREFERRED)->attempts());
         self::assertSame([], $this->project->agent(self::ALTERNATE)->attempts());
 
-        $branch = $this->branchFor(self::FIRST);
-        self::assertSame([self::PREFERRED_FILE], $this->filesIn($branch));
-        self::assertCount(1, $this->project->commitsOn($branch), 'A resumed task is committed once.');
+        self::assertSame([self::PREFERRED_FILE], $this->filesTheAgentsWrote());
         self::assertStringContainsString('- [x] ' . self::FIRST, $this->project->checklist());
 
         // The row says the agent was the continued run's rather than a choice
@@ -543,48 +539,25 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
     }
 
     /**
-     * The branch a task's pass owns.
-     */
-    private function branchFor(string $description): string
-    {
-        return (string) $this->passFor($description)->branch();
-    }
-
-    /**
-     * The files a task's own commit added, which is the work one agent did.
+     * Which of the two agents' files are in the user's checkout, sorted.
      *
-     * Read from the commit rather than from the branch it is on, because the
-     * run's tasks share a branch under the default strategy: a branch holding
-     * two tasks' files says nothing about which agent wrote which, and the
-     * commit does.
+     * Each installed agent writes a file named after itself
+     * ({@see self::PREFERRED_FILE}, {@see self::ALTERNATE_FILE}), so the files
+     * present say which agent actually did work — the statement that used to be
+     * made about a task's commit and is now made about the working tree the
+     * agent edits in place (section K, item 1).
      *
      * @return list<string>
      */
-    private function filesCommittedFor(string $description): array
+    private function filesTheAgentsWrote(): array
     {
-        $sha = $this->passFor($description)->commitSha();
+        $written = array_values(array_filter(
+            [self::ALTERNATE_FILE, self::PREFERRED_FILE],
+            fn (string $file): bool => is_file($this->project->path($file)),
+        ));
 
-        if ($sha === null) {
-            return [];
-        }
+        sort($written);
 
-        return Git::run($this->project->root(), 'show', '--name-only', '--format=', $sha)
-            ->standardOutputLines();
-    }
-
-    /**
-     * The files a branch adds to the project, which is the work one agent did.
-     *
-     * @return list<string>
-     */
-    private function filesIn(string $branch): array
-    {
-        if ($branch === '') {
-            return [];
-        }
-
-        $diff = Git::tryRun($this->project->root(), 'diff', '--name-only', 'HEAD..' . $branch);
-
-        return $diff->exitCode === 0 ? $diff->standardOutputLines() : [];
+        return $written;
     }
 }

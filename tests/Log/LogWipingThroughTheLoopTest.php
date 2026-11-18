@@ -51,7 +51,7 @@ final class LogWipingThroughTheLoopTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and a run commits in real worktrees.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = LoopProject::create();
@@ -86,12 +86,12 @@ final class LogWipingThroughTheLoopTest extends TestCase
             'The completion evidence is not output, and outlives the logs.',
         );
 
-        // And the account of the task is untouched: the commit it produced, the
-        // ticked box, and the row every later command reads.
+        // And the account of the task is untouched: the ticked box, the
+        // completed row, and the note of when the logs went.
         $passes = $this->project->journal()->generations()->forTask(TaskId::fromDescription(self::FIRST));
 
         self::assertCount(1, $passes);
-        self::assertTrue($passes[0]->hasCommit());
+        self::assertTrue($passes[0]->isComplete());
         self::assertTrue($passes[0]->logsWereWiped());
 
         $status = $this->project->ralph(['status']);

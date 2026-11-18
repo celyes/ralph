@@ -43,8 +43,8 @@ final class ProjectInitializer
 
     /**
      * Mode for the runtime directories: owner-only. They collect raw worker
-     * output, memory summaries and task worktrees, which can contain project
-     * content and whatever an agent printed.
+     * output and memory summaries, which can contain project content and
+     * whatever an agent printed.
      */
     private const int RUNTIME_MODE = 0o700;
 
@@ -143,7 +143,6 @@ final class ProjectInitializer
             Defaults::RUNTIME_DIRECTORY,
             Defaults::LOGS_DIRECTORY,
             Defaults::MEMORY_DIRECTORY,
-            Defaults::WORKTREES_DIRECTORY,
         ];
     }
 

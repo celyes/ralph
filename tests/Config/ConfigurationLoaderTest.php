@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Config;
 
 use Celyes\RalphPhp\Config\AgentDefinition;
-use Celyes\RalphPhp\Config\BranchStrategy;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Defaults;
@@ -35,8 +34,6 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(RawConfiguration::class)]
 #[CoversClass(AgentDefinition::class)]
 #[CoversClass(VerificationCommand::class)]
-#[CoversClass(GitSettings::class)]
-#[CoversClass(PushSettings::class)]
 #[CoversClass(Limits::class)]
 #[CoversClass(LogSettings::class)]
 #[CoversClass(Defaults::class)]
@@ -65,15 +62,6 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(Defaults::CONTEXT_FILE, $config->contextPath());
         self::assertSame(Defaults::AGENT, $config->defaultAgent());
         self::assertSame(['codex', 'claude'], $config->agentNames());
-        self::assertSame(Defaults::BASE_REFERENCE, $config->git()->baseReference());
-        self::assertSame(Defaults::BRANCH_PREFIX, $config->git()->branchPrefix());
-        self::assertSame(BranchStrategy::Shared, $config->git()->strategy());
-        // Derived from the prefix, and reported as derived: the setting is
-        // absent, so the project has not chosen a name.
-        self::assertSame('ralph/shared', $config->git()->sharedBranch());
-        self::assertFalse($config->git()->sharedBranchIsConfigured());
-        self::assertFalse($config->git()->push()->isEnabled());
-        self::assertSame(Defaults::PUSH_REMOTE, $config->git()->push()->remote());
         self::assertSame(Defaults::ITERATIONS, $config->limits()->iterations());
         self::assertSame(Defaults::ATTEMPTS_PER_TASK, $config->limits()->attemptsPerTask());
         self::assertSame(Defaults::TASK_TIMEOUT_SECONDS, $config->limits()->taskTimeout());
@@ -87,29 +75,22 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertFalse($config->logs()->wipesOnSuccess());
         self::assertTrue($config->logs()->retainsEverything());
 
-        // Nothing is assumed about how this project is verified or about what
-        // a fresh worktree of it needs: a package that guessed `composer test`
-        // and `composer install` refused to start on every project that has
-        // neither, and spent minutes per task on every project that has both.
+        // Nothing is assumed about how this project is verified: a package
+        // that guessed `composer test` refused to start on every project that
+        // does not define it.
         self::assertSame([], $config->checks());
-
-        $workspace = $config->workspace();
-        self::assertSame([], $workspace->prepare());
-        self::assertSame([], $workspace->copy());
-        self::assertTrue($workspace->isEmpty());
     }
 
     /**
-     * The two settings a project is expected to fill in, read back as given.
-     * They are empty by default and they are not special: whatever is listed
-     * is what runs.
+     * The one setting a project is expected to fill in, read back as given. It
+     * is empty by default and it is not special: whatever is listed is what
+     * runs.
      */
     #[Test]
-    public function checks_and_preparation_are_whatever_the_project_lists(): void
+    public function the_checks_are_whatever_the_project_lists(): void
     {
         $this->project->writeConfigArray([
             'checks' => [['name' => 'suite', 'command' => ['vendor/bin/phpunit', '--colors=never']]],
-            'workspace' => ['prepare' => [['name' => 'deps', 'command' => ['composer', 'install']]]],
         ]);
 
         $config = (new ConfigurationLoader())->load($this->project->root());
@@ -117,11 +98,6 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertCount(1, $config->checks());
         self::assertSame(['vendor/bin/phpunit', '--colors=never'], $config->checks()[0]->command());
         self::assertSame(Defaults::CHECK_TIMEOUT_SECONDS, $config->checks()[0]->timeout());
-
-        self::assertCount(1, $config->workspace()->prepare());
-        self::assertSame(['composer', 'install'], $config->workspace()->prepare()[0]->command());
-        self::assertSame(Defaults::PREPARE_TIMEOUT_SECONDS, $config->workspace()->prepare()[0]->timeout());
-        self::assertFalse($config->workspace()->isEmpty());
     }
 
     #[Test]
@@ -143,20 +119,6 @@ final class ConfigurationLoaderTest extends TestCase
             'checks' => [
                 ['name' => 'unit', 'command' => ['vendor/bin/phpunit', '--testsuite', 'unit'], 'timeout' => 120],
                 ['command' => 'phpstan'],
-            ],
-            'workspace' => [
-                'prepare' => [
-                    ['name' => 'dependencies', 'command' => ['composer', 'install'], 'timeout' => 300],
-                    ['command' => 'npm'],
-                ],
-                'copy' => ['phpunit.xml', 'config/local.php'],
-            ],
-            'git' => [
-                'base' => 'origin/main',
-                'branch_prefix' => 'agent/',
-                'strategy' => 'shared',
-                'shared_branch' => 'agent/october',
-                'push' => ['enabled' => true, 'remote' => 'upstream'],
             ],
             'limits' => [
                 'iterations' => 3,
@@ -184,14 +146,6 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame(['--permission-mode', 'acceptEdits'], $claude->arguments());
         self::assertSame(['ANTHROPIC_API_KEY'], $claude->environment());
 
-        self::assertSame('origin/main', $config->git()->baseReference());
-        self::assertSame('agent/', $config->git()->branchPrefix());
-        self::assertSame(BranchStrategy::Shared, $config->git()->strategy());
-        self::assertSame('agent/october', $config->git()->sharedBranch());
-        self::assertTrue($config->git()->sharedBranchIsConfigured());
-        self::assertTrue($config->git()->push()->isEnabled());
-        self::assertSame('upstream', $config->git()->push()->remote());
-
         self::assertSame(3, $config->limits()->iterations());
         self::assertSame(2, $config->limits()->attemptsPerTask());
         self::assertSame(900, $config->limits()->taskTimeout());
@@ -212,18 +166,6 @@ final class ConfigurationLoaderTest extends TestCase
         self::assertSame('phpstan', $config->checks()[1]->name());
         self::assertSame(Defaults::CHECK_TIMEOUT_SECONDS, $config->checks()[1]->timeout());
 
-        $workspace = $config->workspace();
-        self::assertCount(2, $workspace->prepare());
-        self::assertSame('dependencies', $workspace->prepare()[0]->name());
-        self::assertSame(['composer', 'install'], $workspace->prepare()[0]->command());
-        self::assertSame(300, $workspace->prepare()[0]->timeout());
-
-        // A preparation command takes the same shorthand a check does.
-        self::assertSame(['npm'], $workspace->prepare()[1]->command());
-        self::assertSame('npm', $workspace->prepare()[1]->name());
-        self::assertSame(Defaults::PREPARE_TIMEOUT_SECONDS, $workspace->prepare()[1]->timeout());
-
-        self::assertSame(['phpunit.xml', 'config/local.php'], $workspace->copy());
     }
 
     #[Test]
@@ -301,43 +243,6 @@ final class ConfigurationLoaderTest extends TestCase
     }
 
     #[Test]
-    public function configured_preparation_commands_replace_the_defaults_rather_than_adding_to_them(): void
-    {
-        $this->project->writeConfigArray(['workspace' => ['prepare' => [['command' => ['make', 'setup']]]]]);
-
-        $config = (new ConfigurationLoader())->load($this->project->root());
-
-        self::assertCount(1, $config->workspace()->prepare());
-        self::assertSame('make setup', $config->workspace()->prepare()[0]->describe());
-    }
-
-    #[Test]
-    public function an_empty_prepare_list_is_how_a_project_says_a_plain_checkout_is_usable(): void
-    {
-        // Distinct from omitting the setting, which gets the default install.
-        $this->project->writeConfigArray(['workspace' => ['prepare' => []]]);
-
-        $config = (new ConfigurationLoader())->load($this->project->root());
-
-        self::assertSame([], $config->workspace()->prepare());
-        self::assertTrue($config->workspace()->isEmpty());
-    }
-
-    #[Test]
-    public function an_unknown_workspace_setting_is_reported_with_its_section(): void
-    {
-        $this->project->writeConfigArray(['workspace' => ['copies' => ['.env']]]);
-
-        $exception = $this->loadFailure();
-
-        self::assertStringContainsString('unknown setting "workspace.copies"', $exception->getMessage());
-        self::assertStringContainsString(
-            'Settings recognised in "workspace": prepare, copy.',
-            implode("\n", $exception->hints()),
-        );
-    }
-
-    #[Test]
     public function a_missing_configuration_file_points_at_the_init_command(): void
     {
         $exception = $this->loadFailure();
@@ -400,17 +305,6 @@ final class ConfigurationLoaderTest extends TestCase
     }
 
     #[Test]
-    public function a_push_flag_written_as_a_string_is_not_coerced(): void
-    {
-        $this->project->writeConfigArray(['git' => ['push' => ['enabled' => 'true']]]);
-
-        self::assertStringContainsString(
-            '"git.push.enabled" must be true or false, a string given.',
-            $this->loadFailure()->getMessage(),
-        );
-    }
-
-    #[Test]
     public function a_log_wiping_flag_written_as_a_string_is_not_coerced(): void
     {
         // For the reason the push flag is not coerced: "false" is truthy, and a
@@ -437,10 +331,10 @@ final class ConfigurationLoaderTest extends TestCase
     #[Test]
     public function a_section_written_as_a_scalar_is_rejected(): void
     {
-        $this->project->writeConfigArray(['git' => 'main']);
+        $this->project->writeConfigArray(['limits' => 'generous']);
 
         self::assertStringContainsString(
-            '"git" must be a JSON object, a string given.',
+            '"limits" must be a JSON object, a string given.',
             $this->loadFailure()->getMessage(),
         );
     }

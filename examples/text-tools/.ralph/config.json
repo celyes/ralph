@@ -28,30 +28,6 @@
             "timeout": 300
         }
     ],
-    "workspace": {
-        "prepare": [
-            {
-                "name": "dependencies",
-                "command": [
-                    "composer",
-                    "install",
-                    "--no-interaction"
-                ],
-                "timeout": 900
-            }
-        ],
-        "copy": []
-    },
-    "git": {
-        "base": "HEAD",
-        "branch_prefix": "ralph/",
-        "strategy": "shared",
-        "shared_branch": null,
-        "push": {
-            "enabled": false,
-            "remote": "origin"
-        }
-    },
     "limits": {
         "iterations": 3,
         "attempts_per_task": 2,

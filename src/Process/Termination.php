@@ -11,7 +11,7 @@ namespace Celyes\RalphPhp\Process;
  * "only after termination is confirmed", so something has to be able to say
  * that it was not. Three answers, and they are genuinely different:
  *
- * - **Confirmed.** Every process signalled is gone. The worktree is nobody's,
+ * - **Confirmed.** Every process signalled is gone. The project is nobody's,
  *   the repository lock can be released, and a resume may start.
  * - **Survivors.** Something is still running after a kill. Whatever it is
  *   holding, it is holding now, and the lock must stay claimed.
@@ -19,7 +19,7 @@ namespace Celyes\RalphPhp\Process;
  *   honest answer is that termination was requested and not that it happened.
  *   Treated as unconfirmed, because the cost of being wrong in that direction
  *   is a lock a user clears by hand, and in the other it is two agents in one
- *   worktree.
+ *   project.
  */
 final class Termination
 {

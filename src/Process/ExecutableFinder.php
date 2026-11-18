@@ -8,7 +8,7 @@ namespace Celyes\RalphPhp\Process;
  * Locates the program a configured command would actually run.
  *
  * Preflight needs this to say "the agent's executable is not installed" before
- * a task is selected, instead of after a worktree has been created. The runner
+ * a task is selected, instead of after an agent has been started. The runner
  * needs the same answer for every verification command.
  *
  * Resolution follows the two shapes a configuration can use:
@@ -72,7 +72,7 @@ final class ExecutableFinder
      * from.
      *
      * Asked by callers for whom "where from" is not one directory. An adapter
-     * runs its agent inside a per-task worktree, so a relative path would name
+     * runs its agent in the project directory, so a relative path would name
      * a different program for every task and a different one again from the
      * program preflight checked in the project root; it refuses such a path
      * rather than resolving one of the two meanings silently.

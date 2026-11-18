@@ -20,13 +20,13 @@ use InvalidArgumentException;
  * puzzled over three runs later.
  *
  * Some of these lists mirror a PHP enum that already exists
- * ({@see LifecycleState}, {@see Phase}, {@see Completion}, {@see PushState},
+ * ({@see LifecycleState}, {@see Phase}, {@see Completion},
  * {@see AttemptOutcome}, {@see AgentSource}, {@see CheckOutcome},
- * {@see ChecklistMarker}, {@see ChecklistUpdateState}, {@see CleanupState}); those are built from
- * the enum's cases so the two cannot drift. The rest — run states and the Git
- * reference vocabularies — are named here first because the schema needs them
- * before the types that will own them are written, and those types are
- * expected to adopt exactly these spellings.
+ * {@see ChecklistMarker}, {@see ChecklistUpdateState}); those are built from
+ * the enum's cases so the two cannot drift. The rest — the run states — are
+ * named here first because the schema needs them before the types that will
+ * own them are written, and those types are expected to adopt exactly these
+ * spellings.
  *
  * The list of {@see self::TABLES} is part of the contract too: it is what
  * bootstrap and the tests check a database against to decide it is a Ralph PHP
@@ -76,28 +76,6 @@ final class Schema
     }
 
     /**
-     * The kinds of Git fact worth recording.
-     *
-     * @var list<string>
-     */
-    public const array GIT_REFERENCE_KINDS = ['base', 'branch', 'commit', 'worktree', 'push'];
-
-    /**
-     * What happened to a recorded Git reference.
-     *
-     * @var list<string>
-     */
-    public const array GIT_REFERENCE_OUTCOMES = [
-        'recorded',
-        'created',
-        'reused',
-        'published',
-        'rejected',
-        'failed',
-        'removed',
-    ];
-
-    /**
      * The marker a checklist write is aiming for.
      *
      * Built from {@see ChecklistMarker} so the column cannot hold a marker the
@@ -114,8 +92,8 @@ final class Schema
      * Where a planned checklist write stands.
      *
      * `pending` is the state that makes a failed checkbox write recoverable:
-     * the implementation and the commit are already safe, so resume has only
-     * the file to write. `failed` is a write that must not be retried as
+     * the implementation is already done and verified, so resume has only the
+     * file to write. `failed` is a write that must not be retried as
      * planned, because what it was planned against has changed, and
      * `superseded` covers a write that a later generation replaced before it
      * was applied.
@@ -131,21 +109,6 @@ final class Schema
     }
 
     /**
-     * How far cleanup of a task workspace got.
-     *
-     * Nullable in the column, because "never attempted" is the state almost
-     * every row is in and is not a value worth spelling. Built from
-     * {@see CleanupState} so the column cannot hold a state the enum does not
-     * have.
-     *
-     * @return list<string>
-     */
-    public static function cleanupStates(): array
-    {
-        return CleanupState::values();
-    }
-
-    /**
      * The tables a complete state store has, in dependency order.
      *
      * @var list<string>
@@ -157,7 +120,6 @@ final class Schema
         'generations',
         'attempts',
         'verification_results',
-        'git_references',
         'checklist_snapshots',
         'checklist_updates',
     ];
@@ -229,8 +191,8 @@ final class Schema
      *
      * Recorded so that an interrupted run can be resumed from where it stopped
      * instead of from the beginning: the difference between `executing` and
-     * `publishing` is the difference between invoking the agent again and only
-     * retrying a push. The column is nullable because a pass that has not begun
+     * `finalizing` is the difference between invoking the agent again and only
+     * writing a checkbox. The column is nullable because a pass that has not begun
      * and one that is finished with are not in the middle of anything;
      * {@see LifecycleState::recordsPhase()} is which states carry one.
      *
@@ -255,23 +217,6 @@ final class Schema
     public static function attemptOutcomes(): array
     {
         return AttemptOutcome::values();
-    }
-
-    /**
-     * Whether a pass's commit has been published.
-     *
-     * `not_required` is the default because pushing is opt-in. `failed` is kept
-     * distinct from `pending` so that resume can retry only the publication,
-     * without repeating the implementation or the commit.
-     *
-     * Built from {@see PushState} so the column cannot hold a value the enum
-     * does not have.
-     *
-     * @return list<string>
-     */
-    public static function pushStates(): array
-    {
-        return PushState::values();
     }
 
     /**

@@ -54,7 +54,7 @@ final class RunCommandTest extends TestCase
     protected function setUp(): void
     {
         if (!Git::isAvailable()) {
-            self::markTestSkipped('Git is not installed, and a run commits in real worktrees.');
+            self::markTestSkipped('Git is not installed, and the project a run works in is a repository.');
         }
 
         $this->project = LoopProject::create();
@@ -66,8 +66,8 @@ final class RunCommandTest extends TestCase
     }
 
     /**
-     * The whole command, in one case: a pending task is worked on, verified,
-     * committed, checked off, and the run reports itself.
+     * The whole command, in one case: a pending task is worked on in the user's
+     * checkout, verified, checked off, and the run reports itself.
      */
     #[Test]
     public function it_carries_a_pending_task_through_the_loop_and_exits_successfully(): void
@@ -85,16 +85,17 @@ final class RunCommandTest extends TestCase
         // does not summarise a run in its own words.
         self::assertStringContainsString('fixture (adapter "codex"', $result->standardOutput, $result->describe());
         self::assertStringContainsString('processing pending tasks', $result->standardOutput, $result->describe());
-        self::assertStringContainsString('completed: verified and committed', $result->standardOutput, $result->describe());
+        self::assertStringContainsString('completed: verified', $result->standardOutput, $result->describe());
         self::assertStringContainsString('1 of 1 tasks completed', $result->standardOutput, $result->describe());
 
-        // The checklist on disk, the repository, and the rows the other four
-        // commands will read.
+        // The checklist on disk, the working tree the agent edited, and the
+        // rows the other four commands will read.
         self::assertStringContainsString('- [x] ' . self::TASK, $this->project->checklist());
-
-        $branches = $this->project->taskBranches();
-        self::assertCount(1, $branches, 'A verified task owns one branch.');
-        self::assertNotSame([], $this->project->commitsOn($branches[0]));
+        self::assertSame(
+            [' M .ralph/tasks.md', ' M src/Import.php'],
+            $this->project->workingTreeChanges(),
+            'A run commits nothing and branches nothing.',
+        );
 
         // Recorded as the runner's own completion, not merely as a ticked box.
         self::assertSame(1, $this->project->journal()->tasks()->verified()->count());
@@ -106,9 +107,9 @@ final class RunCommandTest extends TestCase
     }
 
     /**
-     * The same loop under a project that configured no `checks` and no
-     * `workspace.prepare` — which is every setting at its default, and so the
-     * state a project is in the moment `ralph init` has run.
+     * The same loop under a project that configured no `checks` — which is
+     * every setting at its default, and so the state a project is in the moment
+     * `ralph init` has run.
      *
      * The point of the case is that such a run *works*: it is not refused by
      * configuration validation, not refused by preflight, and not left with a
@@ -131,7 +132,7 @@ final class RunCommandTest extends TestCase
         // Said before the first task, where a user who did not mean to start
         // such a run can still see it.
         self::assertStringContainsString(
-            'no checks are configured, so tasks are completed on the agent\'s result and the commit alone',
+            'no checks are configured, so tasks are completed on the agent\'s own reported result',
             $result->standardOutput,
             $result->describe(),
         );
@@ -141,14 +142,11 @@ final class RunCommandTest extends TestCase
             $result->describe(),
         );
 
-        // And the task still finished: box ticked, branch committed, row
-        // recorded as the runner's own completion.
+        // And the task still finished: box ticked, the agent's work in the
+        // working tree, row recorded as the runner's own completion.
         self::assertStringContainsString('1 of 1 tasks completed', $result->standardOutput, $result->describe());
         self::assertStringContainsString('- [x] ' . self::TASK, $this->project->checklist());
-
-        $branches = $this->project->taskBranches();
-        self::assertCount(1, $branches);
-        self::assertNotSame([], $this->project->commitsOn($branches[0]));
+        self::assertNotSame([], $this->project->workingTreeChanges());
         self::assertSame(1, $this->project->journal()->tasks()->verified()->count());
 
         // The run's row holds the empty set it froze, so `ralph status` reports
@@ -258,8 +256,7 @@ final class RunCommandTest extends TestCase
         // when the reader went away.
         self::assertSame(2, $this->project->journal()->tasks()->verified()->count(), $result->describe());
         self::assertStringNotContainsString('- [ ] ', $this->project->checklist());
-        self::assertSame(['ralph/shared'], $this->project->taskBranches());
-        self::assertCount(2, $this->project->commitsOn('ralph/shared'));
+        self::assertNotSame([], $this->project->workingTreeChanges());
 
         $run = $this->project->journal()->runs()->latest();
         self::assertNotNull($run);
@@ -326,12 +323,9 @@ final class RunCommandTest extends TestCase
         self::assertMatchesRegularExpression('/^TASK-[0-9A-F]{8}$/', $events[1]->string('task'));
 
         // Enough of the pass's own record to act on without opening the
-        // database: the commit it produced, and the branch it is on.
-        self::assertSame(
-            $this->project->headOf($this->project->taskBranches()[0]),
-            $events[2]->string('data.commit'),
-            $result->describe(),
-        );
+        // database: how it came out, and which generation of the task it was.
+        self::assertSame('completed', $events[2]->string('data.state'), $result->describe());
+        self::assertTrue($events[2]->boolean('data.checked'), $result->describe());
     }
 
     /**
@@ -379,10 +373,7 @@ final class RunCommandTest extends TestCase
         // is the difference between a task a consumer can act on and one this
         // package has not finished with.
         self::assertFalse($finished->boolean('data.durable.checklist_write_owed'));
-        self::assertSame(
-            $this->project->headOf($this->project->taskBranches()[0]),
-            $finished->string('data.durable.commit'),
-        );
+        self::assertSame(LifecycleState::Completed->value, $finished->string('data.durable.state'));
 
         // The run's ending, likewise read back off a row that is closed by the
         // time the line is written.
@@ -423,7 +414,7 @@ final class RunCommandTest extends TestCase
         self::assertStringContainsString('ran out of attempts', $result->standardOutput, $result->describe());
         self::assertStringContainsString('next: ', $result->standardOutput, $result->describe());
         self::assertStringContainsString('- [ ] ' . self::TASK, $this->project->checklist());
-        self::assertSame([], $this->project->taskBranches(), 'An unverified task committed nothing.');
+        self::assertSame([], $this->project->workingTreeChanges(), 'A failed task changed something.');
     }
 
     /**
@@ -503,11 +494,11 @@ final class RunCommandTest extends TestCase
      * The case the blocking status is really for: a worker that reworded the
      * task in the project's own checklist while working on it, which the runner
      * will not silently apply old progress to (section C, item 7). Work exists
-     * — the implementation is verified and committed on its branch — nothing
-     * was undone, and what is missing is the user's decision about which task
-     * the commit belongs to. An execution-failure status would send a reader to
-     * the logs looking for something that went wrong, and a success would hide
-     * it entirely.
+     * — the implementation is in the working tree and the checks passed over it
+     * — nothing was undone, and what is missing is the user's decision about
+     * which task that work answers. An execution-failure status would send a
+     * reader to the logs looking for something that went wrong, and a success
+     * would hide it entirely.
      *
      * Both halves are asserted because they are produced by different code: the
      * run's status comes from the ending it recorded, and `status`'s comes from
@@ -519,9 +510,9 @@ final class RunCommandTest extends TestCase
         $this->project
             ->withWorker(FixtureStep::success([
                 'src/Import.php' => "<?php\n\n// --dry-run\n",
-                // Out of the worktree and into the project's own checklist:
-                // .ralph/runtime/worktrees/TASK-X is three levels down.
-                '../../../tasks.md' => "# Tasks\n\n- [ ] Add a --wet-run option to the import command\n",
+                // The project's own checklist, which the worker can reach
+                // because it works in the project (section K, item 1).
+                '.ralph/tasks.md' => "# Tasks\n\n- [ ] Add a --wet-run option to the import command\n",
             ]))
             ->withTasks([self::TASK])
             ->withConfiguration();
@@ -533,7 +524,10 @@ final class RunCommandTest extends TestCase
 
         // The work the refusal was about is still there, which is what makes
         // this a block rather than a failure.
-        self::assertNotSame([], $this->project->taskBranches());
+        self::assertStringContainsString(
+            '// --dry-run',
+            (string) file_get_contents($this->project->path('src/Import.php')),
+        );
 
         $run = $this->project->journal()->runs()->latest();
 

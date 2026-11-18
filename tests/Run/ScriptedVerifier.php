@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Run;
 
 use Celyes\RalphPhp\Config\VerificationCommand;
-use Celyes\RalphPhp\Exception\PreparationException;
+use Celyes\RalphPhp\Exception\VerificationException;
 use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Support\Secrets;
 use Celyes\RalphPhp\Verification\CheckOutcome;
@@ -141,7 +141,7 @@ final class ScriptedVerifier implements Verifier
         }
 
         if ($this->unrunnable) {
-            throw new PreparationException(
+            throw new VerificationException(
                 'The checks could not be run in ' . $directory . '.',
                 ['This is a setup failure, not a verdict on the work.'],
             );
