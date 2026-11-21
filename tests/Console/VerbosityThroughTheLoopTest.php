@@ -7,7 +7,9 @@ namespace Celyes\RalphPhp\Tests\Console;
 use Celyes\RalphPhp\Console\ExitCode;
 use Celyes\RalphPhp\Console\Output;
 use Celyes\RalphPhp\Console\Verbosity;
+use Celyes\RalphPhp\Log\ProgressSink;
 use Celyes\RalphPhp\Log\TerminalSink;
+use Celyes\RalphPhp\State\Phase;
 use Celyes\RalphPhp\Tasks\TaskId;
 use Celyes\RalphPhp\Tests\Fixture\FixtureStep;
 use Celyes\RalphPhp\Tests\Support\Git;
@@ -35,6 +37,7 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(Verbosity::class)]
 #[CoversClass(Output::class)]
 #[CoversClass(TerminalSink::class)]
+#[CoversClass(ProgressSink::class)]
 final class VerbosityThroughTheLoopTest extends TestCase
 {
     private const string TASK = 'Add a --dry-run option to the import command';
@@ -74,10 +77,17 @@ final class VerbosityThroughTheLoopTest extends TestCase
     /**
      * The default: the run's own account of its own work, and nothing else.
      *
-     * Four kinds of line are asserted present, because a quiet run that
+     * Five kinds of line are asserted present, because a quiet run that
      * dropped any of them would be a run a user could not follow: which run
-     * this is and what it is doing, which task was taken on, what happened to
-     * it, and why the run ended with what to do next.
+     * this is and what it is doing, which task was taken on, how far through
+     * its own work the pass has got, what happened to the task, and why the run
+     * ended with what to do next.
+     *
+     * The phases are the ones a quiet run must not lose. Between the task's
+     * heading and its result there is an agent running for twenty minutes, and
+     * a terminal that said nothing at all over that stretch would be
+     * indistinguishable from a run that had hung — so quiet means the agent's
+     * transcript is not repeated, not that the loop stops saying where it is.
      *
      * And three kinds asserted absent, which are the wall of text the item is
      * about: the agent's own output, the package's notes beside it, and the
@@ -100,6 +110,16 @@ final class VerbosityThroughTheLoopTest extends TestCase
         self::assertStringContainsString('1 of 1 tasks completed', $result->standardOutput, $result->describe());
         self::assertStringContainsString('next: ', $result->standardOutput, $result->describe());
 
+        // Every phase of the attempt, in the order a pass moves through them,
+        // and worded as `ralph status` words them.
+        foreach (Phase::all() as $phase) {
+            self::assertStringContainsString(
+                $phase->describe(),
+                $result->standardOutput,
+                sprintf('A quiet run did not say it was %s: %s', $phase->value, $result->describe()),
+            );
+        }
+
         // The agent's own output, the notes filed beside it, and the
         // settings commentary. None of the three.
         self::assertStringNotContainsString(self::SAID, $result->standardOutput, $result->describe());
@@ -107,10 +127,10 @@ final class VerbosityThroughTheLoopTest extends TestCase
         self::assertStringNotContainsString('--- ', $result->standardOutput, $result->describe());
         self::assertStringNotContainsString('checks: ', $result->standardOutput, $result->describe());
 
-        // Short enough to read: the run's own lines and the blank lines
-        // between them, rather than an agent's transcript.
+        // Short enough to read: the run's own lines, its four phases and the
+        // blank lines between them, rather than an agent's transcript.
         self::assertLessThan(
-            12,
+            16,
             count($result->standardOutputLines()),
             'A quiet run printed more lines than its own account: ' . $result->describe(),
         );

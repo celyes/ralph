@@ -339,9 +339,10 @@ project configuration. With neither, that setting decides; it is off by default.
 See [Bailing out of a run](#bailing-out-of-a-run).
 
 By default a run prints its own account of itself — a line for the run, a line
-for each task taken on, what happened to it, and why the run ended. Add
-`--verbose` to watch the agent work. Nothing is lost by leaving it off:
-[How much is printed](#how-much-is-printed).
+for each task taken on, the phases of each attempt as it enters them and how
+long the agent has been going, what happened to the task, and why the run
+ended. Add `--verbose` to watch the agent work as well. Nothing is lost by
+leaving it off: [How much is printed](#how-much-is-printed).
 
 ### `ralph status [--json]`
 
@@ -970,25 +971,51 @@ its own terms.
 
 **By default, a run prints its own account of its own work.** One line saying
 which run this is, which agent it chose and where the choice came from; a line
-over each task it takes on; a line saying what happened to that task, with the
-next action under it when there is one; and a line at the end saying why the
-run stopped. Plus every warning and every failure, which are printed however
-quietly a run was asked to go — a warning withheld is a warning that arrives
-after the damage. A three-task run is a dozen lines you can read.
+over each task it takes on; the four phases of the attempt as it enters them;
+a line saying what happened to that task, with the next action under it when
+there is one; and a line at the end saying why the run stopped. Plus every
+warning and every failure, which are printed however quietly a run was asked to
+go — a warning withheld is a warning that arrives after the damage. A two-task
+run is a screen you can read.
 
 ```
 $ ralph run
 run-20261120-143012-6dbf6f: claude (adapter "claude", selected by the project configuration), processing pending tasks
 
 [1/2] TASK-8CA4A94A Add a --dry-run option to the import command
+
+  preparing the context
+  waiting for the agent
+  still working: 30s, 31 lines of output
+  still working: 1m 0s, 78 lines of output
+  running the configured checks
+  checking the task off
+
 TASK-8CA4A94A completed: verified in the working tree
 
 [2/2] TASK-F3257FFD Document the import command in the README
+
+  preparing the context
+  waiting for the agent
+  running the configured checks
+  checking the task off
+
 TASK-F3257FFD completed: verified in the working tree
 
 run-20261120-143012-6dbf6f: 2 of 2 tasks completed with claude, 0 remaining — every pending task was completed (2 tasks)
   next: Review the changes with `git diff` and commit them, then add the next work to .ralph/tasks.md and run `ralph run`.
 ```
+
+**Quiet is not silent.** Between a task's heading and its result there is an
+agent running for twenty minutes, and a terminal that said nothing over that
+stretch would be indistinguishable from a run that had hung. So a quiet run
+names the phase it is in — the same words `ralph status` uses — and, while a
+worker is producing output, adds a line every half-minute saying how long the
+attempt has been going and how much has arrived. Both numbers move while the
+work is healthy, which is what you are watching for; neither moves when it is
+not. A worker that has gone completely silent gets no such line, and that
+silence under `waiting for the agent` is the honest account of it — a verbose
+run has nothing more to say about such a worker either.
 
 **`-v`/`--verbose` prints everything else as well**: the agent's own output as
 it arrives, the `--- ` note for each step the package takes — the workspace,
@@ -1040,9 +1067,20 @@ run-20261121-115857-780640: claude (adapter "claude", selected by the project co
 
 [1/2] TASK-044E1915 Add a --dry-run option to the import command
 
+  preparing the context
+  waiting for the agent
+  still working: 30s, 31 lines of output
+  running the configured checks
+  checking the task off
+
 TASK-044E1915 completed: verified in the working tree
 
 [2/2] TASK-65F1FC3F Document the import command in the README
+
+  preparing the context
+  waiting for the agent
+  running the configured checks
+  checking the task off
 
 TASK-65F1FC3F completed: verified in the working tree
 
@@ -1053,9 +1091,9 @@ $
 ```
 
 The figures of the run and the action they leave you with are one piece of
-output and are not split up; neither are the rows of a table under their
-heading, nor the notes of a `--verbose` run, which is the same transcript it was
-before. The blank line is never doubled, however many of the parts that make it
+output and are not split up; neither are the phases of an attempt and the lines
+that arrive between them, nor the rows of a table under their heading, nor the
+notes of a `--verbose` run, which is the same transcript it was before. The blank line is never doubled, however many of the parts that make it
 up ask for one: there are no two blank lines anywhere in the package's output,
 and `status --json` is one document with one blank line after it, which `jq`,
 `json_decode` and a shell `$(...)` all ignore.
@@ -1150,7 +1188,8 @@ safe to run.
 | --- | --- | --- |
 | Exit 78 from `ralph preflight` | Something about the machine or project is missing: a PHP extension, the agent's executable, its credentials, a check command that cannot be resolved. | The report names each failing check and what it expected. Fix those and run `preflight` again — it writes nothing and starts no agent. |
 | A configuration file is refused for an unknown setting `git` or `workspace` | Those sections were removed with the package's Git work. | Delete them. Branches, commits, pushes and worktree preparation are gone; see [Your checkout](#your-checkout). |
-| A run prints a task and then nothing for a long time | The agent is working. By default a run shows its own account of itself, not the agent's output. | Nothing is wrong — the task's line arrives when it finishes. Run with `--verbose` to watch the agent instead, or read `ralph logs TASK-ID` afterwards. |
+| A run says `waiting for the agent` and the lines under it keep arriving | The agent is working. By default a run shows its own account of itself — its phases, and how long the attempt has been going — rather than the agent's output. | Nothing is wrong: the task's result arrives when the agent finishes. Run with `--verbose` to watch the agent instead, or read `ralph logs TASK-ID` afterwards. |
+| A run says `waiting for the agent` and then nothing at all for a long time | The agent has printed nothing since it started, so there is nothing to report about it. It may be thinking, or it may be stuck. | `ralph logs TASK-ID` from another terminal shows whatever did arrive. The attempt's own timeout (`limits.task_timeout`) ends it either way; Ctrl+C stops it now and `ralph resume` picks the task up. |
 | A run says another runner holds the repository | A `ralph run` is in progress elsewhere, or one died without releasing the lock. | Look for the other process. Once it is gone, `ralph resume` confirms it has stopped and takes over. |
 | A task is left unchecked and the run carried on | Its checks kept failing, or its attempt allowance ran out. | `ralph logs TASK-ID` shows each attempt and each check. Fix the task's wording or your check, then `ralph retry TASK-ID`. |
 | Exit 75, "waiting for a person" | The agent asked a question, or the task changed under the pass that was working on it. | Read the last line of output and `ralph logs TASK-ID`. Resolve the question — usually by rewriting the task to answer it — then `ralph retry TASK-ID`. |

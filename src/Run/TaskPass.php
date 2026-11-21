@@ -294,6 +294,28 @@ final class TaskPass
     }
 
     /**
+     * Say which part of the work the pass has got to.
+     *
+     * The four phases of PROJECT.md section D, item 3, named as each is
+     * entered, and printed however quietly the run was asked to go. A quiet run
+     * does not repeat the agent's output or the notes filed beside it (section
+     * K, item 2), and without these it would print a task and then nothing at
+     * all for twenty minutes — which is indistinguishable from a run that has
+     * hung, and leaves a user with nothing to do but kill it and lose the work.
+     * Four lines per attempt is what that costs: the phase a pass is in is one
+     * short line, and it is the line that says the loop is still going and
+     * which part of its own work it is in.
+     *
+     * Worded by {@see Phase::describe()} rather than here, so that a phase
+     * reads the same while a run is printing it and afterwards when `ralph
+     * status` is asked about the pass that stopped in it.
+     */
+    private function announcePhase(Phase $phase): void
+    {
+        $this->terminal?->line('  ' . $this->style()->muted($phase->describe()));
+    }
+
+    /**
      * Say that the checks failed and another attempt follows.
      *
      * Printed between the attempts rather than left to the run's summary: the
@@ -340,6 +362,8 @@ final class TaskPass
             // 1), so what there is to prepare is the briefing: the project's
             // own context file and whatever bounded memory the earlier attempts
             // left (section D, item 5).
+            $this->announcePhase(Phase::Preparing);
+
             $workspace = Workspace::at($this->configuration->projectRoot());
             $log->note('workspace ' . $workspace->path());
 
@@ -359,6 +383,8 @@ final class TaskPass
             $attempt = $this->journal->attempts()->begin($record, $this->run->rowId(), $log->path());
 
             // Executing.
+            $this->announcePhase(Phase::Executing);
+
             $record = $this->journal->generations()->enterPhase($record, Phase::Executing);
             $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Executing);
 
@@ -377,6 +403,8 @@ final class TaskPass
 
             // Verifying: the configured checks, run against the project by
             // something that is not the worker.
+            $this->announcePhase(Phase::Verifying);
+
             $record = $this->journal->generations()->enterPhase($record, Phase::Verifying);
             $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Verifying);
 
@@ -556,6 +584,8 @@ final class TaskPass
         VerificationReport $verification,
         AttemptLog $log,
     ): TaskResult {
+        $this->announcePhase(Phase::Finalizing);
+
         $record = $this->journal->generations()->enterPhase($record, Phase::Finalizing);
         $attempt = $this->journal->attempts()->enterPhase($attempt, Phase::Finalizing);
 

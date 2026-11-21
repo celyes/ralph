@@ -11236,3 +11236,95 @@ to the rule it is now a case of.
 
 **No push.** This repository's `origin` is SSH with no usable key, so the work
 is committed only.
+
+## 2026-11-21 — Section K, item 2, corrected: quiet was reading as hung
+
+**The defect.** The item asks for less output by default, and what was built
+printed less of the run and none of its progress. Between a task's heading and
+its result a quiet run said nothing at all — and what is between them is an
+agent working for twenty minutes, so the one shape a user saw most of was a
+terminal that had stopped. The troubleshooting table even documented it ("a run
+prints a task and then nothing for a long time ... nothing is wrong"), which is
+the tell: a default whose first question is "is it still alive" is the wrong
+default, and `--verbose` is a bad answer to it because finding out costs the run
+you were already in.
+
+The reading that was wrong is "less output" as "no output while working". Less
+output means not repeating the agent's thousands of lines; it does not mean
+withholding the run's own account of where it has got to. PROJECT.md section E,
+item 4 is explicit about the failure being avoided — a loop that showed nothing
+until a process exited would be indistinguishable from a loop that had hung —
+and the quiet default had reintroduced it for the whole of the executing phase.
+
+**What was done**
+
+- `TaskPass::announcePhase()` names each of the four phases of section D, item 3
+  as the pass enters it: preparing, executing, verifying, finalizing. Printed
+  however quietly the run was asked to go, because the phase is the run's own
+  account of its own work and not a copy of somebody else's. Worded by
+  `Phase::describe()` rather than at the call site, so a phase reads the same
+  while a run is printing it and afterwards when `ralph status` is asked about
+  the pass that stopped in it. This also makes the README's phase table true: it
+  already said the run names each phase as it enters it.
+- `src/Log/ProgressSink.php`, a new sink beside `TerminalSink` in the same
+  composite, is the quiet counterpart of the transcript: not the output, but the
+  fact of it. One line every thirty seconds with how long the attempt has been
+  going and how many lines have arrived — both of which move while the work is
+  healthy and neither of which moves when it is not.
+- The beat is driven by output arriving, not by a clock. A line printed by a
+  timer would say "still working" about a worker that had stopped saying
+  anything, which is the case the line exists to expose. The cost is that a
+  completely silent worker gets no beats; what it gets is the phase line saying
+  the run is waiting for the agent, and silence under it, which is the honest
+  account — a verbose run has nothing more to offer about such a worker either.
+- The interval is a constructor argument with the constant as its default,
+  because `Elapsed` is deliberately static — a monotonic reading is not a
+  collaborator anything can substitute — and the alternative is a test that
+  waits half a minute to find out what a line says. Nothing in a run sets it.
+- Under `--verbose` the new sink says nothing: the transcript is already on the
+  screen and is itself the proof, and a summary interleaved with the output it
+  summarises would land in the middle of the agent's own line. The phase lines
+  are printed in both runs, where they read as headings over the notes.
+
+**Still nothing durable depends on the flag.** The beats are composed for a
+terminal that is being watched. They are not notes, are not written to the
+attempt's log, and tell a reader nothing the log does not already hold: the
+attempt's log, the event stream, the state store and the checklist are still
+written identically whichever way the run was asked to print.
+
+**Verification**
+
+- `vendor/bin/phpunit` — whole suite green on PHP 8.5: 2,235 tests, 7,846
+  assertions, up 11 tests from the last item's 2,224.
+- `tests/Log/ProgressSinkTest.php` covers what a beat says and when one is due:
+  the elapsed time and the line count; the count being of every chunk rather
+  than the last; a worker part-way through its first line not being reported as
+  silent; either stream counting as work, with the beat itself going to ordinary
+  output; a chunk between beats counted and not printed; a run shorter than the
+  interval beating not at all; an empty chunk not being a beat; a verbose run
+  being told nothing; notes not being beats; and closing printing nothing twice.
+- `tests/Console/VerbosityThroughTheLoopTest.php` now asserts the quiet run
+  carries every phase, worded as `Phase::describe()` words it, on top of the
+  four kinds of line it already asserted — and still carries none of the three
+  that are the wall of text.
+- `tests/Console/ConsoleLinesThroughTheLoopTest.php` moved its paragraph count
+  from four to five: the phases of an attempt are one more *thing said*, which
+  is four lines with the beats between them and a blank line either side.
+- `vendor/bin/phpstan analyse src tests --level=5` — the same five findings as
+  before this change, none in a file it touched.
+- Run by hand in a scratch repository against a shell-script agent that prints a
+  line a second for forty seconds before reporting a candidate. The quiet run
+  prints the four phases and one beat ("still working: 30s, 31 lines of
+  output"); the verbose run is the transcript it was, with the phase lines as
+  headings through it; and the attempt's log holds no beat either way.
+
+**Documentation.** The README's "How much is printed" gained a "quiet is not
+silent" paragraph and both of its examples now show the phases and the beats;
+the `ralph run` reference and the global `--verbose` line in `ralph help` say
+what the default includes; the "Console output" example was reprinted with the
+phases as one of its pieces; and the troubleshooting row that told a user
+nothing was wrong became two rows — the lines are arriving, or they are not, and
+only the second is worth looking into.
+
+**No push.** This repository's `origin` is SSH with no usable key, so the work
+is committed only.
