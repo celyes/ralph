@@ -400,7 +400,7 @@ final class LogsCommandTest extends TestCase
      * from the output rather than from the file. Driven through the real
      * binary because that is where the two halves meet: the line left open by
      * the passthrough, and the next line of the report, which closes it
-     * without also leaving a blank one behind.
+     * without also leaving a blank one behind in the middle of the report.
      */
     #[Test]
     public function a_report_ending_in_a_log_with_no_newline_still_ends_a_line(): void
@@ -431,15 +431,21 @@ final class LogsCommandTest extends TestCase
             $result->describe(),
         );
 
-        // One ending, not two, here and at the end of the whole report: a
-        // blank line is the package saying something it was not asked to say.
+        // One ending where the report carries on, and one blank line at the
+        // end of the whole report and nowhere else: the newline the file never
+        // had is the package closing a line, not a blank line it decided to
+        // add in the middle of its own output (section K, item 3).
         self::assertStringNotContainsString(
             'the agent stopped mid-sentence' . PHP_EOL . PHP_EOL,
             $result->standardOutput,
             $result->describe(),
         );
-        self::assertStringEndsWith(PHP_EOL, $result->standardOutput, $result->describe());
-        self::assertStringEndsNotWith(PHP_EOL . PHP_EOL, $result->standardOutput, $result->describe());
+        self::assertStringEndsWith(PHP_EOL . PHP_EOL, $result->standardOutput, $result->describe());
+        self::assertStringEndsNotWith(
+            PHP_EOL . PHP_EOL . PHP_EOL,
+            $result->standardOutput,
+            $result->describe(),
+        );
     }
 
     /**

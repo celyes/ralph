@@ -25,10 +25,12 @@ use Celyes\RalphPhp\Console\Style;
  *
  * **The last line is still finished.** A worker whose final chunk had no
  * newline would leave whatever the CLI prints next glued onto the end of it, so
- * {@see self::close()} closes the line. Which line is open is the output's own
- * bookkeeping rather than this sink's ({@see Output::finishLine()}): the same
- * question is asked by every note, by an error report, and by the end of the
- * command, and one answer kept in one place cannot disagree with itself.
+ * {@see self::close()} closes the line and separates what the agent said from
+ * what the loop says next (PROJECT.md section K, item 3). Which line is open is
+ * the output's own bookkeeping rather than this sink's
+ * ({@see Output::separate()}): the same question is asked by every note, by an
+ * error report, and by the end of the command, and one answer kept in one place
+ * cannot disagree with itself.
  *
  * **Each stream keeps its destination.** The worker's standard output goes to
  * ours and its error output to ours, so that redirecting a run's output
@@ -124,8 +126,18 @@ final class TerminalSink implements OutputSink
         return $line;
     }
 
+    /**
+     * The end of this attempt's streamed output.
+     *
+     * The agent's last line is ended if it did not end itself, and a blank
+     * line is owed after it, so that the run's own report of the attempt
+     * begins a piece of output of its own rather than continuing the agent's.
+     * Owed rather than written: an attempt nothing was echoed for — a quiet
+     * run, or an agent that printed nothing — costs the terminal nothing
+     * ({@see Output::separate()}).
+     */
     public function close(): void
     {
-        $this->output->finishLine();
+        $this->output->separate();
     }
 }

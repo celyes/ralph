@@ -1021,10 +1021,44 @@ happen or reading about it afterwards. If you are not sure, leave it off.
 **Every line this package writes ends with exactly one newline.** A status
 table, a run's heading over each task, a progress note, an error, the JSON of
 `status --json` — each is ended where a line should end, whether or not the text
-handed over already carried an ending, and a deliberately blank line is written
-as the single newline it is. So output stays line-oriented for `grep`, `tee` and
-`head`, and no path through the package can produce a line with no ending or a
-stray blank one after it.
+handed over already carried an ending. So output stays line-oriented for `grep`,
+`tee` and `head`, and no path through the package can produce a line with no
+ending.
+
+**And everything it prints is followed by a blank line.** Whatever Ralph PHP has
+just said, the next thing on the screen is a blank line: between the run's
+heading and the first task, between a task and its result, between the sections
+of `ralph status`, after an error message and its hints, and at the end of every
+command — so your shell prompt is never sitting against the last word of a run.
+
+A blank line goes after each *thing said*, not after each line, so the lines of
+one report stay together:
+
+```
+$ ralph run
+run-20261121-115857-780640: claude (adapter "claude", selected by the project configuration), processing pending tasks
+
+[1/2] TASK-044E1915 Add a --dry-run option to the import command
+
+TASK-044E1915 completed: verified in the working tree
+
+[2/2] TASK-65F1FC3F Document the import command in the README
+
+TASK-65F1FC3F completed: verified in the working tree
+
+run-20261121-115857-780640: 2 of 2 tasks completed with claude, 0 remaining — every pending task was completed (2 tasks)
+  next: Review the changes with `git diff` and commit them, then add the next work to .ralph/tasks.md and run `ralph run`.
+
+$
+```
+
+The figures of the run and the action they leave you with are one piece of
+output and are not split up; neither are the rows of a table under their
+heading, nor the notes of a `--verbose` run, which is the same transcript it was
+before. The blank line is never doubled, however many of the parts that make it
+up ask for one: there are no two blank lines anywhere in the package's output,
+and `status --json` is one document with one blank line after it, which `jq`,
+`json_decode` and a shell `$(...)` all ignore.
 
 **A worker's bytes are passed through as they came.** A chunk off a pipe begins
 and ends wherever the agent happened to be, so nothing is appended to it: an
@@ -1036,9 +1070,9 @@ attempt's log, so output split across chunks is neither reordered nor broken up.
 **The newline such a chunk is owed is deferred, not lost.** The cursor is
 remembered, so the next line Ralph PHP composes closes the open line first
 instead of landing on the end of a half-printed progress indicator, and the last
-thing a command does before exiting closes one still open — which is why a
-worker whose final chunk had no newline, or a stored log that ends without one,
-never shares a row with your shell prompt.
+thing a command does before exiting closes one still open and leaves the blank
+line after it — which is why a worker whose final chunk had no newline, or a
+stored log that ends without one, never shares a row with your shell prompt.
 
 **The cursor belongs to the destination, not to the handle.** `ralph run 2>&1`
 sends both streams to one place and one cursor is tracked for it, so a note on
@@ -1051,9 +1085,9 @@ given a newline the other one owed.
 Ralph PHP colours the lines it writes itself: the heading over each task a run
 takes on, the outcome of a task and of the run, the verdict of each preflight
 check, the state column of `ralph status`, and the subject of each `--- ` note
-in a run's progress output. Labels are dimmed so values stand out, and a run's
-tasks are separated by a blank line so an agent's last line of output and the
-loop's next step do not read as one block of text.
+in a run's progress output. Labels are dimmed so values stand out, and a blank
+line goes after everything the package says, so an agent's last line of output
+and the loop's next step never read as one block of text.
 
 A coloured line is the same line with sequences around its fields: removing
 them gives the plain output byte for byte, so nothing is said in colour alone.

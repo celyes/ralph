@@ -11139,3 +11139,100 @@ run` describe the flag as what it now is rather than as a stack-trace switch.
 
 **No push.** This repository's `origin` is SSH with no usable key, so the work
 is committed only.
+
+## 2026-11-21 — Section K, item 3: a blank line after everything the package says
+
+**The item.** "Add a newline (\n\n) after every output that the package prints
+to the console regardless of what it is. There should always be a new line."
+
+**The one reading of it that is worth having.** Taken per *line*, the item is
+double spacing: `ralph status` would print its table one row per paragraph,
+`ralph --help` would come apart into forty, and a `--verbose` run — which item 2
+of this section defines as "the output that is there now" — would be twice as
+long for the same content. Taken per *thing said*, it is the spacing the output
+was missing: the run's heading, each task, each task's result, the run's
+figures, each section of a report, each error with its hints. So that is what
+was built, and it is stated here because the two readings are different work: a
+blank line goes after every piece of output the package writes, where a piece is
+what one part of the package says in one go, and the lines inside one of them —
+the rows of a table, the heading over a column, the figures of a run and the
+action they leave the user with — stay together.
+
+**One place decides, as before.** `Output` gained `separate()`: a caller that
+has finished saying something says so, and the blank line is *owed* rather than
+written. The next line printed to that destination puts it down first, and
+`finishLine()` — the last write of the process — puts down whatever is still
+owed, or one of its own if nothing was. Three consequences fall out of the
+deferral rather than having to be arranged:
+
+- Two separations in a row are one blank line. The flag is set, not counted, so
+  a section that ends, a sink that closes and a caller's own `line()` landing
+  on top of each other produce one blank line between them and never two.
+- A separation nothing follows costs nothing. An attempt whose agent printed
+  nothing, a quiet run's unechoed stream, a command that separates its sections
+  and then finds it has none — none of them leave a stray line behind.
+- A blank line is never the *first* thing printed. A destination nothing has
+  been written to is owed nothing, which is also why `ralph status --json`,
+  whose diagnostics stayed empty, does not put a lone newline into the file
+  standard error was redirected to.
+
+`line()` with no text now routes into the same mechanism, so the twenty-two
+places that already printed a blank line between two sections became collapsing
+separations without being touched, and a caller that composed its own `"\n\n"`
+has the blank line kept as a separation rather than as bytes already on the
+stream that the next one would double.
+
+**Where the pieces end.** `Runner` says explicitly where one thing it says
+finishes: the run's whole opening (identity, warnings and all), the heading over
+each task, each task's result and its next action, the drift report, the lock
+takeover, the unconfirmed-worker note, the event-stream note, and the run's
+ending. `TerminalSink::close()` now separates instead of only closing a line,
+which is what puts the blank line between an agent's last output and the loop's
+report of the attempt. Every other command gets the end of its output from
+`finishLine()`, and its internal sections from the separators it already had.
+
+**And the output that is not ours.** A worker's bytes are still passed through
+unappended and unreordered: nothing is added to a chunk, because a chunk ends
+wherever the agent happened to be and an ending inserted there would break the
+agent's own line and make the terminal disagree with the log it copies. The
+newline such a chunk is owed is still deferred, and the blank line goes after
+it, not into it. The three bootstrap failures in `bin/ralph` — wrong SAPI, PHP
+too old, no autoloader — are written with `fwrite()` before `Output` can be
+loaded, so they end with the blank line through a `RALPH_OUTPUT_END` constant
+instead.
+
+**Verification**
+
+- `vendor/bin/phpunit` — whole suite green on PHP 8.5: 2,224 tests, 7,824
+  assertions, up 7 tests from the last item's 2,217.
+- `tests/Console/OutputTest.php` gained the mechanism's own cases: a separation
+  asked for repeatedly is one blank line; a separation over a line a worker
+  left open closes it first; a separation reaches both streams that have
+  printed and no stream that has not; finishing after a separation still
+  leaves one blank line; and finishing is idempotent.
+- `tests/Console/ConsoleLinesThroughTheLoopTest.php` is the same sweep over
+  every command and every outcome, with its invariant moved on: a stream that
+  was written to now ends with exactly one blank line rather than none, and
+  still has no two blank lines anywhere. Two cases were added for the two
+  halves of the reading above — a quiet run divides into exactly the four
+  pieces it has to say, and `ralph status` divides into exactly three with the
+  rows of its table still adjacent to their heading.
+- `vendor/bin/phpstan analyse src tests --level=5` — the same five findings as
+  before this change, none in a file it touched.
+- Run by hand in a scratch repository against a shell-script agent speaking the
+  real result protocol: `init`, `preflight`, `run`, `run --verbose`, `status`,
+  `status --json`, `logs`, `resume`, `help`, `--version`, an unknown command and
+  a failure under `--verbose` all read back through `cat -A`. Each ends with one
+  blank line; the quiet run is four paragraphs; the verbose run is the dense
+  transcript it was, separated from the result line; `status --json` still
+  parses; and `ralph run | head -2` still does not take the run down with it.
+
+**Documentation.** The README's "Console output" section states the new promise
+beside the old one, with a quiet run printed out as the example, the note that
+the blank line goes after each thing said rather than after each line, and that
+it is never doubled anywhere — including after the `--json` document. The colour
+section's claim that "a run's tasks are separated by a blank line" was corrected
+to the rule it is now a case of.
+
+**No push.** This repository's `origin` is SSH with no usable key, so the work
+is committed only.

@@ -21,13 +21,21 @@ define('RALPH_EXIT_ENVIRONMENT', 78);
 
 define('RALPH_MINIMUM_PHP_VERSION', '8.3.0');
 
+// The blank line every piece of this package's output ends with (PROJECT.md
+// section K, item 3). The three failures below are written before the
+// autoloader exists, so they cannot go through
+// Celyes\RalphPhp\Console\Output, which is where every other line of the
+// package gets its ending — but a user meets them at a shell prompt like any
+// other, and each of them is the last thing this process says.
+define('RALPH_OUTPUT_END', PHP_EOL . PHP_EOL);
+
 if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
-    fwrite(STDERR, 'ralph must be run from the command line; the current PHP SAPI is "' . PHP_SAPI . '".' . PHP_EOL);
+    fwrite(STDERR, 'ralph must be run from the command line; the current PHP SAPI is "' . PHP_SAPI . '".' . RALPH_OUTPUT_END);
     exit(RALPH_EXIT_ENVIRONMENT);
 }
 
 if (version_compare(PHP_VERSION, RALPH_MINIMUM_PHP_VERSION, '<')) {
-    fwrite(STDERR, 'ralph requires PHP ' . RALPH_MINIMUM_PHP_VERSION . ' or newer; this is PHP ' . PHP_VERSION . ' (' . PHP_BINARY . ').' . PHP_EOL);
+    fwrite(STDERR, 'ralph requires PHP ' . RALPH_MINIMUM_PHP_VERSION . ' or newer; this is PHP ' . PHP_VERSION . ' (' . PHP_BINARY . ').' . RALPH_OUTPUT_END);
     exit(RALPH_EXIT_ENVIRONMENT);
 }
 
@@ -88,7 +96,7 @@ if ($ralphAutoloader === null) {
     foreach ($ralphAutoloaderCandidates as $ralphAutoloaderCandidate) {
         fwrite(STDERR, '  - ' . $ralphAutoloaderCandidate . PHP_EOL);
     }
-    fwrite(STDERR, 'Run "composer install" in the package checkout, or reinstall celyes/ralph-php.' . PHP_EOL);
+    fwrite(STDERR, 'Run "composer install" in the package checkout, or reinstall celyes/ralph-php.' . RALPH_OUTPUT_END);
     exit(RALPH_EXIT_ENVIRONMENT);
 }
 
@@ -104,7 +112,7 @@ unset(
 );
 
 if (!class_exists(Celyes\RalphPhp\Ralph::class)) {
-    fwrite(STDERR, 'ralph loaded a Composer autoloader that does not provide celyes/ralph-php. Reinstall the package.' . PHP_EOL);
+    fwrite(STDERR, 'ralph loaded a Composer autoloader that does not provide celyes/ralph-php. Reinstall the package.' . RALPH_OUTPUT_END);
     exit(RALPH_EXIT_ENVIRONMENT);
 }
 

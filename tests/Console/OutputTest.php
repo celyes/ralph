@@ -208,21 +208,26 @@ final class OutputTest extends TestCase
     }
 
     /**
-     * And the duplicate that rule could produce: closing an unfinished line is
-     * a newline, a deliberate blank line is a newline, and asking for the
-     * blank line while one is open must not write both.
+     * And the duplicate the rule could produce: a blank line asked for twice,
+     * over a line that was still open, is one blank line.
+     *
+     * Closing an unfinished line is a newline and a deliberate blank line is a
+     * newline, so the two are separate things here — the chunk's line is ended
+     * and the blank line the caller asked for goes after it (section K, item
+     * 3) — but asking for it again while it is still owed adds nothing.
      */
     #[Test]
-    public function closing_an_unfinished_line_is_not_also_a_blank_line(): void
+    public function a_blank_line_over_an_unfinished_one_is_still_one_blank_line(): void
     {
         $capture = new CapturingOutput();
 
         $capture->output()->text('no trailing newline');
         $capture->output()->line();
+        $capture->output()->line();
         $capture->output()->line('after');
 
         self::assertSame(
-            'no trailing newline' . PHP_EOL . 'after' . PHP_EOL,
+            'no trailing newline' . PHP_EOL . PHP_EOL . 'after' . PHP_EOL,
             $capture->standardOutput(),
         );
     }
@@ -263,7 +268,10 @@ final class OutputTest extends TestCase
         $capture->output()->text("\nsecond line\r\n");
         $capture->output()->finishLine();
 
-        self::assertSame("first line\r\nsecond line\r\n", $capture->standardOutput());
+        // The worker's own bytes, ending as it ended them, and after them the
+        // blank line every command's output ends with (section K, item 3) —
+        // written after the last line rather than into it.
+        self::assertSame("first line\r\nsecond line\r\n" . PHP_EOL, $capture->standardOutput());
     }
 
     /**
@@ -291,10 +299,11 @@ final class OutputTest extends TestCase
 
     /**
      * The last write of a command, so the shell prompt does not land halfway
-     * along a line a worker or a printed log file left open.
+     * along a line a worker or a printed log file left open — and not against
+     * the last word of one either.
      *
-     * Idempotent, and a no-op in the ordinary case: it is called at the end of
-     * every run, and most runs end with a line that ended itself.
+     * Idempotent: it is called from the application's `finally` block, and a
+     * second call must not put down a second blank line.
      */
     #[Test]
     public function an_unfinished_line_is_closed_on_the_way_out(): void
@@ -307,20 +316,156 @@ final class OutputTest extends TestCase
         $capture->output()->finishLine();
         $capture->output()->finishLine();
 
-        self::assertSame('a log file that ends without one' . PHP_EOL, $capture->standardOutput());
-        self::assertSame('and a complaint that does too' . PHP_EOL, $capture->errorOutput());
+        self::assertSame(
+            'a log file that ends without one' . PHP_EOL . PHP_EOL,
+            $capture->standardOutput(),
+        );
+        self::assertSame(
+            'and a complaint that does too' . PHP_EOL . PHP_EOL,
+            $capture->errorOutput(),
+        );
     }
 
+    /**
+     * PROJECT.md section K, item 3: a command's output ends with a blank line,
+     * whatever the last thing it printed was.
+     *
+     * The line ended itself, so the newline here is the separation and nothing
+     * else — and the stream that was never written to stays empty, because a
+     * blank line in the file standard error was redirected to is not an ending
+     * anybody asked for.
+     */
     #[Test]
-    public function finishing_adds_nothing_when_every_line_ended_itself(): void
+    public function finishing_leaves_a_blank_line_after_the_last_one(): void
     {
         $capture = new CapturingOutput();
 
         $capture->output()->line('a complete line');
         $capture->output()->finishLine();
 
-        self::assertSame('a complete line' . PHP_EOL, $capture->standardOutput());
+        self::assertSame('a complete line' . PHP_EOL . PHP_EOL, $capture->standardOutput());
         self::assertSame('', $capture->errorOutput());
+    }
+
+    /**
+     * A separation already owed is the blank line the end of the output needs,
+     * not a second one.
+     */
+    #[Test]
+    public function finishing_after_a_separation_still_leaves_one_blank_line(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->line('the last thing said');
+        $capture->output()->separate();
+        $capture->output()->separate();
+        $capture->output()->finishLine();
+
+        self::assertSame('the last thing said' . PHP_EOL . PHP_EOL, $capture->standardOutput());
+    }
+
+    /**
+     * An output that printed nothing ends with nothing.
+     *
+     * `ralph status --json` writes its document on one stream and may write
+     * nothing at all on the other, and a lone newline on the second would be
+     * the only thing in the file it was redirected to.
+     */
+    #[Test]
+    public function a_stream_nothing_was_written_to_is_left_empty(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->separate();
+        $capture->output()->finishLine();
+
+        self::assertSame('', $capture->standardOutput());
+        self::assertSame('', $capture->errorOutput());
+    }
+
+    /**
+     * Section K, item 3 as the lines between two things printed: a separation
+     * is one blank line however many times it is asked for, and it does not
+     * double the blank line a caller composed itself.
+     *
+     * Deferred rather than written, which is what keeps the lines of one report
+     * together: a separation that nothing follows costs nothing, and the blank
+     * line lands in front of the next thing said rather than behind the last.
+     */
+    #[Test]
+    public function a_separation_is_one_blank_line_however_often_it_is_asked_for(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->line('the first thing');
+        $capture->output()->separate();
+        $capture->output()->separate();
+        $capture->output()->line();
+        $capture->output()->line('the second thing');
+        $capture->output()->lines(['a report', 'of two lines']);
+        $capture->output()->separate();
+        $capture->output()->line('and the next thing');
+
+        self::assertSame(
+            'the first thing' . PHP_EOL . PHP_EOL
+                . 'the second thing' . PHP_EOL
+                . 'a report' . PHP_EOL
+                . 'of two lines' . PHP_EOL . PHP_EOL
+                . 'and the next thing' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
+     * A separation closes a line another process left open before it owes the
+     * blank one.
+     *
+     * The case the agent's streamed output creates: the worker stopped
+     * mid-line, the run has finished echoing it, and what comes next is the
+     * loop's own report — which needs a line of its own and a blank line above
+     * it, not one or the other.
+     */
+    #[Test]
+    public function a_separation_after_an_unfinished_chunk_closes_it_first(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->text('working');
+        $capture->output()->separate();
+        $capture->output()->line('TASK-8CA4A94A completed');
+
+        self::assertSame(
+            'working' . PHP_EOL . PHP_EOL . 'TASK-8CA4A94A completed' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
+     * A separation belongs to the output rather than to one of its streams.
+     *
+     * A section ends for both: the diagnostic written after it is as much a new
+     * thing being said as an ordinary line is, and on a terminal the two are
+     * one screen.
+     */
+    #[Test]
+    public function a_separation_reaches_both_streams_that_have_printed(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->line('what the command found');
+        $capture->output()->diagnosticLine('ralph: and what it could not read');
+        $capture->output()->separate();
+        $capture->output()->line('the next section');
+        $capture->output()->diagnosticLine('ralph: and its problem');
+
+        self::assertSame(
+            'what the command found' . PHP_EOL . PHP_EOL . 'the next section' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+        self::assertSame(
+            'ralph: and what it could not read' . PHP_EOL . PHP_EOL . 'ralph: and its problem' . PHP_EOL,
+            $capture->errorOutput(),
+        );
     }
 
     /**
@@ -343,7 +488,11 @@ final class OutputTest extends TestCase
 
         $capture->output()->finishLine();
 
-        self::assertSame('a worker complaint with no newline' . PHP_EOL, $capture->errorOutput());
+        self::assertSame(
+            'a worker complaint with no newline' . PHP_EOL . PHP_EOL,
+            $capture->errorOutput(),
+        );
+        self::assertSame('ralph: carrying on' . PHP_EOL . PHP_EOL, $capture->standardOutput());
     }
 
     /**
