@@ -332,6 +332,8 @@ final class Runner
             sprintf('  %s still records this repository as in use, so nothing will start '
                 . 'here until they have gone.', $lock->path()),
         ]);
+
+        $this->terminal?->separate();
     }
 
     /**
@@ -348,6 +350,7 @@ final class Runner
         // fact that there is interrupted work in the repository at all.
         if ($lock->wasReclaimed()) {
             $this->terminal?->line($lock->describe());
+            $this->terminal?->separate();
         }
 
         // A stop that arrived before the run got this far. Raised rather than
@@ -463,6 +466,8 @@ final class Runner
                     $events->path(),
                     (string) $events->failure(),
                 ));
+
+                $this->terminal?->separate();
             }
 
             $events->close();
@@ -521,6 +526,8 @@ final class Runner
         $this->terminal?->detailLines(
             array_map(static fn (string $line): string => '  ' . $line, $continuation->lines()),
         );
+
+        $this->terminal?->separate();
 
         return $continuation->selection();
     }
@@ -731,6 +738,8 @@ final class Runner
             '  ' . $style->label('next: ') . $stopped->nextAction(),
         ]);
 
+        $this->terminal?->separate();
+
         return $report;
     }
 
@@ -895,6 +904,8 @@ final class Runner
             ...array_map(static fn (string $line): string => '  ' . $line, $drift->lines()),
             '  checks in force: ' . $frozen->describe(),
         ]);
+
+        $this->terminal?->separate();
 
         return $drift;
     }
@@ -1138,6 +1149,11 @@ final class Runner
         }
 
         $this->terminal?->lines($notices);
+
+        // The whole opening is one thing said, however many of its lines this
+        // run had to say: what follows it is the first task (section K,
+        // item 3).
+        $this->terminal?->separate();
     }
 
     /**
@@ -1154,6 +1170,8 @@ final class Runner
         if ($blocker !== null) {
             $this->terminal?->line('  ' . $style->label('next: ') . $blocker->nextAction());
         }
+
+        $this->terminal?->separate();
     }
 
     /**
@@ -1163,9 +1181,11 @@ final class Runner
      * everything between here and the result line is the workspace being
      * prepared, an agent's own output and the checks running, and with no
      * heading over it a reader has to work out which task's hour they are
-     * looking at from the notes. The blank line above it is the same decision —
-     * an agent's last line of output and the loop's next step should not look
-     * like one block of text.
+     * looking at from the notes. The blank lines either side of it are the same
+     * decision, and are now the rule rather than this line's own arrangement
+     * (PROJECT.md section K, item 3): the heading is one thing said, and
+     * neither the result of the task above it nor the agent's first line below
+     * it should look like part of it.
      *
      * The position is the run's own, not the checklist's: this is the second of
      * the tasks *this run took on*, which is the number the limits are measured
@@ -1175,13 +1195,14 @@ final class Runner
     {
         $style = $this->style();
 
-        $this->terminal?->line();
+        $this->terminal?->separate();
         $this->terminal?->line(sprintf(
             '%s %s %s',
             $style->muted(sprintf('[%d/%d]', $position, $taken)),
             $style->identifier($task->id()->value()),
             $style->heading($task->description()),
         ));
+        $this->terminal?->separate();
     }
 
     /**

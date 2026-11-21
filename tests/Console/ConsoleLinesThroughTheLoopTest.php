@@ -21,10 +21,11 @@ use PHPUnit\Framework\TestCase;
 /**
  * What the terminal actually received, command by command.
  *
- * PROJECT.md section K, items 13 and 14 are a promise about every byte the
- * package writes to a terminal: a package-composed line ends with a newline,
- * a chunk streamed from another process keeps its own endings and is not given
- * a second one, and nothing gains a blank line it was not asked for.
+ * PROJECT.md section K, item 3 and its predecessors are a promise about every
+ * byte the package writes to a terminal: a package-composed line ends with a
+ * newline, a chunk streamed from another process keeps its own endings and is
+ * not given a second one, every piece of output is followed by a blank line,
+ * and no piece of output is followed by two.
  * {@see OutputTest}, {@see LogFileTest} and {@see ClaudeStreamTest} hold that
  * promise one class at a time, with a captured stream and a composed chunk.
  *
@@ -38,11 +39,11 @@ use PHPUnit\Framework\TestCase;
  *
  * The invariant each case asserts, on both streams:
  *
- *  - a stream that was written to ends with exactly one newline, so the shell
- *    prompt that follows starts in column one and no command leaves a blank
- *    line behind it;
+ *  - a stream that was written to ends with exactly one blank line, so the
+ *    shell prompt that follows starts in column one with a line's clearance
+ *    and no command leaves two;
  *  - no three consecutive newlines anywhere, which is the duplicate blank line
- *    item 13 names;
+ *    the separation must never produce;
  *  - every line the package composed is whole, and bytes that came from another
  *    process are the bytes that process wrote.
  *
@@ -416,6 +417,103 @@ final class ConsoleLinesThroughTheLoopTest extends TestCase
     }
 
     /**
+     * The blank lines between the pieces of a run's own account.
+     *
+     * Section K, item 3 from the user's side: the quiet run says four things —
+     * which run this is, which task it took on, what happened to it, and why
+     * it ended with what to do next — and each of them is a piece of output
+     * with a blank line after it, so that none of them is read as the
+     * continuation of the one above. Asserted as the paragraphs the output
+     * divides into rather than as substrings, because the claim is about the
+     * spacing and a substring assertion would pass whatever the spacing was.
+     */
+    #[Test]
+    public function a_quiet_run_puts_a_blank_line_after_each_thing_it_says(): void
+    {
+        $this->givenAProjectThatCanRun(FixtureStep::success([self::EDITED => self::EDIT]));
+
+        $result = $this->project->ralph(['run']);
+
+        self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
+        self::assertWroteWholeLines($result);
+
+        $paragraphs = self::paragraphsOf($result->standardOutput);
+        $identifier = TaskId::fromDescription(self::TASK)->value();
+
+        self::assertCount(4, $paragraphs, 'The run\'s account was not divided as expected: ' . $result->describe());
+        self::assertStringContainsString('processing pending tasks', $paragraphs[0], $result->describe());
+        self::assertStringContainsString($identifier . ' ' . self::TASK, $paragraphs[1], $result->describe());
+        self::assertStringContainsString($identifier . ' completed', $paragraphs[2], $result->describe());
+        self::assertStringContainsString('1 of 1 tasks completed', $paragraphs[3], $result->describe());
+
+        // The run's ending is one piece of output of two lines: the figures and
+        // the action they leave the user with belong together, which is the
+        // half of the item that is not spacing — a blank line between *things
+        // said*, not between lines.
+        self::assertStringContainsString('next: ', $paragraphs[3], $result->describe());
+    }
+
+    /**
+     * And the half of the item that is not more spacing: the lines of one
+     * report stay together.
+     *
+     * A blank line after every *line* would double-space a table, which is
+     * neither what the item asks for nor readable. `ralph status` is where that
+     * would show first: its sections are separated from each other, and the
+     * rows under its headings are not separated from their heading.
+     */
+    #[Test]
+    public function the_lines_of_one_report_are_not_separated_from_each_other(): void
+    {
+        $this->givenAProjectThatCanRun(FixtureStep::success([self::EDITED => self::EDIT]));
+
+        $this->project->ralph(['run']);
+
+        $status = $this->project->ralph(['status']);
+
+        self::assertWroteWholeLines($status);
+
+        $paragraphs = self::paragraphsOf($status->standardOutput);
+
+        // Three pieces of output: the project, the latest run, and the tasks.
+        self::assertCount(3, $paragraphs, 'The report was not divided as expected: ' . $status->describe());
+
+        foreach ($paragraphs as $paragraph) {
+            self::assertGreaterThan(
+                1,
+                count(explode(PHP_EOL, rtrim($paragraph, PHP_EOL))),
+                'A section of the report lost its own lines: ' . $status->describe(),
+            );
+        }
+
+        // The table, read as one block: its heading, its column names and its
+        // row, adjacent.
+        self::assertStringContainsString(
+            'Tasks' . PHP_EOL . '  state',
+            $status->standardOutput,
+            $status->describe(),
+        );
+    }
+
+    /**
+     * What the output divides into, read as the user reads it.
+     *
+     * @return list<string> the pieces between blank lines, in order
+     */
+    private static function paragraphsOf(string $text): array
+    {
+        $paragraphs = [];
+
+        foreach (explode(PHP_EOL . PHP_EOL, rtrim($text, PHP_EOL)) as $paragraph) {
+            if (trim($paragraph) !== '') {
+                $paragraphs[] = $paragraph;
+            }
+        }
+
+        return $paragraphs;
+    }
+
+    /**
      * A project with a worker, a task and settings every case here can run.
      */
     private function givenAProjectThatCanRun(FixtureStep $step): void
@@ -427,7 +525,7 @@ final class ConsoleLinesThroughTheLoopTest extends TestCase
     }
 
     /**
-     * Both streams of an invocation, held to the whole of items 13 and 14.
+     * Both streams of an invocation, held to the whole of the promise above.
      */
     private static function assertWroteWholeLines(CliResult $result): void
     {
@@ -438,8 +536,8 @@ final class ConsoleLinesThroughTheLoopTest extends TestCase
 
             $where = sprintf("%s, on %s:\n%s", implode(' ', $result->command), $stream, $result->describe());
 
-            self::assertStringEndsWith("\n", $text, 'Unfinished last line: ' . $where);
-            self::assertStringEndsNotWith("\n\n", $text, 'A blank line was left behind: ' . $where);
+            self::assertStringEndsWith("\n\n", $text, 'No blank line after the output: ' . $where);
+            self::assertStringEndsNotWith("\n\n\n", $text, 'Two blank lines were left behind: ' . $where);
             self::assertStringNotContainsString("\n\n\n", $text, 'A duplicate blank line: ' . $where);
         }
     }

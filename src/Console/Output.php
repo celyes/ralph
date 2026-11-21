@@ -32,6 +32,17 @@ use Celyes\RalphPhp\Support\Secrets;
  * here: by the time a string reaches {@see self::line()} its labels and its
  * values are one string and nothing can tell them apart again.
  *
+ * **Everything this package prints is followed by a blank line.** PROJECT.md
+ * section K, item 3: whatever the package has just said — a status table, a
+ * task's result, an error, the JSON of `status --json` — the next thing on the
+ * screen is a blank line, so that one piece of output is never read as the
+ * continuation of the one above it and a shell prompt never lands against the
+ * last word of a run. The blank line is *owed* rather than written
+ * ({@see self::separate()}): it is put down when something else needs the
+ * space, or by {@see self::finishLine()} on the way out, which is what keeps
+ * two of them from ever landing on top of each other and keeps the lines of
+ * one table, one report or one help page together.
+ *
  * **Some of the lines this package writes are only printed when asked for.**
  * A line composed through {@see self::detail()} belongs to the full account of
  * a run and is written only under {@see Verbosity::Verbose}; a line written
@@ -79,6 +90,46 @@ final class Output
      * @var array<int,true>
      */
     private array $unfinished = [];
+
+    /**
+     * Destinations owed a blank line before anything else is printed there,
+     * keyed by {@see self::destinationOf()}.
+     *
+     * The deferral is the whole of how section K, item 3 avoids becoming
+     * double spacing. An output that has finished saying something says so
+     * ({@see self::separate()}) and the blank line is remembered; the next
+     * line printed there puts it down first, and {@see self::finishLine()}
+     * puts down whatever is still owed at the end of the command. Two
+     * separations in a row, or a separation followed by a caller's own blank
+     * line, are therefore one blank line — the flag is set, not counted.
+     *
+     * @var array<int,true>
+     */
+    private array $owed = [];
+
+    /**
+     * Destinations something has been written to, keyed the same way.
+     *
+     * A blank line is only ever owed by a destination that has something above
+     * it: a command whose diagnostics stayed empty must not have a newline
+     * written into the file standard error was redirected to, and a leading
+     * blank line is the one blank line nobody asked for.
+     *
+     * @var array<int,true>
+     */
+    private array $started = [];
+
+    /**
+     * Destinations already ended by {@see self::finishLine()}.
+     *
+     * So that the last write of the process is idempotent: it is called from
+     * the application's `finally` block, and a second call must not add a
+     * second blank line. Cleared by the next ordinary write, because a
+     * destination written to again has not been ended after all.
+     *
+     * @var array<int,true>
+     */
+    private array $finished = [];
 
     /**
      * Whether the two streams reach the same place, once asked.
@@ -238,6 +289,10 @@ final class Output
      * already carries a trailing newline is not given a second one, and an
      * unfinished line left on the stream by {@see self::text()} is closed
      * before this line is started rather than being written onto.
+     *
+     * A blank line owed by whatever was printed before it is put down first,
+     * and a line asked for with no text at all is itself a separation rather
+     * than a byte written now ({@see self::separate()}).
      */
     public function line(string $text = ''): void
     {
@@ -254,6 +309,28 @@ final class Output
         foreach ($lines as $line) {
             $this->line($line);
         }
+    }
+
+    /**
+     * End the thing that has just been printed.
+     *
+     * The call that makes section K, item 3 true without turning every report
+     * into a double-spaced one: a caller that has finished saying something
+     * says so here, and the blank line after it is written when the next line
+     * is — or at the end of the command, by {@see self::finishLine()}. Nothing
+     * is written now beyond closing a line another process left open, so the
+     * cost of calling it twice, or of calling it and then printing nothing at
+     * all, is nothing.
+     *
+     * Both destinations are separated, each only if something has been printed
+     * there: a section break belongs to the output rather than to one of its
+     * two streams, and a diagnostic written after one is as much a new thing
+     * being said as an ordinary line is.
+     */
+    public function separate(): void
+    {
+        $this->separateStream($this->standard);
+        $this->separateStream($this->diagnostic);
     }
 
     /**
@@ -329,23 +406,80 @@ final class Output
     }
 
     /**
-     * Close an unfinished line on either stream, if one was left open.
+     * End the command's output: close any open line, and leave a blank one.
      *
-     * The last thing {@see Application::run()} does, so that a command cannot
-     * hand the shell a prompt halfway along a line — which is what a worker
-     * whose final chunk had no newline, or a log file that ends without one,
-     * would otherwise leave behind. Idempotent, and a no-op in the ordinary
-     * case where everything written ended its own line.
+     * The last thing {@see Application::run()} does. Two promises, and the
+     * first is older than the second: a command cannot hand the shell a prompt
+     * halfway along a line — which is what a worker whose final chunk had no
+     * newline, or a log file that ends without one, would otherwise leave
+     * behind — and whatever it said last is followed by one blank line
+     * (PROJECT.md section K, item 3), so that the prompt that follows is not
+     * sitting against the run's last word.
+     *
+     * A stream nothing was written to is left alone, and a second call adds
+     * nothing: the blank line is the end of this command's output, not a thing
+     * that happens once per call.
      */
     public function finishLine(): void
     {
-        if (!$this->atLineStart($this->standard)) {
-            $this->line();
+        $this->finishStream($this->standard);
+        $this->finishStream($this->diagnostic);
+    }
+
+    /**
+     * Owe a blank line on one stream, closing an open line first.
+     *
+     * @param resource $stream
+     */
+    private function separateStream(mixed $stream): void
+    {
+        if (!is_resource($stream)) {
+            return;
         }
 
-        if (!$this->atLineStart($this->diagnostic)) {
-            $this->diagnosticLine();
+        $destination = $this->destinationOf($stream);
+
+        if (!isset($this->started[$destination])) {
+            return;
         }
+
+        // Closed now rather than left open and owed, so that what is
+        // outstanding is only ever "a blank line after a finished line" —
+        // there is one state to put down later instead of two.
+        if (!$this->atLineStart($stream)) {
+            $this->write($stream, PHP_EOL);
+        }
+
+        $this->owed[$destination] = true;
+    }
+
+    /**
+     * End one stream's output, once.
+     *
+     * @param resource $stream
+     */
+    private function finishStream(mixed $stream): void
+    {
+        if (!is_resource($stream)) {
+            return;
+        }
+
+        $destination = $this->destinationOf($stream);
+
+        if (!isset($this->started[$destination]) || isset($this->finished[$destination])) {
+            return;
+        }
+
+        if (!$this->atLineStart($stream)) {
+            $this->write($stream, PHP_EOL);
+        }
+
+        // The blank line, whether or not one was already owed: either way the
+        // output ends with exactly one, which is what the item asks for and
+        // what a shell prompt needs.
+        unset($this->owed[$destination]);
+        $this->write($stream, PHP_EOL);
+        $this->finished[$destination] = true;
     }
 
     /**
@@ -364,18 +498,23 @@ final class Output
     /**
      * Write one of this package's own lines, ending it exactly once.
      *
-     * Three things happen here, and they are here rather than in each of the
-     * forty places that print something (PROJECT.md section K, item 13):
+     * Four things happen here, and they are here rather than in each of the
+     * hundred and fifty places that print something:
      *
      *  - an unfinished line is closed first, so a note never lands on the end
      *    of a worker's half-printed progress indicator;
+     *  - a blank line owed by whatever was printed before this is put down
+     *    before the text, which is how one piece of output comes to be
+     *    separated from the next (PROJECT.md section K, item 3);
      *  - the text is ended, whether or not it arrived ended, so that a caller
      *    passing a string it read from somewhere else cannot produce a line
-     *    with no ending or a stray blank one after it;
-     *  - an empty line is written as the single newline it is. That is both a
-     *    deliberate blank line and the way an unfinished one is closed, and the
-     *    two must not combine into two newlines where the caller asked for one
-     *    blank line.
+     *    with no ending or a stray blank one after it. A caller that composed
+     *    its own blank line keeps it, as a separation rather than as bytes, so
+     *    that it collapses with the next one instead of doubling;
+     *  - a line asked for with no text is a separation and nothing else. That
+     *    is both the deliberate blank line a caller wanted and the way an
+     *    unfinished line is closed, and the two must not combine into two
+     *    newlines where one blank line was asked for.
      *
      * @param resource $stream
      */
@@ -384,35 +523,42 @@ final class Output
         $text = $this->secrets->redact($text);
 
         if ($text === '') {
-            $this->write($stream, PHP_EOL);
+            $this->separateStream($stream);
 
             return;
         }
 
+        $body = rtrim($text, "\r\n");
         $prefix = $this->atLineStart($stream) ? '' : PHP_EOL;
+        $destination = $this->destinationOf($stream);
 
-        $this->write($stream, $prefix . self::ended($text));
+        if (isset($this->owed[$destination])) {
+            $prefix .= PHP_EOL;
+            unset($this->owed[$destination]);
+        }
+
+        $this->write($stream, $prefix . $body . PHP_EOL);
+
+        // The blank lines the caller composed onto the end of its own text,
+        // kept as what they are: a separation, owed and collapsible, rather
+        // than newlines already on the stream that the next separation would
+        // double.
+        if (self::endingsOf($text) > 1) {
+            $this->separateStream($stream);
+        }
     }
 
     /**
-     * The text with exactly one line ending on the end of it.
+     * How many line endings the text carries on the end of it.
      *
-     * One ending is removed before one is added, rather than all of them: a
-     * caller that composed "a paragraph\n\n" asked for the blank line after it
-     * and keeps it, while a caller that passed a single trailing newline — or
-     * none — gets the same single ending either way.
+     * One `\r\n` is one ending, which is why this counts newlines rather than
+     * the characters {@see writeLine()} trimmed: text read out of a file
+     * written on Windows asked for no more spacing than the same text written
+     * here.
      */
-    private static function ended(string $text): string
+    private static function endingsOf(string $text): int
     {
-        if (str_ends_with($text, "\n")) {
-            $text = substr($text, 0, -1);
-
-            if (str_ends_with($text, "\r")) {
-                $text = substr($text, 0, -1);
-            }
-        }
-
-        return $text . PHP_EOL;
+        return substr_count(substr($text, strlen(rtrim($text, "\r\n"))), "\n");
     }
 
     /**
@@ -453,6 +599,12 @@ final class Output
         // that is gone is never written to again, so the pessimistic answer is
         // the safe one in both directions.
         $destination = $this->destinationOf($stream);
+
+        // Something has been printed here, so this destination can be owed a
+        // blank line and has an end worth ending; and a destination written to
+        // after it was ended has not been ended after all.
+        $this->started[$destination] = true;
+        unset($this->finished[$destination]);
 
         if (str_ends_with($text, "\n")) {
             unset($this->unfinished[$destination]);
