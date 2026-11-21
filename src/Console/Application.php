@@ -31,9 +31,6 @@ use Throwable;
  */
 final class Application
 {
-    private const string VERBOSE_SHORT = 'v';
-    private const string VERBOSE_LONG = 'verbose';
-
     /**
      * The global options every command tolerates without declaring them.
      *
@@ -46,8 +43,8 @@ final class Application
     public const array GLOBAL_OPTIONS = [
         'h',
         'help',
-        self::VERBOSE_SHORT,
-        self::VERBOSE_LONG,
+        'v',
+        'verbose',
         'color',
         'colour',
         'no-color',
@@ -94,10 +91,15 @@ final class Application
     public function run(array $argv): int
     {
         $tokens = array_slice($argv, 1);
-        $verbose = $this->isVerbose($tokens);
 
         // Before anything is dispatched, and before anything can fail: the
-        // output that would report a failure is the output this decides.
+        // output that would report a failure is the output these decide. How
+        // much is printed is settled here rather than per command for the
+        // reason the colour is — one answer for the process, read off the raw
+        // line, so that a usage error is reported in the form the user asked
+        // for (PROJECT.md section K, item 2).
+        $this->output->useVerbosity(Verbosity::requestedIn($tokens));
+
         $colour = ColourChoice::requestedIn($tokens);
 
         if ($colour !== null) {
@@ -109,9 +111,9 @@ final class Application
         try {
             return $this->dispatch($tokens);
         } catch (RalphException $exception) {
-            return $this->report($exception, $exception->exitCode(), $verbose);
+            return $this->report($exception, $exception->exitCode());
         } catch (Throwable $exception) {
-            return $this->report($exception, ExitCode::SOFTWARE, $verbose);
+            return $this->report($exception, ExitCode::SOFTWARE);
         } finally {
             // The last write of the process, and the reason a shell prompt
             // never lands halfway along a line: a worker's final chunk, or a
@@ -223,9 +225,10 @@ final class Application
     /**
      * Print a failure and return its exit status.
      */
-    private function report(Throwable $exception, int $exitCode, bool $verbose): int
+    private function report(Throwable $exception, int $exitCode): int
     {
         $output = $this->output;
+        $verbose = $output->isVerbose();
         $style = $output->diagnosticStyle();
         $recognised = $exception instanceof RalphException;
 
@@ -267,33 +270,6 @@ final class Application
         }
 
         return $exitCode;
-    }
-
-    /**
-     * Whether the raw tokens ask for verbose error output.
-     *
-     * Checked against raw tokens rather than parsed input because parsing can
-     * itself fail, and that failure should still honour the flag.
-     *
-     * @param list<string> $tokens
-     */
-    private function isVerbose(array $tokens): bool
-    {
-        foreach ($tokens as $token) {
-            if ($token === '--') {
-                return false;
-            }
-
-            if ($token === '--' . self::VERBOSE_LONG) {
-                return true;
-            }
-
-            if (preg_match('/^-[A-Za-z]+$/', $token) === 1 && str_contains($token, self::VERBOSE_SHORT)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**

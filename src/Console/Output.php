@@ -31,6 +31,14 @@ use Celyes\RalphPhp\Support\Secrets;
  * {@see ColourChoice}) and is applied where a line is composed rather than
  * here: by the time a string reaches {@see self::line()} its labels and its
  * values are one string and nothing can tell them apart again.
+ *
+ * **Some of the lines this package writes are only printed when asked for.**
+ * A line composed through {@see self::detail()} belongs to the full account of
+ * a run and is written only under {@see Verbosity::Verbose}; a line written
+ * through {@see self::line()} is the package's own account of its work and is
+ * always written. Which is which is decided where a line is composed, for the
+ * reason the styling is: only the caller knows whether what it is about to say
+ * is the outcome or the commentary.
  */
 final class Output
 {
@@ -87,6 +95,16 @@ final class Output
     private ?bool $sharedDestination = null;
 
     /**
+     * How much of what the package is doing this output prints.
+     *
+     * Not readonly, for the reason the secrets and the colour are not: the
+     * streams exist before the command line has been parsed, and `--verbose`
+     * has to reach the output that is already in use ({@see
+     * self::useVerbosity()}).
+     */
+    private Verbosity $verbosity;
+
+    /**
      * Whether this output may colour the lines it composes.
      *
      * Not readonly, for the same reason the secrets are not: the streams exist
@@ -114,9 +132,11 @@ final class Output
         private readonly mixed $diagnostic,
         ?Secrets $secrets = null,
         ColourChoice $colour = ColourChoice::Auto,
+        Verbosity $verbosity = Verbosity::Quiet,
     ) {
         $this->secrets = $secrets ?? Secrets::none();
         $this->colour = $colour;
+        $this->verbosity = $verbosity;
     }
 
     /**
@@ -147,6 +167,32 @@ final class Output
     public function secrets(): Secrets
     {
         return $this->secrets;
+    }
+
+    /**
+     * Decide how much this output prints.
+     *
+     * Called once, by {@see Application}, for `--verbose`. It reaches the
+     * output already in use rather than producing a second one, because the
+     * output a command was handed is also the one a failure is reported
+     * through, and a stack trace is detail like any other.
+     */
+    public function useVerbosity(Verbosity $verbosity): void
+    {
+        $this->verbosity = $verbosity;
+    }
+
+    /**
+     * Whether this output prints the full account of what the package is doing.
+     *
+     * Asked by the places that have something larger than a line to decide:
+     * {@see \Celyes\RalphPhp\Log\TerminalSink}, which passes another
+     * process's bytes through, and {@see Application}, which has a stack trace
+     * to print or to offer.
+     */
+    public function isVerbose(): bool
+    {
+        return $this->verbosity->isVerbose();
     }
 
     /**
@@ -207,6 +253,39 @@ final class Output
     {
         foreach ($lines as $line) {
             $this->line($line);
+        }
+    }
+
+    /**
+     * Write a line that belongs to the full account of a run.
+     *
+     * The commentary rather than the outcome: which checks were frozen, which
+     * agent a resume inherited, what a run was told about its own
+     * configuration. Printed under `--verbose` and dropped otherwise, which is
+     * the whole of PROJECT.md section K, item 2 as far as this package's own
+     * lines are concerned — the agent's output is dropped a layer further out,
+     * where it is streamed ({@see \Celyes\RalphPhp\Log\TerminalSink}).
+     *
+     * Dropped, not buffered: nothing comes back later to print it. What a quiet
+     * run did is on the attempt's log and in the state store either way, and
+     * `ralph logs TASK-ID` is where it is read.
+     */
+    public function detail(string $text = ''): void
+    {
+        if ($this->isVerbose()) {
+            $this->line($text);
+        }
+    }
+
+    /**
+     * Write several lines of the full account.
+     *
+     * @param list<string> $lines
+     */
+    public function detailLines(array $lines): void
+    {
+        if ($this->isVerbose()) {
+            $this->lines($lines);
         }
     }
 

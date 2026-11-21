@@ -182,7 +182,11 @@ final class RecoveryThroughTheLoopTest extends TestCase
             fn (): CliResult => $this->project->ralph(['run']),
         );
 
-        $finished = $this->project->ralph(['run']);
+        // Verbose, because what the second run is doing instead of starting
+        // the task over is noted beside the agent's output, which a quiet run
+        // does not echo (section K, item 2). The note is on the attempt's log
+        // either way, and the rows asserted below are what the item turns on.
+        $finished = $this->project->ralph(['run', '--verbose']);
 
         self::assertSame(ExitCode::SUCCESS, $finished->exitCode, $finished->describe());
         self::assertStringContainsString('resuming finalization', $finished->allOutput(), $finished->describe());
@@ -331,7 +335,8 @@ final class RecoveryThroughTheLoopTest extends TestCase
         $theirs = self::CHECKLIST . "\nOnce this is done, tag the release.\n";
         $this->project->editChecklist($theirs);
 
-        $finished = $this->project->ralph(['run']);
+        // Verbose, for the reason the case above gives.
+        $finished = $this->project->ralph(['run', '--verbose']);
 
         self::assertSame(ExitCode::SUCCESS, $finished->exitCode, $finished->describe());
         self::assertStringContainsString('has been edited since this write was planned', $finished->allOutput());

@@ -125,7 +125,13 @@ final class RunCommandTest extends TestCase
             ->withTasks([self::TASK])
             ->withoutChecks();
 
-        $result = $this->project->ralph(['run']);
+        // Verbose, for the second of the two lines below: what a pass did
+        // instead of verifying is a note beside the agent's own output, and a
+        // quiet run shows neither (section K, item 2). The first line is a
+        // warning and is printed either way, which
+        // {@see self::a_quiet_run_still_warns_that_nothing_will_be_verified()}
+        // is where that is held to.
+        $result = $this->project->ralph(['run', '--verbose']);
 
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
 

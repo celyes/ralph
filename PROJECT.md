@@ -212,7 +212,7 @@ The checkboxes below are the work required to BUILD THE PHP PACKAGE. They are th
 ### K. Enhancements
 
 - [x] Remove all the git logic and let the package work on the current branch of the user. No need for shared-strategy and branch-per-task bullshit. JUST WORK ON THE CURRENT CODE REGARDLESS OF GIT.
-- [ ] Add a new verbose mode that is not enabled by default. When enabled (using a flag), all the output is printed just like what's happening now (the current output is verbose). When disabled, which is the default, less output should be shown
+- [x] Add a new verbose mode that is not enabled by default. When enabled (using a flag), all the output is printed just like what's happening now (the current output is verbose). When disabled, which is the default, less output should be shown
 - [ ] Add a newline (\n\n) after every output that the package prints to the console regardless of what it is. There should always be a new line 
 
 ## 6. Release acceptance criteria

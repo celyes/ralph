@@ -38,6 +38,17 @@ use Celyes\RalphPhp\Console\Style;
  * redirected to /dev/null; the attempt's log file and the state store are what
  * a later command reads. This sink is allowed to fail quietly for that reason —
  * a closed pipe when a user quits a pager should not end a run.
+ *
+ * **And so nothing here is printed unless it was asked for.** This sink is the
+ * whole of what a run repeats from somewhere else — an agent's bytes and the
+ * notes the package files alongside them — which is to say it is the wall of
+ * text PROJECT.md section K, item 2 makes optional. Under
+ * {@see \Celyes\RalphPhp\Console\Verbosity::Quiet} it writes nothing at all,
+ * and the run's own lines ({@see \Celyes\RalphPhp\Run\Runner}) are what a
+ * user sees. The decision is taken per write rather than by leaving the sink
+ * out of the composite, so that the one place that knows what is being echoed
+ * is also the place that decides whether to echo it — and so that an attempt's
+ * log is opened, written and closed identically either way.
  */
 final class TerminalSink implements OutputSink
 {
@@ -47,7 +58,7 @@ final class TerminalSink implements OutputSink
 
     public function write(OutputStream $stream, string $chunk): void
     {
-        if ($chunk === '') {
+        if ($chunk === '' || !$this->output->isVerbose()) {
             return;
         }
 
@@ -72,9 +83,17 @@ final class TerminalSink implements OutputSink
      * keeps the plain form: {@see LogFile} is written for a reader who comes
      * back to it later, and escape sequences in a file somebody is grepping are
      * a cost with no benefit.
+     *
+     * A quiet run shows none of them. A note is the package narrating a step of
+     * its own work — a workspace, an invocation, a check — and the outcome that
+     * narration arrives at is printed by the run either way.
      */
     public function note(string $line): void
     {
+        if (!$this->output->isVerbose()) {
+            return;
+        }
+
         $style = $this->output->style();
 
         $this->output->line($style->muted(LogFile::NOTE_PREFIX) . $this->subject($line, $style));

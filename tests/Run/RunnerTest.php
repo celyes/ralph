@@ -8,6 +8,7 @@ use Celyes\RalphPhp\Agent\AdapterRegistry;
 use Celyes\RalphPhp\Config\Configuration;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\VerificationSnapshot;
+use Celyes\RalphPhp\Console\Verbosity;
 use Celyes\RalphPhp\Exception\CheckoutException;
 use Celyes\RalphPhp\Exception\InterruptionException;
 use Celyes\RalphPhp\Exception\LockException;
@@ -206,7 +207,10 @@ final class RunnerTest extends TestCase
                 ->saying('added the option and a test for it'),
         ]);
 
-        $terminal = new CapturingOutput();
+        // Verbose: the evidence the tick rests on is noted alongside the
+        // agent's own output, which is the account `--verbose` asks for and
+        // `ralph logs TASK-ID` prints afterwards (section K, item 2).
+        $terminal = new CapturingOutput(Verbosity::Verbose);
         $result = $this->loopOver(ScriptedVerifier::passing(), terminal: $terminal)->results()[0];
 
         // The conditions were read, and the write they permitted landed.
@@ -1153,7 +1157,10 @@ final class RunnerTest extends TestCase
             FixtureStep::success(['README.md' => "An example project.\n\n## Import\n"]),
         ]);
 
-        $terminal = new CapturingOutput();
+        // Verbose: the edit itself is said however quietly a run goes, but
+        // which checks changed and which set is in force is the detail behind
+        // it, and the detail is what this case reads (section K, item 2).
+        $terminal = new CapturingOutput(Verbosity::Verbose);
         $verifier = ScriptedVerifier::passing();
         $report = $this->loopFromTheConfigFile($verifier, $terminal);
 
@@ -1207,7 +1214,7 @@ final class RunnerTest extends TestCase
             '.ralph/config.json' => '{ this is no longer JSON',
         ])]);
 
-        $terminal = new CapturingOutput();
+        $terminal = new CapturingOutput(Verbosity::Verbose);
         $report = $this->loopFromTheConfigFile(ScriptedVerifier::passing(), $terminal);
         $result = $report->results()[0];
 

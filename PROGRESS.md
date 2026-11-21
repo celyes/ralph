@@ -11052,3 +11052,90 @@ agent on a design that no longer exists.
 
 **No push.** This repository's `origin` is SSH with no usable key, so the work
 is committed only.
+
+## 2026-11-21 — Section K, item 2: two accounts of a run, and the quiet one is the default
+
+**Task:** Add a new verbose mode that is not enabled by default. When enabled
+(using a flag), all the output is printed just like what's happening now (the
+current output is verbose). When disabled, which is the default, less output
+should be shown. *(PROJECT.md section K, item 2)*
+
+**The shape of the answer.** Two complete accounts rather than an account and a
+truncation. A run hands an agent a task and then has nothing to do for twenty
+minutes but repeat what the agent is saying, and what the agent says is
+thousands of lines of reasoning, tool calls and diffs with the four lines that
+are the run's own account buried in it. So the default prints what Ralph PHP
+composes about its own work — which run this is, which task was taken on, what
+happened to it, why the run ended — and `--verbose` prints that plus everything
+else.
+
+**What was done**
+
+- `src/Console/Verbosity.php`, a new enum with `Quiet` and `Verbose` cases. It
+  reads the flag off the raw argv tokens rather than parsed input, for the
+  reason `ColourChoice::requestedIn()` already does: parsing a command line can
+  itself fail, and the report of that failure is output this decides the shape
+  of. The short form is found inside a bundle, so `-nv` and `-vn` both ask for
+  it, and everything after `--` belongs to no option.
+- `Output` gained `detail()` and `detailLines()` beside `line()` and `lines()`.
+  Which of the two a line goes through is decided where the line is composed,
+  for the same reason the styling is — only the caller knows whether what it is
+  about to say is the outcome or the commentary. `useVerbosity()` reaches the
+  output already in use rather than making a second one, because the output a
+  command was handed is also the one a failure is reported through.
+- `Application` now settles verbosity before dispatch, next to the colour, and
+  `report()` reads `--verbose` off the output instead of re-scanning the tokens.
+  The duplicate `isVerbose()` scanner and its two constants are gone.
+- `TerminalSink` writes nothing under `Quiet` — both the agent's bytes and the
+  `--- ` notes filed beside them. The decision is taken per write rather than by
+  leaving the sink out of the composite, so the one place that knows what is
+  being echoed is also the place that decides whether to echo it, and so an
+  attempt's log is opened, written and closed identically either way.
+- `Runner::announce()` was split three ways. The run's identity line is printed
+  however quietly the run was asked to go, because it is what `status`, `logs`
+  and `resume` are asked about afterwards. The warnings are too — each one says
+  this run will behave differently from the run the user thinks they started,
+  and a warning withheld until `--verbose` is a warning that arrives after the
+  damage. The resolved settings are commentary on a file the user can read, and
+  are detail. The same split was applied to the frozen-checks drift report: the
+  fact of the edit is said, which settings changed is detail.
+
+**Nothing durable depends on the flag.** The attempt's log, the event stream,
+the state store and the checklist are written identically either way. A quiet
+run is a run whose terminal said less, not a run that kept less, and `ralph
+logs TASK-ID` prints afterwards what a verbose run would have shown while it
+happened.
+
+**Verification**
+
+- `vendor/bin/phpunit` — whole suite green on PHP 8.5: 2,217 tests, 7,798
+  assertions, up 20 tests from the last item's 2,197.
+- `tests/Console/VerbosityTest.php` covers the flag's reading: the long form,
+  the short form, the short form inside a bundle, a token that only looks like
+  it, and that `--` ends the options.
+- `tests/Console/VerbosityThroughTheLoopTest.php` runs the real binary twice
+  over the same project and compares the two terminals. The quiet run is
+  asserted to still carry the four kinds of line a user needs to act on and to
+  carry none of the three that are the wall of text; the verbose run to be the
+  run that was there before the flag existed; and — the assertion that makes the
+  default safe — a quiet run to keep on disk everything a verbose run shows.
+- `vendor/bin/phpstan analyse src tests --level=5` — the five findings it
+  reports are the five from before this change; no new one.
+- Run by hand in a scratch repository against a shell-script agent speaking the
+  real result protocol: the quiet run is 6 lines and the verbose run 24 over the
+  same task, both completing it; the quiet run's `attempt-01-agent.log` holds
+  the agent's output and the check's output; a config error reported under
+  `--verbose` carries its stack trace and without it does not; and the
+  no-checks-configured warning reaches a quiet terminal.
+
+**Documentation.** The README gained a "How much is printed" section with both
+accounts shown, the note that nothing durable depends on the flag, and the
+closing advice to leave it off if unsure; the command table, the `ralph run`
+reference, the phase table and the logs section were corrected where they said
+worker output is streamed to the terminal unconditionally; and a troubleshooting
+row was added for the run that prints a task and then nothing, which is the one
+new way a quiet default can confuse somebody. `ralph --help` and `ralph help
+run` describe the flag as what it now is rather than as a stack-trace switch.
+
+**No push.** This repository's `origin` is SSH with no usable key, so the work
+is committed only.

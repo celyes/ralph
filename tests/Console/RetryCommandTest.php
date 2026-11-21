@@ -103,7 +103,9 @@ final class RetryCommandTest extends TestCase
         // The limit is one attempt per task, and the task has already had one.
         // A retry that spent the task's exhausted allowance would refuse before
         // invoking anything; this one invokes the agent and fails again.
-        $result = $this->project->ralph(['retry', TaskId::fromDescription(self::TASK)->value()]);
+        // Verbose, because the attempt's number is noted where the agent's
+        // own output is, and a quiet run shows neither (section K, item 2).
+        $result = $this->project->ralph(['retry', TaskId::fromDescription(self::TASK)->value(), '--verbose']);
 
         self::assertSame(ExitCode::EXECUTION, $result->exitCode, $result->describe());
         self::assertStringContainsString('attempt 2', $result->standardOutput, $result->describe());

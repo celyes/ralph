@@ -8,6 +8,7 @@ use Celyes\RalphPhp\Agent\AgentEnvironment;
 use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Console\ColourChoice;
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Verbosity;
 use Celyes\RalphPhp\Support\Secrets;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
@@ -485,6 +486,80 @@ final class OutputTest extends TestCase
             'ralph: the run could not carry on' . PHP_EOL,
             (string) stream_get_contents($diagnostic),
         );
+    }
+
+    /**
+     * The quiet run, which is the one a user who asked for nothing gets: the
+     * commentary is dropped and the outcome is not.
+     *
+     * Dropped rather than held: there is no later call that prints it, which
+     * is what makes `ralph logs TASK-ID` the way back to it (section K,
+     * item 2).
+     */
+    #[Test]
+    public function a_quiet_output_writes_the_outcome_and_drops_the_commentary(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->detail('checks: tests');
+        $capture->output()->detailLines(['the workspace is ready', 'the agent is starting']);
+        $capture->output()->line('TASK-8CA4A94A completed');
+
+        self::assertFalse($capture->output()->isVerbose());
+        self::assertSame('TASK-8CA4A94A completed' . PHP_EOL, $capture->standardOutput());
+    }
+
+    #[Test]
+    public function a_verbose_output_writes_both(): void
+    {
+        $capture = new CapturingOutput(Verbosity::Verbose);
+
+        $capture->output()->detail('checks: tests');
+        $capture->output()->detailLines(['the workspace is ready', 'the agent is starting']);
+        $capture->output()->line('TASK-8CA4A94A completed');
+
+        self::assertTrue($capture->output()->isVerbose());
+        self::assertSame(
+            'checks: tests' . PHP_EOL
+                . 'the workspace is ready' . PHP_EOL
+                . 'the agent is starting' . PHP_EOL
+                . 'TASK-8CA4A94A completed' . PHP_EOL,
+            $capture->standardOutput(),
+        );
+    }
+
+    /**
+     * The flag reaches the output that is already in use.
+     *
+     * The streams exist before the command line has been read, and the output
+     * a command was handed is also the one its failure is reported through, so
+     * `--verbose` has to change that one rather than produce a second.
+     */
+    #[Test]
+    public function the_flag_reaches_an_output_that_is_already_open(): void
+    {
+        $capture = new CapturingOutput();
+
+        $capture->output()->detail('before');
+        $capture->output()->useVerbosity(Verbosity::Verbose);
+        $capture->output()->detail('after');
+
+        self::assertSame('after' . PHP_EOL, $capture->standardOutput());
+    }
+
+    /**
+     * Detail is the package's own line, so it is redacted like one: a setting
+     * printed back to the user must not carry a key with it.
+     */
+    #[Test]
+    public function detail_is_redacted_like_any_other_line_the_package_composes(): void
+    {
+        $capture = new CapturingOutput(Verbosity::Verbose);
+        $capture->output()->redact($this->secrets());
+
+        $capture->output()->detail('the agent was given ' . self::SECRET);
+
+        self::assertSame('the agent was given [redacted TEST_KEY]' . PHP_EOL, $capture->standardOutput());
     }
 
     /**

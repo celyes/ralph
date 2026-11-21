@@ -15,6 +15,7 @@ use Celyes\RalphPhp\Agent\Workspace;
 use Celyes\RalphPhp\Config\AgentDefinition;
 use Celyes\RalphPhp\Config\ConfigurationLoader;
 use Celyes\RalphPhp\Config\Limits;
+use Celyes\RalphPhp\Console\Verbosity;
 use Celyes\RalphPhp\Exception\ProcessException;
 use Celyes\RalphPhp\Log\AttemptLog;
 use Celyes\RalphPhp\Log\LogDirectory;
@@ -727,11 +728,15 @@ final class ProcessAdapterTest extends TestCase
      * agent's output on the terminal as it is produced and in the task's own
      * log afterwards, with the exit status and the elapsed time recorded in the
      * log by the package rather than claimed by the agent.
+     *
+     * The terminal is a verbose one, because that is the run that watches an
+     * agent work (section K, item 2). The log half of this is written either
+     * way, which {@see AttemptLogTest} is where it is said.
      */
     #[Test]
     public function an_attempt_is_shown_on_the_terminal_and_kept_in_the_tasks_log(): void
     {
-        $terminal = new CapturingOutput();
+        $terminal = new CapturingOutput(Verbosity::Verbose);
         $request = $this->request();
         $logs = LogDirectory::in($this->project);
         $log = AttemptLog::open($logs, $request->generation(), $request->attempt(), $terminal->output());

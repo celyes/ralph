@@ -6,6 +6,7 @@ namespace Celyes\RalphPhp\Tests\Log;
 
 use Celyes\RalphPhp\Console\ColourChoice;
 use Celyes\RalphPhp\Console\Style;
+use Celyes\RalphPhp\Console\Verbosity;
 use Celyes\RalphPhp\Log\LogFile;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Log\TerminalSink;
@@ -24,9 +25,15 @@ final class TerminalSinkTest extends TestCase
 
     private TerminalSink $sink;
 
+    /**
+     * Everything below is about what a verbose run shows, because that is the
+     * only run this sink writes to at all: echoing another process's output is
+     * the wall of text PROJECT.md section K, item 2 makes optional, and a quiet
+     * run gets none of it. The two cases at the bottom are that half.
+     */
     protected function setUp(): void
     {
-        $this->terminal = new CapturingOutput();
+        $this->terminal = new CapturingOutput(Verbosity::Verbose);
         $this->sink = new TerminalSink($this->terminal->output());
     }
 
@@ -193,5 +200,42 @@ final class TerminalSinkTest extends TestCase
         $this->sink->close();
 
         self::assertSame("done\n", $this->terminal->standardOutput());
+    }
+
+    /**
+     * The default: a run says what it did, not what the agent said while doing
+     * it. Both streams, because an agent that complains on its error stream is
+     * still an agent repeating itself into a terminal nobody asked to watch.
+     */
+    #[Test]
+    public function a_quiet_run_is_shown_none_of_the_workers_output(): void
+    {
+        $terminal = new CapturingOutput();
+        $sink = new TerminalSink($terminal->output());
+
+        $sink->write(OutputStream::Standard, "reading the file\n");
+        $sink->write(OutputStream::Error, 'warning: the key is about to expire');
+        $sink->note('scripted exited with status 0 after 1.2s');
+        $sink->close();
+
+        self::assertSame('', $terminal->standardOutput());
+        self::assertSame('', $terminal->errorOutput());
+    }
+
+    /**
+     * And the line a quiet run never printed is not owed a newline on the way
+     * out: the close that finishes an unfinished line must not invent one over
+     * output that never happened.
+     */
+    #[Test]
+    public function a_quiet_runs_close_writes_nothing_either(): void
+    {
+        $terminal = new CapturingOutput();
+        $sink = new TerminalSink($terminal->output());
+
+        $sink->write(OutputStream::Standard, 'no trailing newline');
+        $sink->close();
+
+        self::assertSame('', $terminal->standardOutput());
     }
 }
