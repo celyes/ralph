@@ -119,7 +119,11 @@ final class ResumeCommandTest extends TestCase
         $interrupted = $this->project->journal()->runs()->latest();
         self::assertNotNull($interrupted);
 
-        $result = $this->project->ralph(['resume']);
+        // Verbose: what a continuation inherited is commentary on the
+        // settings it is running under, which is the account `--verbose` asks
+        // for (section K, item 2). That the counters really were inherited is
+        // asserted below against the rows, not against the line.
+        $result = $this->project->ralph(['resume', '--verbose']);
 
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertStringContainsString(

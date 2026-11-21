@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Support;
 
 use Celyes\RalphPhp\Console\Output;
+use Celyes\RalphPhp\Console\Verbosity;
 use RuntimeException;
 
 /**
@@ -24,11 +25,16 @@ final class CapturingOutput
 
     private readonly Output $output;
 
-    public function __construct()
+    /**
+     * @param Verbosity $verbosity how much the output under test prints; the
+     *        default is the default a user gets, so a case that asserts on a
+     *        line only a verbose run writes has to say so
+     */
+    public function __construct(Verbosity $verbosity = Verbosity::Quiet)
     {
         $this->standard = self::openMemoryStream();
         $this->diagnostic = self::openMemoryStream();
-        $this->output = new Output($this->standard, $this->diagnostic);
+        $this->output = new Output($this->standard, $this->diagnostic, verbosity: $verbosity);
     }
 
     /**

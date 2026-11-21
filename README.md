@@ -45,7 +45,7 @@ through four phases, and the run names each one as it enters it:
 | Phase | What happens | Who does the work |
 | --- | --- | --- |
 | **preparing** | The briefing is assembled: the task, your context file, and notes from earlier attempts. | Ralph PHP |
-| **executing** | The agent is started in your project directory with the briefing on its standard input. Its output is streamed to your terminal and to the task's log. | the agent |
+| **executing** | The agent is started in your project directory with the briefing on its standard input. Its output goes to the task's log, and to your terminal as well under `--verbose`. | the agent |
 | **verifying** | Your `checks` commands are run in the same directory, by Ralph PHP rather than by the agent. Each command's output, exit code and duration are recorded. | Ralph PHP |
 | **finalizing** | The task's checkbox is ticked in `.ralph/tasks.md`. | Ralph PHP |
 
@@ -151,6 +151,7 @@ run-20261111-222204-dcc43e: 1 of 1 tasks completed with codex, 0 remaining — e
 - [Limits](#limits)
 - [Recovery](#recovery)
 - [Logs and diagnostics](#logs-and-diagnostics)
+- [How much is printed](#how-much-is-printed)
 - [Console output](#console-output)
 - [Colour](#colour)
 - [Exit codes](#exit-codes)
@@ -302,8 +303,10 @@ have it edit this repository.
 | [`ralph help`](#ralph-help-command-ralph-version) | Read the usage for the application or one command. |
 
 Every command takes `-h`/`--help` for its own usage, and `-v`/`--verbose` to
-include stack traces in error output. `ralph help COMMAND` prints the same
-detail as `--help`. `--color` and `--no-color` decide the colour of what is
+print everything it is doing rather than only what it did — the agent's output
+as it arrives, a note for each step, and stack traces in error output
+([How much is printed](#how-much-is-printed)). `ralph help COMMAND` prints the
+same detail as `--help`. `--color` and `--no-color` decide the colour of what is
 printed ([Colour](#colour)). `-V`/`--version` belongs to the application rather
 than to a command, so it is `ralph --version`, not `ralph run --version`.
 
@@ -334,6 +337,11 @@ the only command that starts an agent or ticks a box.
 and `--no-bail` carries on even when `limits.bail_on_failure` is set in the
 project configuration. With neither, that setting decides; it is off by default.
 See [Bailing out of a run](#bailing-out-of-a-run).
+
+By default a run prints its own account of itself — a line for the run, a line
+for each task taken on, what happened to it, and why the run ended. Add
+`--verbose` to watch the agent work. Nothing is lost by leaving it off:
+[How much is printed](#how-much-is-printed).
 
 ### `ralph status [--json]`
 
@@ -869,9 +877,11 @@ for `ralph status`.
 
 ## Logs and diagnostics
 
-Worker output is streamed to your terminal and written to
-`.ralph/runtime/logs/TASK-ID/`, one file per attempt, readable only by you (a
-reopened task's pass logs into `TASK-ID-g2/`, beside the first pass's).
+Worker output is written to `.ralph/runtime/logs/TASK-ID/`, one file per
+attempt, readable only by you (a reopened task's pass logs into `TASK-ID-g2/`,
+beside the first pass's), and is streamed to your terminal as well when the run
+was asked to be verbose ([How much is printed](#how-much-is-printed)). The
+files are the same either way.
 `ralph init` ignores the runtime directory, so nothing here is committed by
 accident. Nothing trims or rotates them. Files stay until you delete them, or
 until `logs.wipe_on_success` does.
@@ -955,6 +965,56 @@ pager quit on the first screen, closes the thing the command was writing to.
 The remaining output is dropped — the logs and the event stream are unaffected,
 because they are files — and the run carries on to its last task and exits on
 its own terms.
+
+## How much is printed
+
+**By default, a run prints its own account of its own work.** One line saying
+which run this is, which agent it chose and where the choice came from; a line
+over each task it takes on; a line saying what happened to that task, with the
+next action under it when there is one; and a line at the end saying why the
+run stopped. Plus every warning and every failure, which are printed however
+quietly a run was asked to go — a warning withheld is a warning that arrives
+after the damage. A three-task run is a dozen lines you can read.
+
+```
+$ ralph run
+run-20261120-143012-6dbf6f: claude (adapter "claude", selected by the project configuration), processing pending tasks
+
+[1/2] TASK-8CA4A94A Add a --dry-run option to the import command
+TASK-8CA4A94A completed: verified in the working tree
+
+[2/2] TASK-F3257FFD Document the import command in the README
+TASK-F3257FFD completed: verified in the working tree
+
+run-20261120-143012-6dbf6f: 2 of 2 tasks completed with claude, 0 remaining — every pending task was completed (2 tasks)
+  next: Review the changes with `git diff` and commit them, then add the next work to .ralph/tasks.md and run `ralph run`.
+```
+
+**`-v`/`--verbose` prints everything else as well**: the agent's own output as
+it arrives, the `--- ` note for each step the package takes — the workspace,
+the invocation, each check and its verdict, the evidence behind a ticked box —
+the checks the run froze at its start, what a resumed run inherited, and a
+stack trace when a command fails unexpectedly. This is what you want when an
+agent seems to have hung, when you are deciding whether to stop a run, or when
+you are learning what the loop does. It is thousands of lines for a task that
+takes twenty minutes.
+
+The flag is read off the command line before anything is dispatched, so a
+usage error is reported in the form you asked for, and it works in a bundle:
+`ralph run -vn` and `ralph run -nv` both ask for it. It belongs to every
+command, not only to `run`.
+
+**Nothing durable depends on it.** The attempt's log, the event stream, the
+state store and your checklist are written identically either way. A quiet run
+is a run whose terminal said less, not a run that kept less:
+
+```
+$ ralph run                 # a dozen lines
+$ ralph logs TASK-8CA4A94A  # everything --verbose would have shown, afterwards
+```
+
+So the question the flag answers is only whether you are watching this run
+happen or reading about it afterwards. If you are not sure, leave it off.
 
 ## Console output
 
@@ -1056,6 +1116,7 @@ safe to run.
 | --- | --- | --- |
 | Exit 78 from `ralph preflight` | Something about the machine or project is missing: a PHP extension, the agent's executable, its credentials, a check command that cannot be resolved. | The report names each failing check and what it expected. Fix those and run `preflight` again — it writes nothing and starts no agent. |
 | A configuration file is refused for an unknown setting `git` or `workspace` | Those sections were removed with the package's Git work. | Delete them. Branches, commits, pushes and worktree preparation are gone; see [Your checkout](#your-checkout). |
+| A run prints a task and then nothing for a long time | The agent is working. By default a run shows its own account of itself, not the agent's output. | Nothing is wrong — the task's line arrives when it finishes. Run with `--verbose` to watch the agent instead, or read `ralph logs TASK-ID` afterwards. |
 | A run says another runner holds the repository | A `ralph run` is in progress elsewhere, or one died without releasing the lock. | Look for the other process. Once it is gone, `ralph resume` confirms it has stopped and takes over. |
 | A task is left unchecked and the run carried on | Its checks kept failing, or its attempt allowance ran out. | `ralph logs TASK-ID` shows each attempt and each check. Fix the task's wording or your check, then `ralph retry TASK-ID`. |
 | Exit 75, "waiting for a person" | The agent asked a question, or the task changed under the pass that was working on it. | Read the last line of output and `ralph logs TASK-ID`. Resolve the question — usually by rewriting the task to answer it — then `ralph retry TASK-ID`. |

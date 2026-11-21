@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Log;
 
+use Celyes\RalphPhp\Console\Verbosity;
 use Celyes\RalphPhp\Exception\FilesystemException;
 use Celyes\RalphPhp\Log\AttemptLog;
 use Celyes\RalphPhp\Log\LogDirectory;
@@ -39,7 +40,11 @@ final class AttemptLogTest extends TestCase
         $this->project = TemporaryDirectory::create('ralph-attempt-log');
         $this->logs = LogDirectory::in($this->project);
         $this->generation = TaskGeneration::first(TaskId::fromDescription('Add a --dry-run option'));
-        $this->terminal = new CapturingOutput();
+        // Verbose, because a terminal is where an agent's output is watched
+        // and a quiet run is not watching (section K, item 2). That the file
+        // half is written either way is
+        // {@see self::the_file_is_kept_however_quietly_the_run_was_asked_to_go()}.
+        $this->terminal = new CapturingOutput(Verbosity::Verbose);
     }
 
     protected function tearDown(): void
@@ -73,6 +78,28 @@ final class AttemptLogTest extends TestCase
         $log->close();
 
         self::assertSame($this->logs->agentLog($this->generation, 2), $log->path());
+    }
+
+    /**
+     * Nothing durable turns on how much was printed: the attempt's log is the
+     * same file after a quiet run as after a verbose one, which is what makes
+     * `ralph logs TASK-ID` the answer to having left `--verbose` off.
+     */
+    #[Test]
+    public function the_file_is_kept_however_quietly_the_run_was_asked_to_go(): void
+    {
+        $terminal = new CapturingOutput();
+        $log = AttemptLog::open($this->logs, $this->generation, 1, $terminal->output());
+
+        $log->write(OutputStream::Standard, "reading the task\n");
+        $log->note('scripted exited with status 0 after 1.2s');
+        $log->close();
+
+        self::assertSame('', $terminal->standardOutput());
+
+        $kept = (string) file_get_contents((string) $log->path());
+        self::assertStringContainsString("--- stdout\nreading the task\n", $kept);
+        self::assertStringContainsString('--- scripted exited with status 0 after 1.2s', $kept);
     }
 
     /**

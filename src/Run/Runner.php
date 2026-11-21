@@ -518,9 +518,9 @@ final class Runner
         $continuation = (new AgentContinuity($this->adapters))
             ->continuation($previous, $this->configuration, $intent->agent());
 
-        foreach ($continuation->lines() as $line) {
-            $this->terminal?->line('  ' . $line);
-        }
+        $this->terminal?->detailLines(
+            array_map(static fn (string $line): string => '  ' . $line, $continuation->lines()),
+        );
 
         return $continuation->selection();
     }
@@ -885,13 +885,16 @@ final class Runner
             return $reported;
         }
 
+        // The edit itself is said however quietly the run was asked to go: a
+        // user reading settings this run is not obeying is owed that much.
+        // Which settings changed, and which set is in force instead, is the
+        // detail behind it (PROJECT.md section K, item 2).
         $this->terminal?->line($drift->describe());
 
-        foreach ($drift->lines() as $line) {
-            $this->terminal?->line('  ' . $line);
-        }
-
-        $this->terminal?->line('  checks in force: ' . $frozen->describe());
+        $this->terminal?->detailLines([
+            ...array_map(static fn (string $line): string => '  ' . $line, $drift->lines()),
+            '  checks in force: ' . $frozen->describe(),
+        ]);
 
         return $drift;
     }
@@ -1038,6 +1041,16 @@ final class Runner
 
     /**
      * Say what the run is, before it starts doing it.
+     *
+     * Three kinds of line, and only two of them are always printed. The run's
+     * own identity is one line and is what `ralph status`, `ralph logs` and
+     * `ralph resume` are asked about afterwards, so it is printed however
+     * quietly the run was asked to go. The warnings below it are printed for
+     * the same reason they exist — each one says that this run will behave
+     * differently from the run the user thinks they started, and a warning
+     * withheld until `--verbose` is a warning that arrives after the damage.
+     * What is left is the settings the run resolved, which is commentary on a
+     * file the user can read, and is detail (PROJECT.md section K, item 2).
      */
     private function announce(
         RunRecord $run,
@@ -1050,28 +1063,30 @@ final class Runner
     ): void {
         $style = $this->style();
 
-        $lines = [
-            sprintf(
-                '%s: %s, %s',
-                $style->heading($run->runId()),
-                $agent->describe(),
-                $intent->describe(),
-            ),
-            $style->muted(sprintf('checks: %s', $checks->describe())),
-        ];
+        $this->terminal?->line(sprintf(
+            '%s: %s, %s',
+            $style->heading($run->runId()),
+            $agent->describe(),
+            $intent->describe(),
+        ));
+
+        $this->terminal?->detail($style->muted(sprintf('checks: %s', $checks->describe())));
 
         // What a continuation inherits, said at the start rather than left to
         // be deduced from a limit that stops the run sooner than the
         // configuration would suggest (section H, item 3).
         if ($previous !== null) {
-            $lines[] = sprintf(
+            $this->terminal?->detail(sprintf(
                 'continuing %s: %d iteration%s and %ds of its budget already spent',
                 $previous->runId(),
                 $run->carriedIterations(),
                 $run->carriedIterations() === 1 ? '' : 's',
                 $run->carriedSeconds(),
-            );
+            ));
         }
+
+        // The warnings, which a quiet run gets too.
+        $notices = [];
 
         // Said before the first task, every time, because it changes what a
         // tick in the checklist means: with no checks frozen, a task is
@@ -1081,7 +1096,7 @@ final class Runner
         // verified — so this is a run a user can easily have started without
         // meaning to.
         if ($checks->isEmpty()) {
-            $lines[] = $style->warn(
+            $notices[] = $style->warn(
                 'no checks are configured, so tasks are completed on the agent\'s own reported '
                 . 'result — add a command under "checks" to have this run decide for itself',
             );
@@ -1092,7 +1107,7 @@ final class Runner
         // checklist, and a user who inherited the setting from the project file
         // rather than typing it is owed the difference beforehand.
         if ($intent->bails($this->configuration->limits())) {
-            $lines[] = $style->warn(sprintf(
+            $notices[] = $style->warn(sprintf(
                 'bailing: %s, so the first task that does not pass ends the run',
                 $intent->requestedBail() === true ? '--bail was given' : 'limits.bail_on_failure is on',
             ));
@@ -1104,7 +1119,7 @@ final class Runner
         // up. The run itself is unaffected, and `ralph resume` reconciles what
         // such a stop leaves behind.
         if (!$listening) {
-            $lines[] = $style->warn(
+            $notices[] = $style->warn(
                 'note: ext-pcntl is not loaded, so Ctrl+C cannot be handled — it will stop '
                 . 'this process without stopping the agent or recording the interruption',
             );
@@ -1115,14 +1130,14 @@ final class Runner
         // before the run is under way that there will be nothing to watch. The
         // run itself is unaffected (section I, item 3; {@see EventStream}).
         if ($events->hasFailed()) {
-            $lines[] = $style->warn(sprintf(
+            $notices[] = $style->warn(sprintf(
                 'note: the event stream %s cannot be written — %s',
                 $events->path(),
                 (string) $events->failure(),
             ));
         }
 
-        $this->terminal?->lines($lines);
+        $this->terminal?->lines($notices);
     }
 
     /**

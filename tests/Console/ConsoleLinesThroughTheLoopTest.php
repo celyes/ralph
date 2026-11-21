@@ -261,7 +261,10 @@ final class ConsoleLinesThroughTheLoopTest extends TestCase
                 'timeout' => 30,
             ]]]);
 
-        $result = $this->project->ralph(['run']);
+        // A verbose run, because a check's own output is only echoed to a run
+        // that asked to watch one (section K, item 2). What is asserted here
+        // is about those bytes once they are being echoed at all.
+        $result = $this->project->ralph(['run', '--verbose']);
 
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertWroteWholeLines($result);
@@ -298,7 +301,8 @@ final class ConsoleLinesThroughTheLoopTest extends TestCase
                 'timeout' => 30,
             ]]]);
 
-        $result = $this->project->ralph(['run']);
+        // Verbose, for the reason the case above it is.
+        $result = $this->project->ralph(['run', '--verbose']);
 
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertWroteWholeLines($result);
@@ -327,7 +331,11 @@ final class ConsoleLinesThroughTheLoopTest extends TestCase
     {
         $this->givenAProjectThatCanRun(FixtureStep::success([self::EDITED => self::EDIT]));
 
-        $result = $this->project->ralph(['run']);
+        // Verbose: the worker's lines reach a terminal only when one asked for
+        // them (section K, item 2). The log they are also written to is the
+        // same file either way, which {@see \Celyes\RalphPhp\Tests\Log\AttemptLogTest}
+        // holds to.
+        $result = $this->project->ralph(['run', '--verbose']);
 
         self::assertSame(ExitCode::SUCCESS, $result->exitCode, $result->describe());
         self::assertWroteWholeLines($result);

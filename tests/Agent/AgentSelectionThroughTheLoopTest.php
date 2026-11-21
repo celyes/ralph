@@ -462,8 +462,11 @@ final class AgentSelectionThroughTheLoopTest extends TestCase
         $resumed = $this->project->ralph(['resume']);
 
         self::assertSame(ExitCode::SUCCESS, $resumed->exitCode, $resumed->describe());
+
+        // The run says whose agent it is running and where that came from, on
+        // the one line it prints however quietly it was asked to go.
         self::assertStringContainsString(
-            self::PREFERRED . ' (adapter "codex")',
+            self::PREFERRED . ' (adapter "codex", selected by the run being continued)',
             $resumed->standardOutput,
             $resumed->describe(),
         );

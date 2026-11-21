@@ -411,6 +411,13 @@ final class LoopProject
      * signal is aimed at a line of the run's own output rather than at a delay,
      * so the case states the moment it is interrupting instead of hoping.
      *
+     * The run is a verbose one, whatever the case asked for. The moment being
+     * aimed at is a line of the *agent's* output — "it has started working" —
+     * and a quiet run does not echo those (section K, item 2), so a quiet run
+     * here would be a run signalled at a moment nobody chose. What the signal
+     * leaves behind is the same either way: how much was printed changes
+     * nothing in the rows, the logs or the files.
+     *
      * @param list<string> $arguments
      * @param string $awaited output the run must have printed before the signal
      *        is sent
@@ -419,7 +426,7 @@ final class LoopProject
      */
     public function interrupt(array $arguments, string $awaited): CliResult
     {
-        $command = [PHP_BINARY, Paths::inPackage('bin/ralph'), ...$arguments];
+        $command = [PHP_BINARY, Paths::inPackage('bin/ralph'), ...$arguments, '--verbose'];
         $standardOutput = $this->project->path('.ralph/runtime/interrupted-run.out');
         $errorOutput = $this->project->path('.ralph/runtime/interrupted-run.err');
 
