@@ -127,6 +127,19 @@ final class TerminalSink implements OutputSink
     }
 
     /**
+     * Activities belong to the quiet run, not to this one.
+     *
+     * A verbose terminal is being shown the whole feed as it arrives, rendered
+     * by the adapter that knows the format, so a curated second telling of the
+     * same session interleaved with the first would be the session twice over.
+     * {@see ActivitySink} is where an activity is shown, and it holds its peace
+     * under `--verbose` for the same reason this ignores one.
+     */
+    public function activity(Activity $activity): void
+    {
+    }
+
+    /**
      * The end of this attempt's streamed output.
      *
      * The agent's last line is ended if it did not end itself, and a blank

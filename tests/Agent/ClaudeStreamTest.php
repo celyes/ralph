@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Agent;
 
 use Celyes\RalphPhp\Agent\ClaudeStream;
+use Celyes\RalphPhp\Log\Activity;
+use Celyes\RalphPhp\Log\ActivityKind;
+use Celyes\RalphPhp\Log\ActivitySink;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Tests\Log\RecordingSink;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -624,6 +627,229 @@ final class ClaudeStreamTest extends TestCase
 
         self::assertSame($plain, ClaudeStream::transcript($plain));
         self::assertSame('', ClaudeStream::transcript(''));
+    }
+
+    /**
+     * The other half of the live reading: each moment worth a line is also
+     * reported as a fact, so a run that did not ask for the whole feed can
+     * still be shown what the agent is doing ({@see ActivitySink}).
+     *
+     * One case over the whole feed rather than one per event, because what
+     * matters is that the mapping is complete and in order — a session a
+     * watcher can follow is the sequence, not any single line of it.
+     */
+    #[Test]
+    public function each_moment_of_the_session_is_reported_as_an_activity(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line(['type' => 'system', 'subtype' => 'init', 'model' => 'opus', 'session_id' => 'abcdef0123'])
+            . self::line([
+                'type' => 'stream_event',
+                'event' => ['type' => 'content_block_start', 'content_block' => ['type' => 'thinking']],
+            ])
+            . self::line([
+                'type' => 'assistant',
+                'message' => ['content' => [
+                    ['type' => 'text', 'text' => "I'll read the filter first."],
+                    ['type' => 'tool_use', 'name' => 'Read', 'input' => ['file_path' => 'src/Import.php']],
+                ]],
+            ])
+            . self::line([
+                'type' => 'user',
+                'message' => ['content' => [['type' => 'tool_result', 'content' => '1→<?php']]],
+            ])
+            . self::line(['type' => 'result', 'subtype' => 'success', 'num_turns' => 3, 'duration_ms' => 1500]));
+
+        self::assertSame(
+            [
+                ActivityKind::Session,
+                ActivityKind::Thinking,
+                ActivityKind::Response,
+                ActivityKind::ToolCall,
+                ActivityKind::ToolResult,
+                ActivityKind::Outcome,
+            ],
+            array_map(
+                static fn (Activity $activity): ActivityKind => $activity->kind(),
+                $sink->activities,
+            ),
+        );
+
+        self::assertSame(["I'll read the filter first."], $sink->activityTextOf(ActivityKind::Response));
+        self::assertSame(['src/Import.php'], $sink->activityTextOf(ActivityKind::ToolCall));
+    }
+
+    /**
+     * A call that runs a program in the user's checkout is reported as the
+     * command it is running, because a destination that shows one shows it so
+     * that a person can read what is about to happen to their repository.
+     */
+    #[Test]
+    public function a_shell_call_is_reported_as_the_command_it_runs(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'assistant',
+            'message' => ['content' => [[
+                'type' => 'tool_use',
+                'name' => 'Bash',
+                'input' => ['command' => 'make test ARGS=\'--filter=OrderTest\'', 'description' => 'Run the order tests'],
+            ]]],
+        ]));
+
+        $commands = $sink->activitiesOf(ActivityKind::Command);
+
+        self::assertCount(1, $commands);
+        self::assertSame('make test ARGS=\'--filter=OrderTest\'', $commands[0]->text());
+        self::assertSame('Bash', $commands[0]->name());
+    }
+
+    /**
+     * Whole, not excerpted: the width a command is read at belongs to the
+     * reader, and this format's job is to say what the command was.
+     */
+    #[Test]
+    public function a_command_is_reported_in_full(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $command = 'php artisan migrate --path=' . str_repeat('a', 300);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'assistant',
+            'message' => ['content' => [['type' => 'tool_use', 'name' => 'Bash', 'input' => ['command' => $command]]]],
+        ]));
+
+        self::assertSame([$command], $sink->activityTextOf(ActivityKind::Command));
+    }
+
+    /**
+     * A tool that passes argv rather than a line is still running a command: a
+     * reader wants it either way, and the alternative is a box with JSON in it.
+     */
+    #[Test]
+    public function a_command_given_as_arguments_is_joined(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'assistant',
+            'message' => ['content' => [['type' => 'tool_use', 'name' => 'shell', 'input' => ['command' => ['git', 'status', '--short']]]]],
+        ]));
+
+        self::assertSame(['git status --short'], $sink->activityTextOf(ActivityKind::Command));
+    }
+
+    /**
+     * A tool that is not a shell is an ordinary call however its input is
+     * shaped, which is the quieter mistake to make: a box round something that
+     * is not a command would say the agent had run it.
+     */
+    #[Test]
+    public function a_tool_that_is_not_a_shell_is_not_reported_as_a_command(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'assistant',
+            'message' => ['content' => [['type' => 'tool_use', 'name' => 'Edit', 'input' => ['command' => 'not a shell call', 'file_path' => 'src/Import.php']]]],
+        ]));
+
+        self::assertSame([], $sink->activitiesOf(ActivityKind::Command));
+        self::assertSame(['not a shell call'], $sink->activityTextOf(ActivityKind::ToolCall));
+    }
+
+    /**
+     * What went wrong inside the session is reported too: an API error being
+     * retried is minutes of an attempt's budget, and the errors a failed
+     * session carries are why it failed.
+     */
+    #[Test]
+    public function what_went_wrong_inside_the_session_is_reported(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'system',
+            'subtype' => 'api_error',
+            'error' => ['message' => 'overloaded_error'],
+            'retryAttempt' => 1,
+            'maxRetries' => 3,
+        ]) . self::line([
+            'type' => 'result',
+            'subtype' => 'error_during_execution',
+            'is_error' => true,
+            'errors' => ['the session ran out of context'],
+        ]));
+
+        $problems = $sink->activityTextOf(ActivityKind::Problem);
+
+        self::assertCount(2, $problems);
+        self::assertStringContainsString('overloaded_error', $problems[0]);
+        self::assertStringContainsString('ran out of context', $problems[1]);
+        self::assertStringContainsString('failed (error_during_execution)', $sink->activityTextOf(ActivityKind::Outcome)[0]);
+    }
+
+    /**
+     * A message with nothing in it is not a message. The CLI emits assistant
+     * events that carry only a tool call, and "the agent said nothing" is a
+     * blank paragraph on somebody's terminal.
+     */
+    #[Test]
+    public function an_empty_message_is_not_reported_as_a_response(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'assistant',
+            'message' => ['content' => [['type' => 'text', 'text' => "  \n "]]],
+        ]));
+
+        self::assertSame([], $sink->activitiesOf(ActivityKind::Response));
+    }
+
+    /**
+     * The rendered line and the fact are two tellings of one moment, not one
+     * derived from the other, so a feed that produces the lines produces the
+     * facts as well.
+     */
+    #[Test]
+    public function the_rendered_line_is_written_alongside_the_activity(): void
+    {
+        $sink = new RecordingSink();
+        $stream = ClaudeStream::rendering($sink);
+
+        $stream->write(OutputStream::Standard, self::line([
+            'type' => 'assistant',
+            'message' => ['content' => [['type' => 'tool_use', 'name' => 'Bash', 'input' => ['command' => 'make test']]]],
+        ]));
+
+        self::assertSame("⏺ Bash(make test)\n", $sink->textOf(OutputStream::Standard));
+        self::assertCount(1, $sink->activitiesOf(ActivityKind::Command));
+    }
+
+    /**
+     * An activity composed upstream of the filter passes through it untouched:
+     * a filter is a thing that can be put in front of a sink without changing
+     * what reaches it.
+     */
+    #[Test]
+    public function an_activity_from_somewhere_else_passes_through(): void
+    {
+        $sink = new RecordingSink();
+
+        ClaudeStream::rendering($sink)->activity(Activity::thinking());
+
+        self::assertCount(1, $sink->activitiesOf(ActivityKind::Thinking));
     }
 
     /**

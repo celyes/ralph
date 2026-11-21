@@ -114,6 +114,13 @@ final class Sinks implements OutputSink
         });
     }
 
+    public function activity(Activity $activity): void
+    {
+        $this->each(static function (OutputSink $sink) use ($activity): void {
+            $sink->activity($activity);
+        });
+    }
+
     public function close(): void
     {
         // Every sink is closed, including ones dropped earlier for throwing:

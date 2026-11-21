@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Agent;
 
+use Celyes\RalphPhp\Log\Activity;
 use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Log\StreamFilter;
@@ -60,6 +61,18 @@ use JsonException;
  * destinations ({@see StreamFilter}), and one of them is a log file somebody
  * will grep. The glyphs are `loop.sh`'s so that a reader of both sees one
  * convention; the escape sequences are not.
+ *
+ * **The live reading also says what it understood.** A rendered line is the
+ * session as the log will hold it, which is the whole feed in order, and that
+ * is more than a run which asked for less wants on its terminal. So each moment
+ * worth a line is reported as a fact as well as written as one
+ * ({@see \Celyes\RalphPhp\Log\Activity}): the session opening, the model
+ * thinking, each message, each call, each result, how it ended. Nothing is
+ * decided here about which destination wants which — a sink that has no use for
+ * a fact ignores it, and the quiet terminal's choice of how much to show is
+ * made where that line is composed ({@see \Celyes\RalphPhp\Log\ActivitySink}).
+ * This is why the two calls sit next to each other rather than one being
+ * derived from the other: the same moment, said twice, for two readers.
  *
  * **Anything that is not an event is passed through.** A line the CLI printed
  * as plain text is not noise to be hidden: a usage limit reached before the
@@ -131,6 +144,20 @@ final class ClaudeStream implements StreamFilter
      * enough to matter.
      */
     private const array EVENTS = ['system', 'assistant', 'user', 'result', 'stream_event'];
+
+    /**
+     * The tools whose call is a command run against the user's checkout.
+     *
+     * Compared in lower case, and a list rather than `Bash` alone because a
+     * project may point this adapter at a CLI whose shell tool is named
+     * something else; what decides the reporting is what the call does, and a
+     * tool that takes a `command` and is named like a shell is running one. A
+     * tool not named here is reported as an ordinary call, which is a quieter
+     * mistake than drawing a box round something that is not a command.
+     *
+     * @var list<string>
+     */
+    private const array COMMAND_TOOLS = ['bash', 'shell', 'local_shell', 'run_command', 'execute_command'];
 
     /**
      * How deep an event may nest before it is treated as something else.
@@ -332,6 +359,18 @@ final class ClaudeStream implements StreamFilter
     }
 
     /**
+     * An activity of somebody else's, passed on untouched.
+     *
+     * Nothing composes one upstream of this filter today, and passing it on
+     * rather than dropping it is what keeps a filter a thing that can be put in
+     * front of a sink without changing what reaches it.
+     */
+    public function activity(Activity $activity): void
+    {
+        $this->sink->activity($activity);
+    }
+
+    /**
      * A note of Ralph PHP's own, passed on as its own.
      *
      * Nothing to render and nothing to buffer — but the line the filter may be
@@ -512,12 +551,21 @@ final class ClaudeStream implements StreamFilter
 
         if ($type === 'assistant') {
             foreach (self::blocksOf($event) as $block) {
+                if (self::typeOf($block) === 'text') {
+                    $said = self::textOf($block, 'text') ?? '';
+
+                    if (trim($said) !== '') {
+                        $this->report(Activity::response($said));
+                    }
+
+                    continue;
+                }
+
                 if (self::typeOf($block) === 'tool_use') {
-                    $this->writeLine(sprintf(
-                        '⏺ %s(%s)',
-                        self::textOf($block, 'name') ?? 'tool',
-                        self::subject($block),
-                    ));
+                    $tool = self::textOf($block, 'name') ?? 'tool';
+
+                    $this->writeLine(sprintf('⏺ %s(%s)', $tool, self::subject($block)));
+                    $this->report(self::calling($tool, $block));
                 }
             }
 
@@ -527,7 +575,10 @@ final class ClaudeStream implements StreamFilter
         if ($type === 'user') {
             foreach (self::blocksOf($event) as $block) {
                 if (self::typeOf($block) === 'tool_result') {
-                    $this->writeLine('  ⎿ ' . Excerpt::of(self::flatten(self::resultOf($block)), self::RESULT_WIDTH));
+                    $excerpt = Excerpt::of(self::flatten(self::resultOf($block)), self::RESULT_WIDTH);
+
+                    $this->writeLine('  ⎿ ' . $excerpt);
+                    $this->report(Activity::toolResult($excerpt));
                 }
             }
 
@@ -556,11 +607,14 @@ final class ClaudeStream implements StreamFilter
         if ($subtype === 'init') {
             $session = self::textOf($event, 'session_id') ?? '';
 
-            $this->writeLine(sprintf(
+            $opening = sprintf(
                 'claude %s · session %s',
                 self::textOf($event, 'model') ?? '?',
                 $session === '' ? '?' : substr($session, 0, 8),
-            ));
+            );
+
+            $this->writeLine($opening);
+            $this->report(Activity::session($opening));
 
             return;
         }
@@ -572,14 +626,17 @@ final class ClaudeStream implements StreamFilter
         $retry = self::numberOf($event, 'retryAttempt');
         $after = self::numberOf($event, 'retryInMs');
 
-        $this->writeLine(sprintf(
-            '⚠ api error: %s%s%s',
+        $problem = sprintf(
+            'api error: %s%s%s',
             Excerpt::of(self::flatten(self::problemOf($event)), self::RESULT_WIDTH),
             $retry === null
                 ? ''
                 : sprintf(' · retry %d/%d', (int) $retry, (int) (self::numberOf($event, 'maxRetries') ?? 0)),
             $after === null ? '' : sprintf(' in %ds', (int) round($after / 1000)),
-        ));
+        );
+
+        $this->writeLine('⚠ ' . $problem);
+        $this->report(Activity::problem($problem));
     }
 
     /**
@@ -601,6 +658,12 @@ final class ClaudeStream implements StreamFilter
             if (self::typeOf(self::objectOf($event, 'content_block')) === 'thinking') {
                 $this->endLine();
                 $this->writeOut('✻ thinking ');
+
+                // Once per block of reasoning, and without the reasoning: the
+                // fact is what a watcher of a quiet run is asking about, and
+                // the words are the wall of text it asked not to have
+                // ({@see \Celyes\RalphPhp\Log\ActivityKind::Thinking}).
+                $this->report(Activity::thinking());
             }
 
             return;
@@ -644,17 +707,23 @@ final class ClaudeStream implements StreamFilter
         $failed = ($event['is_error'] ?? false) === true;
         $cost = self::numberOf($event, 'total_cost_usd');
 
-        $this->writeLine(sprintf(
+        $summary = sprintf(
             '%s%s · %d turns · %.1fs%s',
-            $failed ? '✗ failed' : '✓ done',
+            $failed ? 'failed' : 'done',
             $subtype === 'success' ? '' : sprintf(' (%s)', $subtype),
             (int) (self::numberOf($event, 'num_turns') ?? 0),
             (self::numberOf($event, 'duration_ms') ?? 0.0) / 1000,
             $cost === null ? '' : sprintf(' · $%.4f', $cost),
-        ));
+        );
+
+        $this->writeLine(($failed ? '✗ ' : '✓ ') . $summary);
+        $this->report(Activity::outcome($summary));
 
         foreach (self::errorsOf($event) as $error) {
-            $this->writeLine('  ' . Excerpt::of(self::flatten($error), self::RESULT_WIDTH));
+            $excerpt = Excerpt::of(self::flatten($error), self::RESULT_WIDTH);
+
+            $this->writeLine('  ' . $excerpt);
+            $this->report(Activity::problem($excerpt));
         }
     }
 
@@ -750,6 +819,79 @@ final class ClaudeStream implements StreamFilter
         }
 
         return Excerpt::of(self::flatten((string) json_encode($input)), self::SUBJECT_WIDTH);
+    }
+
+    /**
+     * One tool call, as the fact a terminal is told about it.
+     *
+     * A call that runs a program in the user's checkout is reported as the
+     * command it is running, with the whole command rather than an excerpt of
+     * it: a destination that shows a command is showing it so that a person can
+     * read what is about to happen to their repository, and a truncated command
+     * cannot be read that way. The width that reading needs is the reader's,
+     * not this format's ({@see \Celyes\RalphPhp\Log\ActivitySink}).
+     *
+     * Anything else is the call and its subject, which is what the rendered
+     * line says too.
+     *
+     * @param array<string, mixed> $block
+     */
+    private static function calling(string $tool, array $block): Activity
+    {
+        $command = self::commandOf(self::objectOf($block, 'input'));
+
+        if ($command !== null && in_array(strtolower($tool), self::COMMAND_TOOLS, true)) {
+            return Activity::command($tool, $command);
+        }
+
+        return Activity::toolCall($tool, self::subject($block));
+    }
+
+    /**
+     * The command a call is making, in whichever shape its tool names it.
+     *
+     * A string for the shipped shell tools, and a list for one that passes argv
+     * — joined rather than rejected, because a reader wants the command either
+     * way and the alternative is a box with JSON in it.
+     *
+     * @param array<string, mixed> $input
+     */
+    private static function commandOf(array $input): ?string
+    {
+        /** @var mixed $command */
+        $command = $input['command'] ?? null;
+
+        if (is_string($command)) {
+            return trim($command) === '' ? null : $command;
+        }
+
+        if (!is_array($command)) {
+            return null;
+        }
+
+        $arguments = [];
+
+        foreach ($command as $argument) {
+            if (is_string($argument)) {
+                $arguments[] = $argument;
+            }
+        }
+
+        return $arguments === [] ? null : implode(' ', $arguments);
+    }
+
+    /**
+     * Pass a fact about the session on to whatever is listening for one.
+     *
+     * Beside {@see self::writeLine()} rather than instead of it: the rendered
+     * line is the session as a reader of the log will read it, and an activity
+     * is the same moment named so that a terminal can decide how much of it to
+     * show. Both or neither — a destination that takes one and not the other is
+     * the point of there being two calls.
+     */
+    private function report(Activity $activity): void
+    {
+        $this->sink->activity($activity);
     }
 
     /**

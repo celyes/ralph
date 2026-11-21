@@ -582,6 +582,65 @@ final class ProcessRunnerTest extends TestCase
         self::assertSame([], Interruptions::unconfirmed());
     }
 
+    /**
+     * The case Ctrl+C actually produces: a worker that goes with the keystroke.
+     *
+     * A keyboard interrupt is delivered to the terminal's whole foreground
+     * process group, so the worker is stopped by the same keystroke that stops
+     * the run — and a coding agent, unlike the stubborn command the cases above
+     * use, dies of it rather than outliving it. What it leaves behind is the
+     * exit status of a process killed by a signal, and read as a verdict on its
+     * work that is a command that failed: upstream, an attempt recorded as
+     * failed, one of the task's attempts spent on the user's own keystroke and
+     * the "failure" handed to the next attempt as evidence.
+     *
+     * The loop can learn of such a stop two ways — its poll, or the check after
+     * it when the command is gone before the poll comes round — and which one
+     * wins is a race this test cannot pin down: a signal interrupts the poll's
+     * sleep, so the poll usually gets there first. What is asserted is
+     * therefore the property rather than the path: however the loop notices, a
+     * command that was running when a stop was asked for was stopped and not
+     * judged.
+     */
+    #[Test]
+    public function a_command_that_died_of_the_same_stop_is_cancelled_rather_than_failed(): void
+    {
+        $this->requireSignals();
+        Interruptions::listen();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', $this->interruptsItsParentAsItExits()],
+            $this->directory,
+            timeout: 30,
+        );
+
+        self::assertTrue($result->wasCancelled(), $result->describe());
+        self::assertFalse($result->succeeded());
+        self::assertNull($result->exitCode(), 'A stopped command reported no verdict on its work.');
+        self::assertSame('stopped by SIGINT (Ctrl+C)', $result->cancelledBy()?->reason());
+        self::assertFalse($result->timedOut(), 'A cancellation is not a timeout: the limit was never reached.');
+    }
+
+    /**
+     * And there is nothing owed for it: the worker is already gone, so the run
+     * may give the repository lock back ({@see Interruptions::unconfirmed()}).
+     */
+    #[Test]
+    public function a_command_that_died_of_the_same_stop_leaves_nothing_owed(): void
+    {
+        $this->requireSignals();
+        Interruptions::listen();
+
+        $result = $this->runner->run(
+            [PHP_BINARY, '-r', $this->interruptsItsParentAsItExits()],
+            $this->directory,
+            timeout: 30,
+        );
+
+        self::assertTrue($result->termination()?->isConfirmed(), (string) $result->termination()?->describe());
+        self::assertSame([], Interruptions::unconfirmed());
+    }
+
     #[Test]
     public function nothing_is_started_once_a_stop_has_been_asked_for(): void
     {
@@ -628,6 +687,30 @@ final class ProcessRunnerTest extends TestCase
             posix_kill(posix_getppid(), SIGINT);
             $deadline = microtime(true) + 30;
             while (microtime(true) < $deadline) { usleep(20000); }
+            CODE;
+    }
+
+    /**
+     * A worker stopped by the same keystroke as the run, and gone before the
+     * run's next poll — which is what a terminal actually does, the signal
+     * reaching the whole foreground process group at once.
+     *
+     * The sleep puts the stop a second into the command's life, where the
+     * runner's own poll interval is at its longest
+     * ({@see ProcessRunner::POLL_SCHEDULE}), so that the two ways the loop can
+     * notice are both in play rather than the first one being the only one
+     * reachable. 130 is the status a shell reports for a process killed by
+     * SIGINT, which is what the runner would otherwise read as this command's
+     * verdict on its work.
+     */
+    private function interruptsItsParentAsItExits(): string
+    {
+        return <<<'CODE'
+            fwrite(STDOUT, "working\n");
+            fflush(STDOUT);
+            usleep(1200000);
+            posix_kill(posix_getppid(), SIGINT);
+            exit(130);
             CODE;
     }
 

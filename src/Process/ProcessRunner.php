@@ -241,6 +241,15 @@ final class ProcessRunner
      * to notice that is here rather than in a run that has already exhausted
      * the machine's memory.
      *
+     * **A stop is read after the loop as well as inside it**, because the
+     * keystroke that stops a run stops the worker too: Ctrl+C goes to the
+     * terminal's whole foreground process group, so the usual way for this loop
+     * to end during an interruption is the command dying of that same signal
+     * rather than the poll noticing first. Both exits mean the same thing about
+     * the command, and deciding it in one place is what keeps a cancelled
+     * attempt from being recorded as a failed one by whichever of the two
+     * happened to win the race.
+     *
      * @param StartedCommand $managed the same command as {@see Terminator}
      *        needs it, built while it is certainly running: the library stops
      *        reporting a process id once the process has gone, and the children
@@ -269,6 +278,22 @@ final class ProcessRunner
             }
 
             usleep(self::pause($now - $started));
+        }
+
+        // The command ended on its own, and a stop that was asked for while it
+        // was running is why. Ctrl+C is delivered to every process in the
+        // terminal's foreground group, the agent among them, so a worker is
+        // usually dead of the same keystroke before the poll above comes round
+        // to it — and what it leaves behind is the exit status of a process
+        // killed by a signal. Read as the command's own verdict that is a
+        // command that failed, which would spend one of the task's attempts on
+        // the user's keystroke and hand the next attempt a failure as evidence.
+        // It was stopped, not judged (PROJECT.md section H, item 4), and there
+        // is nothing left to terminate.
+        $cancelledBy = $this->interruptions->requested();
+
+        if ($cancelledBy !== null) {
+            return [false, $cancelledBy, Termination::nothingToStop()];
         }
 
         return [false, null, null];

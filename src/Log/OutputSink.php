@@ -61,6 +61,32 @@ interface OutputSink
     public function note(string $line): void;
 
     /**
+     * Record something the agent did, as a fact rather than as output.
+     *
+     * The third thing a sink is handed, and the one the other two cannot stand
+     * in for. A modern coding CLI's non-interactive output is a machine format,
+     * so {@see self::write()} carries bytes that say nothing to a person; and a
+     * note is the package's account of its own work rather than the agent's. A
+     * filter that can read the format reports what it understood through here
+     * ({@see \Celyes\RalphPhp\Agent\ClaudeStream}), which is what lets a quiet
+     * run show the shape of a session — thinking, a command, a result — without
+     * showing the session ({@see ActivitySink}).
+     *
+     * **A sink may ignore them, and most do.** The log file already has the
+     * bytes and the filter's own rendering of them, so an activity would be the
+     * same thing a third time; a verbose terminal has the rendering on the
+     * screen. Ignoring is the default case rather than the exception, which is
+     * why this takes a named fact and not a formatted line: a sink that wants
+     * nothing from it does nothing, and a sink that wants it decides how it
+     * looks.
+     *
+     * The rules of {@see self::write()} hold here too. It must not throw, it is
+     * called from inside the loop draining a live child's pipes, and nothing
+     * about it is evidence.
+     */
+    public function activity(Activity $activity): void;
+
+    /**
      * Finish: flush anything buffered and release whatever was held open.
      *
      * Must be safe to call twice, since a run that failed part-way may close a
