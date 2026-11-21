@@ -228,6 +228,20 @@ final class LogFile implements OutputSink
         $this->active = null;
     }
 
+    /**
+     * An activity is already in this file, as the bytes it was read out of.
+     *
+     * The filter that reports one also writes its own rendering of the whole
+     * feed through to the sinks ({@see \Celyes\RalphPhp\Agent\ClaudeStream}),
+     * and that rendering is what a reader of this file wants: every line of the
+     * session in order, not a second, shorter telling of the parts a terminal
+     * was shown. Writing both would also put the agent's words in twice, which
+     * is a log a reader cannot count anything in.
+     */
+    public function activity(Activity $activity): void
+    {
+    }
+
     public function close(): void
     {
         if ($this->handle === null) {

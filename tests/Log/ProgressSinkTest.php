@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Celyes\RalphPhp\Tests\Log;
 
 use Celyes\RalphPhp\Console\Verbosity;
+use Celyes\RalphPhp\Log\Activity;
 use Celyes\RalphPhp\Log\OutputStream;
 use Celyes\RalphPhp\Log\ProgressSink;
 use Celyes\RalphPhp\Tests\Support\CapturingOutput;
@@ -210,6 +211,38 @@ final class ProgressSinkTest extends TestCase
         $sink->close();
 
         self::assertSame($before, $this->terminal->standardOutput());
+    }
+
+    /**
+     * A beat is a substitute for knowing what the worker is doing, so an
+     * attempt that is being told what the agent is doing has no use for one
+     * ({@see \Celyes\RalphPhp\Log\ActivitySink}). "still working: 184 lines of
+     * output" landing in the middle of an account of the work is worse than
+     * redundant.
+     */
+    #[Test]
+    public function an_attempt_that_is_being_narrated_gets_no_beats(): void
+    {
+        $sink = $this->sink();
+
+        $sink->activity(Activity::thinking());
+        $sink->write(OutputStream::Standard, "working\n");
+
+        self::assertSame('', $this->terminal->standardOutput());
+    }
+
+    /**
+     * And an agent that reports nothing of the kind still gets them: a feed
+     * this package cannot read is exactly the case the heartbeat was added for.
+     */
+    #[Test]
+    public function an_attempt_nothing_was_reported_about_still_beats(): void
+    {
+        $sink = $this->sink();
+
+        $sink->write(OutputStream::Standard, "working\n");
+
+        self::assertStringContainsString('still working:', $this->terminal->standardOutput());
     }
 
     /**

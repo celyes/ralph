@@ -75,6 +75,24 @@ final class ProgressSink implements OutputSink
     private int $lines = 0;
 
     /**
+     * Whether something better than a heartbeat is being said about this
+     * attempt.
+     *
+     * A beat is a substitute for knowing what the worker is doing: it says
+     * bytes are arriving, because for an agent whose output is a machine format
+     * that is all a quiet run could tell. An adapter that reports activities
+     * can say what the agent is actually doing ({@see ActivitySink}), and once
+     * one has, "still working: 2m 10s, 184 lines of output" is both redundant
+     * and worse — a line about the volume of output, landing in the middle of
+     * an account of the work.
+     *
+     * Set by the first activity and never cleared: an agent that reported one
+     * will go on reporting them, and a session that falls silent after one has
+     * the phase line under it, exactly as a silent session always did.
+     */
+    private bool $narrated = false;
+
+    /**
      * @param float $interval seconds between beats. Defaulted rather than
      *        configurable: a run does not choose this, and it is an argument at
      *        all because the alternative is a test that waits half a minute to
@@ -100,7 +118,7 @@ final class ProgressSink implements OutputSink
      */
     public function write(OutputStream $stream, string $chunk): void
     {
-        if ($chunk === '' || $this->output->isVerbose()) {
+        if ($chunk === '' || $this->output->isVerbose() || $this->narrated) {
             return;
         }
 
@@ -131,6 +149,18 @@ final class ProgressSink implements OutputSink
      */
     public function note(string $line): void
     {
+    }
+
+    /**
+     * Stand down: this attempt has something better to say for itself.
+     *
+     * Nothing is printed here — showing an activity is {@see ActivitySink}'s
+     * work — and what this records is that showing it is happening at all, so
+     * the beats stop ({@see self::$narrated}).
+     */
+    public function activity(Activity $activity): void
+    {
+        $this->narrated = true;
     }
 
     /**

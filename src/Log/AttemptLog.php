@@ -29,15 +29,17 @@ use Celyes\RalphPhp\Tasks\TaskGeneration;
  * behaviour — do not, and {@see self::toTerminal()} is that case rather than a
  * null nobody checks for.
  *
- * **The terminal is two sinks, and exactly one of them speaks.** How much a run
- * prints is PROJECT.md section K, item 2, and the two answers to it are both
+ * **The terminal is three sinks, and each speaks for one kind of run.** How
+ * much a run prints is PROJECT.md section K, item 2, and every answer to it is
  * about this output. A verbose run is shown the worker's bytes as they arrive
  * ({@see TerminalSink}) and needs nothing said about them. A quiet run is shown
- * neither the bytes nor the notes, so a line every half-minute saying how long
- * the attempt has been going and how much has arrived ({@see ProgressSink}) is
- * what stands between it and a terminal that looks hung. Composed as a pair
- * here rather than chosen between, because which one writes is a question about
- * one line of output and is answered where that line is written.
+ * neither the bytes nor the notes, so it gets what the adapter was able to
+ * understand of the session instead — the thinking, the commands, the agent's
+ * own messages ({@see ActivitySink}) — and, from an agent that reports nothing
+ * of the kind, a line every half-minute saying how long the attempt has been
+ * going and how much has arrived ({@see ProgressSink}). Composed as a set here
+ * rather than chosen between, because which one writes is a question about one
+ * line of output and is answered where that line is written.
  */
 final class AttemptLog implements OutputSink
 {
@@ -69,7 +71,12 @@ final class AttemptLog implements OutputSink
         return new self(
             $terminal === null
                 ? Sinks::of($file)
-                : Sinks::of(new TerminalSink($terminal), new ProgressSink($terminal), $file),
+                : Sinks::of(
+                    new TerminalSink($terminal),
+                    new ActivitySink($terminal),
+                    new ProgressSink($terminal),
+                    $file,
+                ),
             $file,
         );
     }
@@ -82,7 +89,7 @@ final class AttemptLog implements OutputSink
         return new self(
             $terminal === null
                 ? Sinks::none()
-                : Sinks::of(new TerminalSink($terminal), new ProgressSink($terminal)),
+                : Sinks::of(new TerminalSink($terminal), new ActivitySink($terminal), new ProgressSink($terminal)),
             null,
         );
     }
@@ -136,6 +143,11 @@ final class AttemptLog implements OutputSink
     public function note(string $line): void
     {
         $this->sinks->note($line);
+    }
+
+    public function activity(Activity $activity): void
+    {
+        $this->sinks->activity($activity);
     }
 
     public function close(): void

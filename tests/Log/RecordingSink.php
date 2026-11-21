@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Celyes\RalphPhp\Tests\Log;
 
+use Celyes\RalphPhp\Log\Activity;
+use Celyes\RalphPhp\Log\ActivityKind;
 use Celyes\RalphPhp\Log\OutputSink;
 use Celyes\RalphPhp\Log\OutputStream;
 
@@ -28,6 +30,11 @@ final class RecordingSink implements OutputSink
      */
     public array $notes = [];
 
+    /**
+     * @var list<Activity>
+     */
+    public array $activities = [];
+
     public int $closes = 0;
 
     /**
@@ -50,6 +57,11 @@ final class RecordingSink implements OutputSink
     public function note(string $line): void
     {
         $this->notes[] = $line;
+    }
+
+    public function activity(Activity $activity): void
+    {
+        $this->activities[] = $activity;
     }
 
     public function close(): void
@@ -79,6 +91,32 @@ final class RecordingSink implements OutputSink
     public function byteCountOf(OutputStream $stream): int
     {
         return strlen($this->textOf($stream));
+    }
+
+    /**
+     * The activities of one kind that were reported, in order.
+     *
+     * @return list<Activity>
+     */
+    public function activitiesOf(ActivityKind $kind): array
+    {
+        return array_values(array_filter(
+            $this->activities,
+            static fn (Activity $activity): bool => $activity->is($kind),
+        ));
+    }
+
+    /**
+     * The text of each activity of one kind.
+     *
+     * @return list<string>
+     */
+    public function activityTextOf(ActivityKind $kind): array
+    {
+        return array_map(
+            static fn (Activity $activity): string => $activity->text(),
+            $this->activitiesOf($kind),
+        );
     }
 
     /**
