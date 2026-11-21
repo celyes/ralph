@@ -419,13 +419,14 @@ final class ConsoleLinesThroughTheLoopTest extends TestCase
     /**
      * The blank lines between the pieces of a run's own account.
      *
-     * Section K, item 3 from the user's side: the quiet run says four things —
-     * which run this is, which task it took on, what happened to it, and why
-     * it ended with what to do next — and each of them is a piece of output
-     * with a blank line after it, so that none of them is read as the
-     * continuation of the one above. Asserted as the paragraphs the output
-     * divides into rather than as substrings, because the claim is about the
-     * spacing and a substring assertion would pass whatever the spacing was.
+     * Section K, item 3 from the user's side: the quiet run says five things —
+     * which run this is, which task it took on, how far through its own work
+     * it got, what happened to the task, and why it ended with what to do next
+     * — and each of them is a piece of output with a blank line after it, so
+     * that none of them is read as the continuation of the one above. Asserted
+     * as the paragraphs the output divides into rather than as substrings,
+     * because the claim is about the spacing and a substring assertion would
+     * pass whatever the spacing was.
      */
     #[Test]
     public function a_quiet_run_puts_a_blank_line_after_each_thing_it_says(): void
@@ -440,17 +441,23 @@ final class ConsoleLinesThroughTheLoopTest extends TestCase
         $paragraphs = self::paragraphsOf($result->standardOutput);
         $identifier = TaskId::fromDescription(self::TASK)->value();
 
-        self::assertCount(4, $paragraphs, 'The run\'s account was not divided as expected: ' . $result->describe());
+        self::assertCount(5, $paragraphs, 'The run\'s account was not divided as expected: ' . $result->describe());
         self::assertStringContainsString('processing pending tasks', $paragraphs[0], $result->describe());
         self::assertStringContainsString($identifier . ' ' . self::TASK, $paragraphs[1], $result->describe());
-        self::assertStringContainsString($identifier . ' completed', $paragraphs[2], $result->describe());
-        self::assertStringContainsString('1 of 1 tasks completed', $paragraphs[3], $result->describe());
+        self::assertStringContainsString('waiting for the agent', $paragraphs[2], $result->describe());
+        self::assertStringContainsString($identifier . ' completed', $paragraphs[3], $result->describe());
+        self::assertStringContainsString('1 of 1 tasks completed', $paragraphs[4], $result->describe());
+
+        // The phases the attempt went through are one piece of output of four
+        // lines, for the same reason the run's ending is one piece of two: a
+        // blank line goes between *things said*, not between lines.
+        self::assertStringContainsString('preparing the context', $paragraphs[2], $result->describe());
+        self::assertStringContainsString('checking the task off', $paragraphs[2], $result->describe());
 
         // The run's ending is one piece of output of two lines: the figures and
         // the action they leave the user with belong together, which is the
-        // half of the item that is not spacing — a blank line between *things
-        // said*, not between lines.
-        self::assertStringContainsString('next: ', $paragraphs[3], $result->describe());
+        // half of the item that is not spacing.
+        self::assertStringContainsString('next: ', $paragraphs[4], $result->describe());
     }
 
     /**

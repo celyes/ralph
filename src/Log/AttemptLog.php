@@ -28,6 +28,16 @@ use Celyes\RalphPhp\Tasks\TaskGeneration;
  * streams a worker without a task to file it under — and the tests of this
  * behaviour — do not, and {@see self::toTerminal()} is that case rather than a
  * null nobody checks for.
+ *
+ * **The terminal is two sinks, and exactly one of them speaks.** How much a run
+ * prints is PROJECT.md section K, item 2, and the two answers to it are both
+ * about this output. A verbose run is shown the worker's bytes as they arrive
+ * ({@see TerminalSink}) and needs nothing said about them. A quiet run is shown
+ * neither the bytes nor the notes, so a line every half-minute saying how long
+ * the attempt has been going and how much has arrived ({@see ProgressSink}) is
+ * what stands between it and a terminal that looks hung. Composed as a pair
+ * here rather than chosen between, because which one writes is a question about
+ * one line of output and is answered where that line is written.
  */
 final class AttemptLog implements OutputSink
 {
@@ -57,7 +67,9 @@ final class AttemptLog implements OutputSink
         $file = $logs->openAgentLog($generation, $attempt);
 
         return new self(
-            $terminal === null ? Sinks::of($file) : Sinks::of(new TerminalSink($terminal), $file),
+            $terminal === null
+                ? Sinks::of($file)
+                : Sinks::of(new TerminalSink($terminal), new ProgressSink($terminal), $file),
             $file,
         );
     }
@@ -67,7 +79,12 @@ final class AttemptLog implements OutputSink
      */
     public static function toTerminal(?Output $terminal): self
     {
-        return new self($terminal === null ? Sinks::none() : Sinks::of(new TerminalSink($terminal)), null);
+        return new self(
+            $terminal === null
+                ? Sinks::none()
+                : Sinks::of(new TerminalSink($terminal), new ProgressSink($terminal)),
+            null,
+        );
     }
 
     /**
