@@ -45,7 +45,7 @@ through four phases, and the run names each one as it enters it:
 | Phase | What happens | Who does the work |
 | --- | --- | --- |
 | **preparing** | The briefing is assembled: the task, your context file, and notes from earlier attempts. | Ralph PHP |
-| **executing** | The agent is started in your project directory with the briefing on its standard input. Its output goes to the task's log, and to your terminal as well under `--verbose`. | the agent |
+| **executing** | The agent is started in your project directory with the briefing on its standard input. Its output goes to the task's log; your terminal is shown what it is doing as it does it, and the whole feed as well under `--verbose`. | the agent |
 | **verifying** | Your `checks` commands are run in the same directory, by Ralph PHP rather than by the agent. Each command's output, exit code and duration are recorded. | Ralph PHP |
 | **finalizing** | The task's checkbox is ticked in `.ralph/tasks.md`. | Ralph PHP |
 
@@ -339,10 +339,12 @@ project configuration. With neither, that setting decides; it is off by default.
 See [Bailing out of a run](#bailing-out-of-a-run).
 
 By default a run prints its own account of itself — a line for the run, a line
-for each task taken on, the phases of each attempt as it enters them and how
-long the agent has been going, what happened to the task, and why the run
-ended. Add `--verbose` to watch the agent work as well. Nothing is lost by
-leaving it off: [How much is printed](#how-much-is-printed).
+for each task taken on, the phases of each attempt as it enters them, what
+happened to the task, and why the run ended — and, inside the `executing` phase,
+what the agent is doing: that it is thinking, each tool it calls, each command
+it runs, and its own messages. Add `--verbose` for the whole session as it
+arrives instead. Nothing is lost by leaving it off:
+[How much is printed](#how-much-is-printed).
 
 ### `ralph status [--json]`
 
@@ -851,6 +853,18 @@ supports it, records the interruption, leaves whatever the agent had written
 exactly where it is, and releases ownership only once termination is confirmed.
 The run exits 130.
 
+**A stopped attempt is not a failed one.** It is recorded as `cancelled` and the
+pass as `interrupted`, which is a different thing from both an error and a
+timeout: nothing was wrong with the work and nothing about it passed, so the
+attempt stays retryable, none of the task's attempt budget is spent on your
+keystroke, and the next attempt is not handed your interruption as evidence of
+anything. This holds however the agent goes. A keyboard interrupt reaches every
+process in the terminal's foreground group, so the agent is usually killed by
+the same keystroke that stops the run and leaves behind the exit status of a
+signalled process — read as a verdict on its work, that would be a command that
+failed, and it is not one. What stopped an attempt is decided by whether a stop
+was asked for, not by which of the two noticed first.
+
 **`ralph resume`** continues from the phase the pass stopped in, and nothing
 earlier is repeated:
 
@@ -969,14 +983,15 @@ its own terms.
 
 ## How much is printed
 
-**By default, a run prints its own account of its own work.** One line saying
-which run this is, which agent it chose and where the choice came from; a line
-over each task it takes on; the four phases of the attempt as it enters them;
-a line saying what happened to that task, with the next action under it when
-there is one; and a line at the end saying why the run stopped. Plus every
-warning and every failure, which are printed however quietly a run was asked to
-go — a warning withheld is a warning that arrives after the damage. A two-task
-run is a screen you can read.
+**By default, a run prints its own account of its own work, and what the agent
+is doing while it does it.** One line saying which run this is, which agent it
+chose and where the choice came from; a line over each task it takes on; the
+four phases of the attempt as it enters them; what the agent is doing inside the
+`executing` phase; a line saying what happened to that task, with the next
+action under it when there is one; and a line at the end saying why the run
+stopped. Plus every warning and every failure, which are printed however quietly
+a run was asked to go — a warning withheld is a warning that arrives after the
+damage. A two-task run is a screen you can read.
 
 ```
 $ ralph run
@@ -986,8 +1001,20 @@ run-20261120-143012-6dbf6f: claude (adapter "claude", selected by the project co
 
   preparing the context
   waiting for the agent
-  still working: 30s, 31 lines of output
-  still working: 1m 0s, 78 lines of output
+  claude claude-sonnet-4-5 · session 1a2b3c4d
+  ✻ thinking…
+  I'll start by reading the import command and the tests around it.
+
+  ⏺ Read(src/Console/Command/ImportCommand.php)
+    ⎿ 1→<?php declare(strict_types=1); namespace App\Console\Command; use …
+  ╭─ Bash ─────────────────────────────────────────────────────────────────╮
+  │ make test ARGS='--filter=ImportCommandTest'                            │
+  ╰────────────────────────────────────────────────────────────────────────╯
+    ⎿ PASS Tests\Feature\Console\ImportCommandTest
+  The option is wired through and the tests pass.
+
+  ⏹ done · 7 turns · 42.1s · $0.1831
+
   running the configured checks
   checking the task off
 
@@ -997,6 +1024,7 @@ TASK-8CA4A94A completed: verified in the working tree
 
   preparing the context
   waiting for the agent
+  still working: 30s, 31 lines of output
   running the configured checks
   checking the task off
 
@@ -1009,22 +1037,55 @@ run-20261120-143012-6dbf6f: 2 of 2 tasks completed with claude, 0 remaining — 
 **Quiet is not silent.** Between a task's heading and its result there is an
 agent running for twenty minutes, and a terminal that said nothing over that
 stretch would be indistinguishable from a run that had hung. So a quiet run
-names the phase it is in — the same words `ralph status` uses — and, while a
-worker is producing output, adds a line every half-minute saying how long the
-attempt has been going and how much has arrived. Both numbers move while the
-work is healthy, which is what you are watching for; neither moves when it is
-not. A worker that has gone completely silent gets no such line, and that
-silence under `waiting for the agent` is the honest account of it — a verbose
-run has nothing more to say about such a worker either.
+names the phase it is in — the same words `ralph status` uses — and then says
+what the agent is doing as it does it: the session it opened, that it is
+thinking, each tool it calls and what came back, each message it writes, and how
+the session ended.
 
-**`-v`/`--verbose` prints everything else as well**: the agent's own output as
-it arrives, the `--- ` note for each step the package takes — the workspace,
-the invocation, each check and its verdict, the evidence behind a ticked box —
-the checks the run froze at its start, what a resumed run inherited, and a
-stack trace when a command fails unexpectedly. This is what you want when an
-agent seems to have hung, when you are deciding whether to stop a run, or when
-you are learning what the loop does. It is thousands of lines for a task that
-takes twenty minutes.
+**What it shows is the shape of the session, not its transcript.** A modern
+coding CLI reports itself as a machine format — one JSON object per line — and
+none of that reaches your terminal: the events are read, and what is printed is
+one line per tool call, the agent's own messages as it writes them, and a
+one-line excerpt of what each call returned. The whole feed is still in the
+attempt's log either way.
+
+**A command the agent runs is drawn in a box.** It is the one thing in a session
+that is not the agent's own business — everything else happens inside its
+session, while a command runs a program in your checkout — so it is set apart
+where you can find it in the scrollback without reading the prose around it:
+
+```
+  ╭─ Bash ─────────────────────────────────────────────────────────────────╮
+  │ php artisan migrate --database=testing                                 │
+  ╰────────────────────────────────────────────────────────────────────────╯
+```
+
+A command of several lines keeps the breaks it came with, because a heredoc
+re-flowed is no longer the thing that is about to run, and a line too long for
+the box is wrapped into it rather than hanging out of it. Nothing else is boxed.
+
+**An agent whose output cannot be read still gets a heartbeat.** The reading
+above is per adapter, and an agent that prints prose rather than events — Codex,
+as shipped — has no session shape to show. For those, a quiet run adds a line
+every half-minute saying how long the attempt has been going and how much has
+arrived. Both numbers move while the work is healthy, which is what you are
+watching for; neither moves when it is not. The beats stop as soon as something
+better is being said about an attempt, so you never get "still working: 184
+lines of output" in the middle of an account of the work. A worker that has gone
+completely silent gets no such line, and that silence under `waiting for the
+agent` is the honest account of it — a verbose run has nothing more to say about
+such a worker either.
+
+**`-v`/`--verbose` prints everything else as well**: the whole session as it
+arrives rather than the account of it above — every line of it, in order — the
+`--- ` note for each step the package takes — the workspace, the invocation,
+each check and its verdict, the evidence behind a ticked box — the checks the
+run froze at its start, what a resumed run inherited, and a stack trace when a
+command fails unexpectedly. The curated account is not repeated under it: the
+feed is already on the screen, and the same session told twice is harder to read
+than either telling. This is what you want when an agent seems to have hung,
+when you are deciding whether to stop a run, or when you are learning what the
+loop does. It is thousands of lines for a task that takes twenty minutes.
 
 The flag is read off the command line before anything is dispatched, so a
 usage error is reported in the form you asked for, and it works in a bundle:
@@ -1122,10 +1183,12 @@ given a newline the other one owed.
 
 Ralph PHP colours the lines it writes itself: the heading over each task a run
 takes on, the outcome of a task and of the run, the verdict of each preflight
-check, the state column of `ralph status`, and the subject of each `--- ` note
-in a run's progress output. Labels are dimmed so values stand out, and a blank
-line goes after everything the package says, so an agent's last line of output
-and the loop's next step never read as one block of text.
+check, the state column of `ralph status`, the subject of each `--- ` note
+in a run's progress output, and the lines that say what the agent is doing —
+the glyphs, the tool names and the box around a command, with the agent's own
+words left in the terminal's own colour. Labels are dimmed so values stand out,
+and a blank line goes after everything the package says, so an agent's last
+line of output and the loop's next step never read as one block of text.
 
 A coloured line is the same line with sequences around its fields: removing
 them gives the plain output byte for byte, so nothing is said in colour alone.
@@ -1188,8 +1251,8 @@ safe to run.
 | --- | --- | --- |
 | Exit 78 from `ralph preflight` | Something about the machine or project is missing: a PHP extension, the agent's executable, its credentials, a check command that cannot be resolved. | The report names each failing check and what it expected. Fix those and run `preflight` again — it writes nothing and starts no agent. |
 | A configuration file is refused for an unknown setting `git` or `workspace` | Those sections were removed with the package's Git work. | Delete them. Branches, commits, pushes and worktree preparation are gone; see [Your checkout](#your-checkout). |
-| A run says `waiting for the agent` and the lines under it keep arriving | The agent is working. By default a run shows its own account of itself — its phases, and how long the attempt has been going — rather than the agent's output. | Nothing is wrong: the task's result arrives when the agent finishes. Run with `--verbose` to watch the agent instead, or read `ralph logs TASK-ID` afterwards. |
-| A run says `waiting for the agent` and then nothing at all for a long time | The agent has printed nothing since it started, so there is nothing to report about it. It may be thinking, or it may be stuck. | `ralph logs TASK-ID` from another terminal shows whatever did arrive. The attempt's own timeout (`limits.task_timeout`) ends it either way; Ctrl+C stops it now and `ralph resume` picks the task up. |
+| A run says `waiting for the agent` and the lines under it keep arriving | The agent is working, and a quiet run shows what it is doing — thinking, the tools it calls, the commands it runs, its own messages — rather than its whole output. | Nothing is wrong: the task's result arrives when the agent finishes. Run with `--verbose` for the whole session instead, or read `ralph logs TASK-ID` afterwards. |
+| A run says `waiting for the agent` and then nothing at all for a long time | The agent has printed nothing since it started, so there is nothing to report about it. It may be thinking, or it may be stuck. | `ralph logs TASK-ID` from another terminal shows whatever did arrive. The attempt's own timeout (`limits.task_timeout`) ends it either way; Ctrl+C stops it now — the attempt is recorded as cancelled rather than failed — and `ralph resume` picks the task up. |
 | A run says another runner holds the repository | A `ralph run` is in progress elsewhere, or one died without releasing the lock. | Look for the other process. Once it is gone, `ralph resume` confirms it has stopped and takes over. |
 | A task is left unchecked and the run carried on | Its checks kept failing, or its attempt allowance ran out. | `ralph logs TASK-ID` shows each attempt and each check. Fix the task's wording or your check, then `ralph retry TASK-ID`. |
 | Exit 75, "waiting for a person" | The agent asked a question, or the task changed under the pass that was working on it. | Read the last line of output and `ralph logs TASK-ID`. Resolve the question — usually by rewriting the task to answer it — then `ralph retry TASK-ID`. |
